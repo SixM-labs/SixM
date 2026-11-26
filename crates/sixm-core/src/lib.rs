@@ -16,5 +16,7 @@
 mod runtime;
 mod value;
 
-pub use runtime::{EventContext, EventSource, Host, ScriptError, ScriptRuntime};
+pub use runtime::{
+    ClientTarget, EventContext, EventSource, Host, PlayerInfo, ScriptError, ScriptRuntime,
+};
 pub use value::{FuncRef, ResourceName, Value};

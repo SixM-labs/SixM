@@ -1,11 +1,13 @@
-//! The server: console dispatch, the frame loop and shutdown.
+//! The server: console dispatch, networking, the frame loop and shutdown.
 
+use std::net::SocketAddr;
 use std::rc::Rc;
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use tracing::{info, warn};
+use sixm_net::{NetError, NetEvent};
+use tracing::{error, info, warn};
 
 use crate::commands;
 use crate::manager::ResourceManager;
@@ -15,15 +17,17 @@ use crate::manager::ResourceManager;
 const MAX_QUEUED_COMMANDS: usize = 1000;
 
 /// Input for the server loop.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Input {
     /// A console line, read from stdin.
     Line(String),
     /// Stop the server. The text is shown in the log.
     Quit(String),
+    /// Something that happened on the network. Sent by the network thread.
+    Net(NetEvent),
 }
 
-/// A SixM server: the resource manager, the console and the frame loop.
+/// A SixM server: the resource manager, the console, networking and the frame loop.
 #[derive(Debug)]
 pub struct Server {
     manager: Rc<ResourceManager>,
@@ -67,8 +71,39 @@ impl Server {
         self.drain_commands();
     }
 
-    /// Runs the console and the frame loop until a quit is requested, then
-    /// stops every resource.
+    /// Binds the listening socket and sends its events to `input`, the sending
+    /// end of the channel the loop reads. The address comes from
+    /// `endpoint_add_udp`, and the player limit and server name are read from
+    /// their convars. Returns the bound address, with the port resolved.
+    ///
+    /// [`run`](Self::run) calls this before its first frame. Call it yourself
+    /// only when driving the server with [`handle`](Self::handle).
+    pub fn start_network(&self, input: Sender<Input>) -> Result<SocketAddr, NetError> {
+        self.manager.start_network(input)
+    }
+
+    /// Processes one input: a console line, a network event or a quit request,
+    /// then the commands it queued. The loop calls this for every input.
+    pub fn handle(&self, input: Input) {
+        match input {
+            Input::Line(line) => self.execute(&line),
+            Input::Net(event) => {
+                self.manager.handle_net(event);
+                self.drain_commands();
+            }
+            Input::Quit(reason) => {
+                info!("Shutting down: {reason}");
+                self.manager.request_quit();
+            }
+        }
+    }
+
+    /// Starts the network, then runs the console and the frame loop until a
+    /// quit is requested, then stops every resource and the network.
+    ///
+    /// `sender` is the sending end of `input`. The network needs its own clone,
+    /// so that network events wake the loop at once. If the network cannot
+    /// start, the error is logged and the server runs without it.
     ///
     /// The loop sleeps on `input` until the earlier of the next frame and the
     /// next timer. A timer that comes due between frames runs at once, while
@@ -76,7 +111,11 @@ impl Server {
     /// If the server falls more than a frame behind, it resynchronises rather
     /// than running frames back to back. Once `input` is disconnected the loop
     /// keeps running without console input.
-    pub fn run(&self, input: &Receiver<Input>) {
+    pub fn run(&self, sender: &Sender<Input>, input: &Receiver<Input>) {
+        match self.start_network(sender.clone()) {
+            Ok(addr) => info!("Listening on {addr}"),
+            Err(err) => error!("network is disabled: {err}"),
+        }
         let mut next_frame = Instant::now();
         let mut input_open = true;
         while !self.manager.quit_requested() {
@@ -103,11 +142,7 @@ impl Server {
                 continue;
             }
             match input.recv_timeout(wait) {
-                Ok(Input::Line(line)) => self.execute(&line),
-                Ok(Input::Quit(reason)) => {
-                    info!("Shutting down: {reason}");
-                    self.manager.request_quit();
-                }
+                Ok(message) => self.handle(message),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => input_open = false,
             }
@@ -115,16 +150,24 @@ impl Server {
         self.shutdown();
     }
 
-    /// Stops every running resource, last started first, and logs `Server stopped`.
+    /// Stops every running resource, last started first, then the network, and
+    /// logs `Server stopped`. Players are not told one by one: the resources
+    /// stop first, and the network closes every connection on the way out.
     pub fn shutdown(&self) {
         self.manager.stop_all();
+        self.manager.stop_network();
         info!("Server stopped");
     }
 
-    /// Runs queued commands until the queue is empty, up to [`MAX_QUEUED_COMMANDS`].
+    /// Runs queued commands and applies queued kicks until both queues are
+    /// empty, up to [`MAX_QUEUED_COMMANDS`] commands.
     fn drain_commands(&self) {
         let mut ran = 0;
-        while let Some(line) = self.manager.pop_command() {
+        loop {
+            self.manager.apply_drops();
+            let Some(line) = self.manager.pop_command() else {
+                return;
+            };
             if ran == MAX_QUEUED_COMMANDS {
                 let dropped = self.manager.discard_commands() + 1;
                 warn!("more than {MAX_QUEUED_COMMANDS} commands queued at once; dropped {dropped}");

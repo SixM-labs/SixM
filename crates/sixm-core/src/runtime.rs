@@ -10,8 +10,28 @@ pub enum EventSource {
     /// Triggered on this server (script, console or the server itself).
     /// FiveM scripts see `source == ""` for these.
     Local,
-    /// Triggered by a connected player (the player's server id).
+    /// Sent by a connected player (the player's server id). Only handlers
+    /// registered with `RegisterNetEvent` receive these.
     Net(u32),
+    /// Triggered by the server about a player, such as `playerJoining` or
+    /// `playerDropped`. `source` is the player's id, and the event reaches
+    /// every handler, because the server itself is trusted.
+    Player(u32),
+}
+
+/// Receiver of a client event. Scripts pass `-1` for [`ClientTarget::All`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientTarget {
+    Player(u32),
+    All,
+}
+
+/// What the server knows about a connected player.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerInfo {
+    pub name: String,
+    /// Remote address, e.g. `203.0.113.7:51234`.
+    pub endpoint: String,
 }
 
 /// Shared state of one event dispatch, visible to every handler it reaches.
@@ -94,6 +114,25 @@ pub trait Host {
 
     /// Root folder of a known resource (running or not).
     fn resource_path(&self, resource: &str) -> Option<PathBuf>;
+
+    /// Sends an event to one connected player or to all of them. Fails when a
+    /// value cannot cross the network (function references).
+    fn trigger_client_event(
+        &self,
+        event: &str,
+        target: ClientTarget,
+        args: &[Value],
+    ) -> Result<(), ScriptError>;
+
+    /// Server ids of the connected players, in join order.
+    fn players(&self) -> Vec<u32>;
+
+    /// Name and network endpoint of a connected player.
+    fn player_info(&self, player: u32) -> Option<PlayerInfo>;
+
+    /// Disconnects a player with a reason shown to them. Takes effect after
+    /// the current script call returns.
+    fn drop_player(&self, player: u32, reason: &str);
 }
 
 /// One running resource inside one scripting language.

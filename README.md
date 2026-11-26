@@ -8,8 +8,8 @@ The core does not depend on any particular game. Game support is planned as
 separate adapters, starting with GTA VI once a PC version is released.
 
 > [!WARNING]
-> SixM is in early development. Right now there is only the server core; there
-> is no networking or game client yet. See [Status](#status).
+> SixM is in early development. The server, scripting and networking work, but
+> there is no game client yet. See [Status](#status).
 
 ## Goals
 
@@ -34,7 +34,9 @@ separate adapters, starting with GTA VI once a PC version is released.
 | Resource discovery, `fxmanifest.lua`, dependencies (`sixm-resources`) | ✅ done |
 | Lua runtime with FiveM-style API (`sixm-lua`) | ✅ done |
 | Server binary: `server.cfg`, console, resource manager (`sixm-server`) | ✅ done |
-| Networking (players, net events, state bags) | ⏳ planned |
+| Networking: QUIC transport and protocol (`sixm-net`) | ✅ done |
+| Players, net events and client events (`sixm-server`, `sixm-lua`) | ✅ done |
+| State bags | ⏳ planned |
 | Entity sync | ⏳ planned |
 | Game client and GTA VI adapter | ⏳ planned (needs a PC release) |
 
@@ -77,8 +79,14 @@ cargo run --release -p sixm-server
 ```
 
 The console accepts `start`, `stop`, `restart`, `ensure`, `refresh`, `set`,
-`exec`, `help` and `quit`, plus every command registered with
-`RegisterCommand`.
+`exec`, `endpoint_add_udp`, `players`, `help` and `quit`, plus every command
+registered with `RegisterCommand`.
+
+A test client can connect while the example server runs:
+
+```sh
+cargo run -p sixm-net --example bot -- 127.0.0.1:30120 Tester hello:ping hi
+```
 
 ## Writing resources
 
@@ -115,6 +123,34 @@ Differences from FiveM:
 - `io` is not available. Use `LoadResourceFile` and `SaveResourceFile`
   instead.
 - `load` only accepts source text, not precompiled bytecode.
+
+## Players and network
+
+The server listens on `endpoint_add_udp` (default `0.0.0.0:30120`) over QUIC.
+`sv_maxclients` (default 32, between 1 and 1024) caps the players, and
+`sv_hostname` is the name shown when they connect. SixM speaks UDP only, so
+`endpoint_add_tcp` is accepted as an alias.
+
+Each player gets a server id, counting up from 1 and never reused while the
+server runs. Scripts see the connection lifecycle as events:
+
+- `playerConnecting(name, setKickReason)` runs before a player is admitted.
+  Call `setKickReason(text)` or `CancelEvent()` to refuse the connection. The
+  function is valid only during this event.
+- `playerJoining` runs once the player is admitted.
+- `playerDropped(reason)` runs when the player leaves, whether they
+  disconnected or were kicked.
+
+In all three, `source` is the player's id, as in FiveM.
+
+The connection is encrypted, but clients do not verify the server's
+certificate yet, so a man-in-the-middle attack is possible. Certificate
+pinning is planned.
+
+Events sent by players reach only handlers registered with `RegisterNetEvent`.
+Use `TriggerClientEvent(name, id, ...)` to send to one player, or `-1` for
+everyone. Also available: `GetPlayers`, `GetPlayerName`, `GetPlayerEndpoint`
+and `DropPlayer`. The console command `players` lists the connected players.
 
 ## Contributing
 

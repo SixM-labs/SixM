@@ -8,13 +8,16 @@ use std::rc::{Rc, Weak};
 use std::time::Instant;
 
 use sixm_core::{
-    EventContext, EventSource, FuncRef, Host, ResourceName, ScriptError, ScriptRuntime, Value,
+    ClientTarget, EventContext, EventSource, FuncRef, Host, PlayerInfo, ResourceName, ScriptError,
+    ScriptRuntime, Value,
 };
 use sixm_lua::LuaRuntime;
 use sixm_resources::{Catalog, DependencyError, ResourceError, ScanIssue};
 use tracing::{error, info, warn};
 
 use crate::convars::Convars;
+use crate::host_functions::{HostFunctions, is_host};
+use crate::network::Network;
 
 /// Why a resource operation did not complete.
 #[derive(Debug, thiserror::Error)]
@@ -63,7 +66,7 @@ pub struct ResourceManager {
     me: Weak<Self>,
     catalog: RefCell<Catalog>,
     scanned: Cell<bool>,
-    convars: RefCell<Convars>,
+    pub(crate) convars: RefCell<Convars>,
     /// Running resources in start order.
     running: RefCell<Vec<Rc<LuaRuntime>>>,
     /// The running runtimes as one shared slice, rebuilt when `running` changes.
@@ -75,6 +78,10 @@ pub struct ResourceManager {
     /// Console lines queued by `ExecuteCommand`, run after the current call.
     queued: RefCell<VecDeque<String>>,
     quit: Cell<bool>,
+    /// The listening socket, connected players and pending kicks.
+    pub(crate) network: Network,
+    /// Functions the server offers to scripts, such as `setKickReason`.
+    pub(crate) host_functions: RefCell<HostFunctions>,
 }
 
 impl ResourceManager {
@@ -92,6 +99,8 @@ impl ResourceManager {
             commands: RefCell::default(),
             queued: RefCell::default(),
             quit: Cell::new(false),
+            network: Network::default(),
+            host_functions: RefCell::default(),
         })
     }
 
@@ -310,7 +319,7 @@ impl ResourceManager {
 
     /// Delivers `event` to every running runtime that handles it, in start
     /// order. Returns whether a handler canceled it.
-    fn dispatch(&self, event: &str, source: EventSource, args: &[Value]) -> bool {
+    pub(crate) fn dispatch(&self, event: &str, source: EventSource, args: &[Value]) -> bool {
         let snapshot = self.snapshot();
         let ctx = EventContext::new();
         for runtime in snapshot.iter() {
@@ -457,6 +466,14 @@ impl Host for ResourceManager {
     }
 
     fn call_ref(&self, func: &FuncRef, args: &[Value]) -> Result<Vec<Value>, ScriptError> {
+        if is_host(func) {
+            let function = self
+                .host_functions
+                .borrow()
+                .get(func)
+                .ok_or_else(|| ScriptError::StaleRef(func.clone()))?;
+            return function(args);
+        }
         let runtime = self
             .runtime_of(func)
             .ok_or_else(|| ScriptError::StaleRef(func.clone()))?;
@@ -464,11 +481,18 @@ impl Host for ResourceManager {
     }
 
     fn retain_ref(&self, func: &FuncRef) -> bool {
+        if is_host(func) {
+            return self.host_functions.borrow().contains(func);
+        }
         self.runtime_of(func)
             .is_some_and(|runtime| runtime.retain_ref(func.id))
     }
 
     fn release_ref(&self, func: &FuncRef) {
+        if is_host(func) {
+            // Host functions are removed by the server, not released by holders.
+            return;
+        }
         if let Some(runtime) = self.runtime_of(func) {
             runtime.release_ref(func.id);
         }
@@ -511,5 +535,26 @@ impl Host for ResourceManager {
             .borrow()
             .get(resource)
             .map(|info| info.root.clone())
+    }
+
+    fn trigger_client_event(
+        &self,
+        event: &str,
+        target: ClientTarget,
+        args: &[Value],
+    ) -> Result<(), ScriptError> {
+        self.send_client_event(event, target, args)
+    }
+
+    fn players(&self) -> Vec<u32> {
+        self.player_ids()
+    }
+
+    fn player_info(&self, player: u32) -> Option<PlayerInfo> {
+        self.player_details(player)
+    }
+
+    fn drop_player(&self, player: u32, reason: &str) {
+        self.queue_drop(player, reason);
     }
 }

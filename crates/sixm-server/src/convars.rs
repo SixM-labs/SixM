@@ -7,6 +7,22 @@ use std::path::PathBuf;
 const RESOURCES_PATH: &str = "sixm_resourcesPath";
 /// Convar naming the frame rate of the main loop.
 const TICK_RATE: &str = "sixm_tickRate";
+/// Convar naming the address the server listens on, e.g. `0.0.0.0:30120`.
+pub(crate) const ENDPOINT: &str = "endpoint_add_udp";
+/// Convar naming the most players accepted at once.
+const MAX_CLIENTS: &str = "sv_maxclients";
+/// Convar naming the server, shown to players when they connect.
+const SERVER_NAME: &str = "sv_hostname";
+
+/// Listen address when `endpoint_add_udp` is not set.
+const DEFAULT_ENDPOINT: &str = "0.0.0.0:30120";
+/// Player limit when `sv_maxclients` is not set.
+const DEFAULT_MAX_CLIENTS: i64 = 32;
+/// Smallest and largest player limit the server honours.
+const MIN_CLIENTS: i64 = 1;
+const MAX_CLIENTS_LIMIT: i64 = 1024;
+/// Server name when `sv_hostname` is not set.
+const DEFAULT_SERVER_NAME: &str = "SixM Server";
 
 /// The convar store. Names are case-insensitive and kept in lower case.
 #[derive(Debug)]
@@ -22,6 +38,9 @@ impl Convars {
         };
         convars.set(RESOURCES_PATH, "resources");
         convars.set(TICK_RATE, "20");
+        convars.set(ENDPOINT, DEFAULT_ENDPOINT);
+        convars.set(MAX_CLIENTS, &DEFAULT_MAX_CLIENTS.to_string());
+        convars.set(SERVER_NAME, DEFAULT_SERVER_NAME);
         convars
     }
 
@@ -49,5 +68,25 @@ impl Convars {
         self.get(TICK_RATE)
             .and_then(|value| value.trim().parse::<i64>().ok())
             .map_or(20, |rate| rate.clamp(1, 1000).unsigned_abs())
+    }
+
+    /// The address to listen on, as written. It is parsed when the network starts.
+    pub(crate) fn endpoint(&self) -> &str {
+        self.get(ENDPOINT).unwrap_or(DEFAULT_ENDPOINT)
+    }
+
+    /// The name sent to players in the welcome message.
+    pub(crate) fn server_name(&self) -> &str {
+        self.get(SERVER_NAME).unwrap_or(DEFAULT_SERVER_NAME)
+    }
+
+    /// The most players accepted at once. Clamped to `1..=1024`; a value that
+    /// is not a number means the default of 32.
+    pub(crate) fn max_clients(&self) -> usize {
+        let value = self
+            .get(MAX_CLIENTS)
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(DEFAULT_MAX_CLIENTS);
+        usize::try_from(value.clamp(MIN_CLIENTS, MAX_CLIENTS_LIMIT)).unwrap_or(1)
     }
 }

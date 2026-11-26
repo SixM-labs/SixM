@@ -13,6 +13,7 @@ license = "GPL-3.0-only"
 sixm-core = { path = "crates/sixm-core" }
 sixm-resources = { path = "crates/sixm-resources" }
 sixm-lua = { path = "crates/sixm-lua" }
+sixm-net = { path = "crates/sixm-net" }
 
 mlua = { version = "0.12.3", features = ["lua54", "vendored"] }
 globset = "0.4.22"
@@ -21,6 +22,12 @@ thiserror = "2.0.21"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 serde_json = "1.0.154"
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = "0.14.10"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+postcard = { version = "1.2.0", features = ["use-std"] }
+serde = { version = "1.0.229", features = ["derive"] }
 ctrlc = { version = "3.5.3", features = ["termination"] }
 tempfile = "3.27.0"
 

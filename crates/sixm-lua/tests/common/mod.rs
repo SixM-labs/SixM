@@ -11,7 +11,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use sixm_core::{
-    EventContext, EventSource, FuncRef, Host, ResourceName, ScriptError, ScriptRuntime, Value,
+    ClientTarget, EventContext, EventSource, FuncRef, Host, PlayerInfo, ResourceName, ScriptError,
+    ScriptRuntime, Value,
 };
 use sixm_lua::LuaRuntime;
 use tempfile::TempDir;
@@ -28,6 +29,12 @@ pub struct TestHost {
     pub released: RefCell<Vec<FuncRef>>,
     /// Lines queued by `ExecuteCommand`.
     pub commands: RefCell<Vec<String>>,
+    /// Connected players as `(id, info)`, in join order. Tests set this directly.
+    pub players: RefCell<Vec<(u32, PlayerInfo)>>,
+    /// Client events sent, as `(event, target, args)`, in order.
+    pub client_events: RefCell<Vec<(String, ClientTarget, Vec<Value>)>>,
+    /// Players dropped, as `(id, reason)`, in order.
+    pub dropped: RefCell<Vec<(u32, String)>>,
 }
 
 impl TestHost {
@@ -122,6 +129,51 @@ impl Host for TestHost {
 
     fn resource_path(&self, resource: &str) -> Option<PathBuf> {
         self.roots.borrow().get(resource).cloned()
+    }
+
+    fn trigger_client_event(
+        &self,
+        event: &str,
+        target: ClientTarget,
+        args: &[Value],
+    ) -> Result<(), ScriptError> {
+        if args.iter().any(contains_func_ref) {
+            return Err(ScriptError::Runtime(
+                "function references cannot be sent to clients".to_owned(),
+            ));
+        }
+        self.client_events
+            .borrow_mut()
+            .push((event.to_owned(), target, args.to_vec()));
+        Ok(())
+    }
+
+    fn players(&self) -> Vec<u32> {
+        self.players.borrow().iter().map(|(id, _)| *id).collect()
+    }
+
+    fn player_info(&self, player: u32) -> Option<PlayerInfo> {
+        self.players
+            .borrow()
+            .iter()
+            .find(|(id, _)| *id == player)
+            .map(|(_, info)| info.clone())
+    }
+
+    fn drop_player(&self, player: u32, reason: &str) {
+        self.dropped.borrow_mut().push((player, reason.to_owned()));
+    }
+}
+
+/// Whether a function reference is anywhere inside `value`.
+fn contains_func_ref(value: &Value) -> bool {
+    match value {
+        Value::FuncRef(_) => true,
+        Value::Array(items) => items.iter().any(contains_func_ref),
+        Value::Map(pairs) => pairs
+            .iter()
+            .any(|(key, item)| contains_func_ref(key) || contains_func_ref(item)),
+        _ => false,
     }
 }
 

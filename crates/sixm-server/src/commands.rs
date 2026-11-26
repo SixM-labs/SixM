@@ -2,19 +2,34 @@
 //! and convars.
 
 use std::fs;
+use std::net::SocketAddr;
 
 use sixm_core::{Host, Value};
 use tracing::{error, info, warn};
 
 use crate::config::tokenize;
+use crate::convars::ENDPOINT;
 use crate::manager::{ManagerError, ResourceManager};
 
 /// Deepest `exec` nesting. A file that includes itself stops here.
 const MAX_EXEC_DEPTH: usize = 16;
 
 /// Built-in command names, as listed by `help`.
-const BUILT_IN: [&str; 11] = [
-    "ensure", "exec", "help", "quit", "refresh", "restart", "set", "setr", "sets", "start", "stop",
+const BUILT_IN: [&str; 14] = [
+    "endpoint_add_tcp",
+    "endpoint_add_udp",
+    "ensure",
+    "exec",
+    "help",
+    "players",
+    "quit",
+    "refresh",
+    "restart",
+    "set",
+    "setr",
+    "sets",
+    "start",
+    "stop",
 ];
 
 /// Tokenizes `line` and runs it. `depth` is the number of `exec` files around it.
@@ -42,6 +57,9 @@ pub(crate) fn run_words(manager: &ResourceManager, words: &[String], raw: &str, 
             manager.ensure(resource)
         }),
         "refresh" => manager.refresh(),
+        "endpoint_add_udp" => endpoint(manager, args, false),
+        "endpoint_add_tcp" => endpoint(manager, args, true),
+        "players" => players(manager),
         "quit" => quit(manager, args),
         "exec" => exec(manager, args, depth),
         "help" => help(manager),
@@ -105,6 +123,39 @@ fn report(result: Result<(), ManagerError>) {
             ManagerError::Canceled(_) | ManagerError::NotRunning(_) => warn!("{err}"),
             _ => error!("{err}"),
         }
+    }
+}
+
+/// `endpoint_add_udp <ip:port>`: sets the address the server listens on. It
+/// applies at the next start. `endpoint_add_tcp` is an alias, since SixM only
+/// speaks UDP.
+fn endpoint(manager: &ResourceManager, args: &[String], alias: bool) {
+    if alias {
+        info!("SixM uses UDP only; endpoint_add_tcp is treated as endpoint_add_udp");
+    }
+    let Some(address) = args.first() else {
+        warn!("usage: endpoint_add_udp <ip:port>");
+        return;
+    };
+    match address.parse::<SocketAddr>() {
+        Ok(_) => {
+            manager.set_convar(ENDPOINT, address);
+            info!("Listening address set to {address}; it applies at the next start");
+        }
+        Err(err) => error!("endpoint_add_udp: `{address}` is not an ip:port address: {err}"),
+    }
+}
+
+/// `players`: lists the connected players with their server id, name and endpoint.
+fn players(manager: &ResourceManager) {
+    let players = manager.player_list();
+    if players.is_empty() {
+        info!("No players are connected");
+        return;
+    }
+    info!("{} player(s) connected", players.len());
+    for (id, player) in players {
+        info!("{id:>5}  {}  {}", player.name, player.endpoint);
     }
 }
 

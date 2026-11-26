@@ -8,7 +8,9 @@ mod commands;
 mod config;
 mod console;
 mod convars;
+mod host_functions;
 mod manager;
+mod network;
 mod server;
 
 pub use config::{ArgError, Invocation, TokenError, parse_args, tokenize};
