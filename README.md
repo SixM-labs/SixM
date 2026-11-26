@@ -159,9 +159,9 @@ and `DropPlayer`. The console command `players` lists the connected players.
 
 ## Contributing
 
-SixM is a clean-room implementation. Code from the FiveM repository must not
-be copied, even though it is public: most of it is not under an open-source
-license. Reimplementing concepts and API names is fine.
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first: SixM
+is a clean-room implementation, so code from FiveM must never be copied.
+Report security problems privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
