@@ -12,6 +12,7 @@
 mod client;
 mod connection;
 mod error;
+mod identity;
 mod protocol;
 mod ratelimit;
 mod server;
@@ -20,5 +21,6 @@ mod wire;
 
 pub use client::{ClientEvent, NetClient};
 pub use error::NetError;
+pub use identity::{Fingerprint, Identity, ParseFingerprintError};
 pub use protocol::PROTOCOL_VERSION;
 pub use server::{ConnectionId, NetEvent, NetServer, ServerConfig};

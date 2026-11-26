@@ -1,6 +1,6 @@
 //! TLS and QUIC configuration shared by the server and the client.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
@@ -9,11 +9,12 @@ use quinn::{
 };
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 
 use crate::error::NetError;
-use crate::protocol::{ALPN, IDLE_TIMEOUT, KEEP_ALIVE_INTERVAL, SERVER_NAME};
+use crate::identity::{Credentials, Fingerprint};
+use crate::protocol::{ALPN, IDLE_TIMEOUT, KEEP_ALIVE_INTERVAL};
 
 /// Longest close reason sent with a QUIC `CONNECTION_CLOSE`, in bytes.
 const MAX_CLOSE_REASON_LEN: usize = 512;
@@ -21,20 +22,14 @@ const MAX_CLOSE_REASON_LEN: usize = 512;
 /// Time allowed for the peer to report how a connection ended.
 pub(crate) const CLOSE_GRACE: Duration = Duration::from_secs(1);
 
-/// Builds the server endpoint configuration with a fresh self-signed
-/// certificate for `localhost`.
-pub(crate) fn server_config() -> Result<ServerConfig, NetError> {
-    let certified = rcgen::generate_simple_self_signed(vec![SERVER_NAME.to_owned()])
-        .map_err(|err| NetError::Tls(err.to_string()))?;
-    let cert = certified.cert.der().clone();
-    let key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(
-        certified.signing_key.serialize_der(),
-    ));
+/// Builds the server endpoint configuration for `credentials`.
+pub(crate) fn server_config(credentials: Credentials) -> Result<ServerConfig, NetError> {
+    let (certificate, key) = credentials.into_parts();
     let mut tls = rustls::ServerConfig::builder_with_provider(provider())
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|err| NetError::Tls(err.to_string()))?
         .with_no_client_auth()
-        .with_single_cert(vec![cert], key)
+        .with_single_cert(vec![certificate], key)
         .map_err(|err| NetError::Tls(err.to_string()))?;
     tls.alpn_protocols = vec![ALPN.to_vec()];
     let quic = QuicServerConfig::try_from(tls).map_err(|err| NetError::Tls(err.to_string()))?;
@@ -43,14 +38,15 @@ pub(crate) fn server_config() -> Result<ServerConfig, NetError> {
     Ok(config)
 }
 
-/// Builds the client configuration, which accepts any server certificate.
-pub(crate) fn client_config() -> Result<ClientConfig, NetError> {
-    let provider = provider();
-    let mut tls = rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
+/// Builds the client configuration that checks server certificates with
+/// `verifier`.
+pub(crate) fn client_config(verifier: &Arc<ServerVerifier>) -> Result<ClientConfig, NetError> {
+    let certificate_verifier: Arc<dyn ServerCertVerifier> = verifier.clone();
+    let mut tls = rustls::ClientConfig::builder_with_provider(Arc::clone(&verifier.provider))
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|err| NetError::Tls(err.to_string()))?
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(AcceptAnyCertificate { provider }))
+        .with_custom_certificate_verifier(certificate_verifier)
         .with_no_client_auth();
     tls.alpn_protocols = vec![ALPN.to_vec()];
     let quic = QuicClientConfig::try_from(tls).map_err(|err| NetError::Tls(err.to_string()))?;
@@ -73,27 +69,73 @@ fn transport() -> Result<TransportConfig, NetError> {
     Ok(config)
 }
 
-/// Certificate verifier that accepts any server certificate.
-///
-/// The handshake still checks that the server holds the private key of the
-/// certificate it presents, so the traffic is encrypted for that key. It does
-/// not authenticate the server: anyone can present their own certificate, so
-/// a man in the middle is possible. Certificate pinning is planned.
-#[derive(Debug)]
-pub(crate) struct AcceptAnyCertificate {
-    provider: Arc<CryptoProvider>,
+/// How a client decides whether to trust the server's certificate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Trust {
+    /// Accept any certificate. The handshake still proves that the server
+    /// holds the key of the certificate it presents, but nothing ties that
+    /// certificate to a known server, so a man in the middle is possible.
+    Any,
+    /// Accept only the certificate with this fingerprint.
+    Pinned(Fingerprint),
 }
 
-impl ServerCertVerifier for AcceptAnyCertificate {
+/// Certificate verifier for the client. Handshake signatures are always
+/// checked with the ring provider; the certificate itself is judged by the
+/// [`Trust`] mode.
+#[derive(Debug)]
+pub(crate) struct ServerVerifier {
+    provider: Arc<CryptoProvider>,
+    trust: Trust,
+    /// The certificate that failed a pin, kept so the caller can report both
+    /// fingerprints.
+    mismatch: OnceLock<Fingerprint>,
+}
+
+impl ServerVerifier {
+    pub(crate) fn new(trust: Trust) -> Arc<Self> {
+        Arc::new(Self {
+            provider: provider(),
+            trust,
+            mismatch: OnceLock::new(),
+        })
+    }
+
+    /// The error for a failed handshake. A certificate that failed the pin
+    /// is reported as a mismatch, anything else as a connection failure.
+    pub(crate) fn handshake_error(&self, err: &ConnectionError) -> NetError {
+        match (self.trust, self.mismatch.get()) {
+            (Trust::Pinned(expected), Some(&actual)) => {
+                NetError::CertificateMismatch { expected, actual }
+            }
+            _ => NetError::Connect(err.to_string()),
+        }
+    }
+}
+
+impl ServerCertVerifier for ServerVerifier {
     fn verify_server_cert(
         &self,
-        _end_entity: &CertificateDer<'_>,
+        end_entity: &CertificateDer<'_>,
         _intermediates: &[CertificateDer<'_>],
         _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        Ok(ServerCertVerified::assertion())
+        match self.trust {
+            Trust::Any => Ok(ServerCertVerified::assertion()),
+            Trust::Pinned(expected) => {
+                let actual = Fingerprint::of(end_entity);
+                if actual == expected {
+                    Ok(ServerCertVerified::assertion())
+                } else {
+                    let _ = self.mismatch.set(actual);
+                    Err(rustls::Error::General(
+                        "server certificate does not match the pinned fingerprint".to_owned(),
+                    ))
+                }
+            }
+        }
     }
 
     fn verify_tls12_signature(

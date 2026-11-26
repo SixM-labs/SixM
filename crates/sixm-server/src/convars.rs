@@ -3,8 +3,13 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use sixm_net::Identity;
+
 /// Convar naming the folder that is scanned for resources.
 const RESOURCES_PATH: &str = "sixm_resourcesPath";
+/// Convar naming the file that keeps the server's certificate. Empty means a
+/// new certificate on every start.
+const IDENTITY_FILE: &str = "sixm_identityFile";
 /// Convar naming the frame rate of the main loop.
 const TICK_RATE: &str = "sixm_tickRate";
 /// Convar naming the address the server listens on, e.g. `0.0.0.0:30120`.
@@ -14,6 +19,8 @@ const MAX_CLIENTS: &str = "sv_maxclients";
 /// Convar naming the server, shown to players when they connect.
 const SERVER_NAME: &str = "sv_hostname";
 
+/// Certificate file when `sixm_identityFile` is not set.
+const DEFAULT_IDENTITY_FILE: &str = "cache/server-identity.bin";
 /// Listen address when `endpoint_add_udp` is not set.
 const DEFAULT_ENDPOINT: &str = "0.0.0.0:30120";
 /// Player limit when `sv_maxclients` is not set.
@@ -37,6 +44,7 @@ impl Convars {
             values: BTreeMap::new(),
         };
         convars.set(RESOURCES_PATH, "resources");
+        convars.set(IDENTITY_FILE, DEFAULT_IDENTITY_FILE);
         convars.set(TICK_RATE, "20");
         convars.set(ENDPOINT, DEFAULT_ENDPOINT);
         convars.set(MAX_CLIENTS, &DEFAULT_MAX_CLIENTS.to_string());
@@ -68,6 +76,20 @@ impl Convars {
         self.get(TICK_RATE)
             .and_then(|value| value.trim().parse::<i64>().ok())
             .map_or(20, |rate| rate.clamp(1, 1000).unsigned_abs())
+    }
+
+    /// Where the server's certificate comes from: the file named by
+    /// `sixm_identityFile`, or a fresh certificate when the convar is empty.
+    pub(crate) fn identity(&self) -> Identity {
+        let path = self
+            .get(IDENTITY_FILE)
+            .unwrap_or(DEFAULT_IDENTITY_FILE)
+            .trim();
+        if path.is_empty() {
+            Identity::Ephemeral
+        } else {
+            Identity::Persistent(PathBuf::from(path))
+        }
     }
 
     /// The address to listen on, as written. It is parsed when the network starts.

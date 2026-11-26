@@ -4,21 +4,26 @@
 //! payload. Values are encoded as postcard enums, strings as raw bytes and
 //! arrays and maps as sequences. Function references have no encoding and
 //! cannot be decoded, so a peer can never forge a reference into server code.
+//!
+//! Decoding counts every value against [`MAX_DECODED_VALUES`] while it runs,
+//! so a small frame cannot make the decoder allocate more than that many values.
 
+use std::cell::Cell;
 use std::fmt;
 use std::sync::Arc;
 
 use quinn::{ReadExactError, RecvStream};
 use serde::de::{
-    self, DeserializeOwned, DeserializeSeed, Deserializer, EnumAccess, SeqAccess, VariantAccess,
-    Visitor,
+    self, DeserializeSeed, Deserializer, EnumAccess, SeqAccess, VariantAccess, Visitor,
 };
 use serde::ser::{SerializeSeq, SerializeStructVariant};
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Serialize, Serializer};
 use sixm_core::Value;
 
 use crate::error::NetError;
-use crate::protocol::{MAX_EVENT_NAME_LEN, MAX_VALUE_DEPTH};
+use crate::protocol::{
+    ClientMessage, MAX_DECODED_VALUES, MAX_EVENT_NAME_LEN, MAX_VALUE_DEPTH, ServerMessage,
+};
 
 const FRAME_HEADER_LEN: usize = 4;
 const MESSAGE_NAME: &str = "Message";
@@ -31,22 +36,17 @@ const TAG_STRING: u32 = 4;
 const TAG_ARRAY: u32 = 5;
 const TAG_MAP: u32 = 6;
 const VALUE_VARIANTS: &[&str] = &["Nil", "Bool", "Int", "Float", "String", "Array", "Map"];
+const CLIENT_VARIANTS: &[&str] = &["Hello", "Event"];
+const SERVER_VARIANTS: &[&str] = &["Welcome", "Rejected", "Event", "Kicked"];
 
-/// Argument list of an event. Decoding enforces [`MAX_VALUE_DEPTH`].
+/// Argument list of an event. Decoding enforces [`MAX_VALUE_DEPTH`] and
+/// [`MAX_DECODED_VALUES`].
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct Args(pub(crate) Vec<Value>);
 
 impl Serialize for Args {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         Elements(&self.0).serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for Args {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer
-            .deserialize_seq(ValuesVisitor { child_depth: 1 })
-            .map(Args)
     }
 }
 
@@ -134,9 +134,38 @@ pub(crate) fn encode_frame<T: Serialize>(
     Ok(Arc::from(buffer))
 }
 
-/// Decodes a frame payload, rejecting trailing bytes.
-pub(crate) fn decode_payload<T: DeserializeOwned>(payload: &[u8]) -> Result<T, NetError> {
-    let (message, rest) = postcard::take_from_bytes::<T>(payload)
+/// Decodes the payload of a message sent by a client. Rejects trailing bytes
+/// and messages with more than [`MAX_DECODED_VALUES`] values.
+pub(crate) fn decode_client_message(payload: &[u8]) -> Result<ClientMessage, NetError> {
+    let budget = ValueBudget::new();
+    decode_budgeted(payload, &budget, ClientMessageSeed { budget: &budget })
+}
+
+/// Decodes the payload of a message sent by the server. Rejects trailing bytes
+/// and messages with more than [`MAX_DECODED_VALUES`] values.
+pub(crate) fn decode_server_message(payload: &[u8]) -> Result<ServerMessage, NetError> {
+    let budget = ValueBudget::new();
+    decode_budgeted(payload, &budget, ServerMessageSeed { budget: &budget })
+}
+
+/// Runs `seed` over `payload`, which must hold exactly one message.
+fn decode_budgeted<'de, S: DeserializeSeed<'de>>(
+    payload: &'de [u8],
+    budget: &ValueBudget,
+    seed: S,
+) -> Result<S::Value, NetError> {
+    let mut deserializer = postcard::Deserializer::from_bytes(payload);
+    let message = seed.deserialize(&mut deserializer).map_err(|err| {
+        if budget.exceeded.get() {
+            NetError::Protocol(format!(
+                "message decodes into more than {MAX_DECODED_VALUES} values"
+            ))
+        } else {
+            NetError::Protocol(format!("malformed message: {err}"))
+        }
+    })?;
+    let rest = deserializer
+        .finalize()
         .map_err(|err| NetError::Protocol(format!("malformed message: {err}")))?;
     if rest.is_empty() {
         Ok(message)
@@ -252,32 +281,228 @@ impl Serialize for Pairs<'_> {
     }
 }
 
-/// Decodes one value whose nesting depth is `depth`.
-#[derive(Clone, Copy)]
-struct ValueSeed {
-    depth: usize,
+/// Counts the values that one message decodes into. Every value costs one
+/// unit, map keys included, and the count is checked before the value is
+/// built, so the decoder never holds more than [`MAX_DECODED_VALUES`] values.
+#[derive(Debug)]
+struct ValueBudget {
+    remaining: Cell<usize>,
+    /// Set when the budget ran out, so the caller can name the real cause of
+    /// the failure instead of postcard's generic error.
+    exceeded: Cell<bool>,
 }
 
-impl<'de> DeserializeSeed<'de> for ValueSeed {
+impl ValueBudget {
+    fn new() -> Self {
+        Self {
+            remaining: Cell::new(MAX_DECODED_VALUES),
+            exceeded: Cell::new(false),
+        }
+    }
+
+    /// Spends one unit of the budget.
+    fn spend<E: de::Error>(&self) -> Result<(), E> {
+        if let Some(remaining) = self.remaining.get().checked_sub(1) {
+            self.remaining.set(remaining);
+            Ok(())
+        } else {
+            self.exceeded.set(true);
+            Err(E::custom("message decodes into too many values"))
+        }
+    }
+}
+
+/// Decodes a message sent by a client. The variant tags come from
+/// [`ClientMessage`].
+struct ClientMessageSeed<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> DeserializeSeed<'de> for ClientMessageSeed<'_> {
+    type Value = ClientMessage;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<ClientMessage, D::Error> {
+        deserializer.deserialize_enum(
+            MESSAGE_NAME,
+            CLIENT_VARIANTS,
+            ClientMessageVisitor {
+                budget: self.budget,
+            },
+        )
+    }
+}
+
+struct ClientMessageVisitor<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> Visitor<'de> for ClientMessageVisitor<'_> {
+    type Value = ClientMessage;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a client message")
+    }
+
+    fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<ClientMessage, A::Error> {
+        let (tag, variant): (u32, A::Variant) = data.variant()?;
+        match tag {
+            ClientMessage::HELLO_TAG => variant
+                .newtype_variant::<(u32, String)>()
+                .map(|(protocol, name)| ClientMessage::Hello { protocol, name }),
+            ClientMessage::EVENT_TAG => variant
+                .newtype_variant_seed(EventSeed {
+                    budget: self.budget,
+                })
+                .map(|(name, args)| ClientMessage::Event { name, args }),
+            other => Err(de::Error::unknown_variant(
+                &other.to_string(),
+                CLIENT_VARIANTS,
+            )),
+        }
+    }
+}
+
+/// Decodes a message sent by the server. The variant tags come from
+/// [`ServerMessage`].
+struct ServerMessageSeed<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> DeserializeSeed<'de> for ServerMessageSeed<'_> {
+    type Value = ServerMessage;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<ServerMessage, D::Error> {
+        deserializer.deserialize_enum(
+            MESSAGE_NAME,
+            SERVER_VARIANTS,
+            ServerMessageVisitor {
+                budget: self.budget,
+            },
+        )
+    }
+}
+
+struct ServerMessageVisitor<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> Visitor<'de> for ServerMessageVisitor<'_> {
+    type Value = ServerMessage;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a server message")
+    }
+
+    fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<ServerMessage, A::Error> {
+        let (tag, variant): (u32, A::Variant) = data.variant()?;
+        match tag {
+            ServerMessage::WELCOME_TAG => {
+                variant
+                    .newtype_variant::<(u32, String)>()
+                    .map(|(player, server_name)| ServerMessage::Welcome {
+                        player,
+                        server_name,
+                    })
+            }
+            ServerMessage::REJECTED_TAG => variant
+                .newtype_variant::<String>()
+                .map(|reason| ServerMessage::Rejected { reason }),
+            ServerMessage::EVENT_TAG => variant
+                .newtype_variant_seed(EventSeed {
+                    budget: self.budget,
+                })
+                .map(|(name, args)| ServerMessage::Event { name, args }),
+            ServerMessage::KICKED_TAG => variant
+                .newtype_variant::<String>()
+                .map(|reason| ServerMessage::Kicked { reason }),
+            other => Err(de::Error::unknown_variant(
+                &other.to_string(),
+                SERVER_VARIANTS,
+            )),
+        }
+    }
+}
+
+/// Decodes the body of an event, `(name, args)`. Both message enums carry
+/// their events in this layout.
+#[derive(Clone, Copy)]
+struct EventSeed<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> DeserializeSeed<'de> for EventSeed<'_> {
+    type Value = (String, Args);
+
+    fn deserialize<D: Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<(String, Args), D::Error> {
+        deserializer.deserialize_tuple(
+            2,
+            EventVisitor {
+                budget: self.budget,
+            },
+        )
+    }
+}
+
+struct EventVisitor<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> Visitor<'de> for EventVisitor<'_> {
+    type Value = (String, Args);
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("an event name and its arguments")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(String, Args), A::Error> {
+        let name: String = seq
+            .next_element()?
+            .ok_or_else(|| de::Error::invalid_length(0, &"an event name"))?;
+        let args = seq
+            .next_element_seed(ValuesSeed {
+                child_depth: 1,
+                budget: self.budget,
+            })?
+            .ok_or_else(|| de::Error::invalid_length(1, &"an argument list"))?;
+        Ok((name, Args(args)))
+    }
+}
+
+/// Decodes one value whose nesting depth is `depth`.
+#[derive(Clone, Copy)]
+struct ValueSeed<'a> {
+    depth: usize,
+    budget: &'a ValueBudget,
+}
+
+impl<'de> DeserializeSeed<'de> for ValueSeed<'_> {
     type Value = Value;
 
     fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
         if self.depth > MAX_VALUE_DEPTH {
             return Err(de::Error::custom("value nested too deeply"));
         }
+        self.budget.spend::<D::Error>()?;
         deserializer.deserialize_enum(
             VALUE_NAME,
             VALUE_VARIANTS,
-            ValueVisitor { depth: self.depth },
+            ValueVisitor {
+                depth: self.depth,
+                budget: self.budget,
+            },
         )
     }
 }
 
-struct ValueVisitor {
+struct ValueVisitor<'a> {
     depth: usize,
+    budget: &'a ValueBudget,
 }
 
-impl<'de> Visitor<'de> for ValueVisitor {
+impl<'de> Visitor<'de> for ValueVisitor<'_> {
     type Value = Value;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
@@ -297,10 +522,16 @@ impl<'de> Visitor<'de> for ValueVisitor {
             TAG_FLOAT => variant.newtype_variant().map(Value::Float),
             TAG_STRING => variant.newtype_variant_seed(BytesSeed).map(Value::String),
             TAG_ARRAY => variant
-                .newtype_variant_seed(ValuesSeed { child_depth })
+                .newtype_variant_seed(ValuesSeed {
+                    child_depth,
+                    budget: self.budget,
+                })
                 .map(Value::Array),
             TAG_MAP => variant
-                .newtype_variant_seed(PairsSeed { child_depth })
+                .newtype_variant_seed(PairsSeed {
+                    child_depth,
+                    budget: self.budget,
+                })
                 .map(Value::Map),
             other => Err(de::Error::unknown_variant(
                 &other.to_string(),
@@ -336,25 +567,28 @@ impl Visitor<'_> for BytesVisitor {
 
 /// Decodes a sequence of values, each at depth `child_depth`.
 #[derive(Clone, Copy)]
-struct ValuesSeed {
+struct ValuesSeed<'a> {
     child_depth: usize,
+    budget: &'a ValueBudget,
 }
 
-impl<'de> DeserializeSeed<'de> for ValuesSeed {
+impl<'de> DeserializeSeed<'de> for ValuesSeed<'_> {
     type Value = Vec<Value>;
 
     fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Vec<Value>, D::Error> {
         deserializer.deserialize_seq(ValuesVisitor {
             child_depth: self.child_depth,
+            budget: self.budget,
         })
     }
 }
 
-struct ValuesVisitor {
+struct ValuesVisitor<'a> {
     child_depth: usize,
+    budget: &'a ValueBudget,
 }
 
-impl<'de> Visitor<'de> for ValuesVisitor {
+impl<'de> Visitor<'de> for ValuesVisitor<'_> {
     type Value = Vec<Value>;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
@@ -365,6 +599,7 @@ impl<'de> Visitor<'de> for ValuesVisitor {
         let mut values = Vec::new();
         while let Some(value) = seq.next_element_seed(ValueSeed {
             depth: self.child_depth,
+            budget: self.budget,
         })? {
             values.push(value);
         }
@@ -374,11 +609,12 @@ impl<'de> Visitor<'de> for ValuesVisitor {
 
 /// Decodes a sequence of key/value pairs, each element at depth `child_depth`.
 #[derive(Clone, Copy)]
-struct PairsSeed {
+struct PairsSeed<'a> {
     child_depth: usize,
+    budget: &'a ValueBudget,
 }
 
-impl<'de> DeserializeSeed<'de> for PairsSeed {
+impl<'de> DeserializeSeed<'de> for PairsSeed<'_> {
     type Value = Vec<(Value, Value)>;
 
     fn deserialize<D: Deserializer<'de>>(
@@ -387,15 +623,17 @@ impl<'de> DeserializeSeed<'de> for PairsSeed {
     ) -> Result<Vec<(Value, Value)>, D::Error> {
         deserializer.deserialize_seq(PairsVisitor {
             child_depth: self.child_depth,
+            budget: self.budget,
         })
     }
 }
 
-struct PairsVisitor {
+struct PairsVisitor<'a> {
     child_depth: usize,
+    budget: &'a ValueBudget,
 }
 
-impl<'de> Visitor<'de> for PairsVisitor {
+impl<'de> Visitor<'de> for PairsVisitor<'_> {
     type Value = Vec<(Value, Value)>;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
@@ -406,6 +644,7 @@ impl<'de> Visitor<'de> for PairsVisitor {
         let mut entries = Vec::new();
         while let Some(pair) = seq.next_element_seed(PairSeed {
             child_depth: self.child_depth,
+            budget: self.budget,
         })? {
             entries.push(pair);
         }
@@ -414,11 +653,12 @@ impl<'de> Visitor<'de> for PairsVisitor {
 }
 
 #[derive(Clone, Copy)]
-struct PairSeed {
+struct PairSeed<'a> {
     child_depth: usize,
+    budget: &'a ValueBudget,
 }
 
-impl<'de> DeserializeSeed<'de> for PairSeed {
+impl<'de> DeserializeSeed<'de> for PairSeed<'_> {
     type Value = (Value, Value);
 
     fn deserialize<D: Deserializer<'de>>(
@@ -429,16 +669,18 @@ impl<'de> DeserializeSeed<'de> for PairSeed {
             2,
             PairVisitor {
                 child_depth: self.child_depth,
+                budget: self.budget,
             },
         )
     }
 }
 
-struct PairVisitor {
+struct PairVisitor<'a> {
     child_depth: usize,
+    budget: &'a ValueBudget,
 }
 
-impl<'de> Visitor<'de> for PairVisitor {
+impl<'de> Visitor<'de> for PairVisitor<'_> {
     type Value = (Value, Value);
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
@@ -448,11 +690,120 @@ impl<'de> Visitor<'de> for PairVisitor {
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(Value, Value), A::Error> {
         let depth = self.child_depth;
         let key = seq
-            .next_element_seed(ValueSeed { depth })?
+            .next_element_seed(ValueSeed {
+                depth,
+                budget: self.budget,
+            })?
             .ok_or_else(|| de::Error::invalid_length(0, &"a key"))?;
         let value = seq
-            .next_element_seed(ValueSeed { depth })?
+            .next_element_seed(ValueSeed {
+                depth,
+                budget: self.budget,
+            })?
             .ok_or_else(|| de::Error::invalid_length(1, &"a value"))?;
         Ok((key, value))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::MAX_FRAME;
+
+    /// The payload of `message` encoded as a complete frame.
+    fn payload_of<T: Serialize>(message: &T) -> Vec<u8> {
+        let frame = encode_frame(message, MAX_FRAME).expect("message encodes");
+        frame[FRAME_HEADER_LEN..].to_vec()
+    }
+
+    fn event_with(args: Vec<Value>) -> ClientMessage {
+        ClientMessage::Event {
+            name: "test".to_owned(),
+            args: Args(args),
+        }
+    }
+
+    #[test]
+    fn sixty_thousand_values_decode() {
+        let payload = payload_of(&event_with(vec![Value::Nil; 60_000]));
+        assert!(decode_client_message(&payload).is_ok());
+    }
+
+    #[test]
+    fn seventy_thousand_values_are_rejected() {
+        let payload = payload_of(&event_with(vec![Value::Nil; 70_000]));
+        assert!(matches!(
+            decode_client_message(&payload),
+            Err(NetError::Protocol(reason)) if reason.contains("values")
+        ));
+    }
+
+    #[test]
+    fn map_keys_count_against_the_budget() {
+        // 40 000 pairs are 80 000 values, keys and values alike.
+        let entries = vec![(Value::Nil, Value::Nil); 40_000];
+        let payload = payload_of(&event_with(vec![Value::Map(entries)]));
+        assert!(matches!(
+            decode_client_message(&payload),
+            Err(NetError::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn every_message_variant_decodes_to_itself() {
+        let hello = ClientMessage::Hello {
+            protocol: 1,
+            name: "ann".to_owned(),
+        };
+        assert!(matches!(
+            decode_client_message(&payload_of(&hello)),
+            Ok(ClientMessage::Hello { protocol: 1, name }) if name == "ann"
+        ));
+        let event = event_with(vec![Value::Int(3)]);
+        assert!(matches!(
+            decode_client_message(&payload_of(&event)),
+            Ok(ClientMessage::Event { name, args }) if name == "test" && args.0 == [Value::Int(3)]
+        ));
+
+        let welcome = ServerMessage::Welcome {
+            player: 7,
+            server_name: "srv".to_owned(),
+        };
+        assert!(matches!(
+            decode_server_message(&payload_of(&welcome)),
+            Ok(ServerMessage::Welcome { player: 7, server_name }) if server_name == "srv"
+        ));
+        let rejected = ServerMessage::Rejected {
+            reason: "full".to_owned(),
+        };
+        assert!(matches!(
+            decode_server_message(&payload_of(&rejected)),
+            Ok(ServerMessage::Rejected { reason }) if reason == "full"
+        ));
+        let event = ServerMessage::Event {
+            name: "e".to_owned(),
+            args: Args(vec![Value::Bool(true)]),
+        };
+        assert!(matches!(
+            decode_server_message(&payload_of(&event)),
+            Ok(ServerMessage::Event { name, args }) if name == "e" && args.0 == [Value::Bool(true)]
+        ));
+        let kicked = ServerMessage::Kicked {
+            reason: "bye".to_owned(),
+        };
+        assert!(matches!(
+            decode_server_message(&payload_of(&kicked)),
+            Ok(ServerMessage::Kicked { reason }) if reason == "bye"
+        ));
+    }
+
+    #[test]
+    fn trailing_bytes_are_rejected() {
+        let mut payload = payload_of(&event_with(vec![Value::Nil]));
+        payload.push(0);
+        assert!(matches!(
+            decode_client_message(&payload),
+            Err(NetError::Protocol(reason)) if reason.contains("trailing")
+        ));
     }
 }

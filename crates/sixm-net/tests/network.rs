@@ -230,6 +230,42 @@ fn rejected_client_gets_the_reason() {
 }
 
 #[test]
+fn pinned_client_connects_with_the_servers_fingerprint() {
+    let server = start();
+    let addr = server.net.local_addr();
+    let fingerprint = server.net.fingerprint();
+    let handle =
+        thread::spawn(move || NetClient::connect_pinned(addr, "carol", &fingerprint, TIMEOUT));
+    let (connection, _) = expect_connecting(&server);
+    server.net.accept(connection, 3);
+    let client = handle
+        .join()
+        .expect("client thread does not panic")
+        .expect("pinned client connects");
+    assert_eq!(client.player(), 3);
+}
+
+#[test]
+fn pinned_client_refuses_another_servers_certificate() {
+    let server = start();
+    let addr = server.net.local_addr();
+    let actual = server.net.fingerprint();
+    let other = start();
+    let expected = other.net.fingerprint();
+    let handle = thread::spawn(move || NetClient::connect_pinned(addr, "dave", &expected, TIMEOUT));
+    match handle.join().expect("client thread does not panic") {
+        Err(NetError::CertificateMismatch {
+            expected: pinned,
+            actual: presented,
+        }) => {
+            assert_eq!(pinned, expected);
+            assert_eq!(presented, actual);
+        }
+        unexpected => panic!("expected CertificateMismatch, got {unexpected:?}"),
+    }
+}
+
+#[test]
 fn client_rejects_invalid_names_before_connecting() {
     let server = start();
     let addr = server.net.local_addr();

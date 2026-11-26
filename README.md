@@ -143,9 +143,14 @@ server runs. Scripts see the connection lifecycle as events:
 
 In all three, `source` is the player's id, as in FiveM.
 
-The connection is encrypted, but clients do not verify the server's
-certificate yet, so a man-in-the-middle attack is possible. Certificate
-pinning is planned.
+Connections are encrypted. The server presents a self-signed certificate
+stored in `sixm_identityFile` (default `cache/server-identity.bin`, created on
+the first start), so its fingerprint stays the same across restarts. The
+server logs that SHA-256 fingerprint at startup as `Server fingerprint`. A
+client that knows it can pin it and refuse any other server. Unpinned
+connections are encrypted but not authenticated, so a man in the middle can
+impersonate the server. An empty `sixm_identityFile` makes a new certificate on
+every start instead.
 
 Events sent by players reach only handlers registered with `RegisterNetEvent`.
 Use `TriggerClientEvent(name, id, ...)` to send to one player, or `-1` for

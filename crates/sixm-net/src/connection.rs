@@ -16,7 +16,7 @@ use crate::protocol::{
 use crate::ratelimit::{RateLimiter, Verdict};
 use crate::server::{ConnectionId, NetEvent};
 use crate::transport::{close_connection, closing_reason};
-use crate::wire::{decode_payload, encode_frame, read_frame, validate_event_name};
+use crate::wire::{decode_client_message, encode_frame, read_frame, validate_event_name};
 
 /// Application close code for an ordinary end of the connection.
 const CLOSE_NORMAL: u32 = 0;
@@ -153,7 +153,7 @@ async fn read_hello(connection: &Connection, max_frame: usize) -> Result<Hello, 
     let payload = read_frame(&mut recv, max_frame)
         .await?
         .ok_or(NetError::Closed)?;
-    match decode_payload::<ClientMessage>(&payload)? {
+    match decode_client_message(&payload)? {
         ClientMessage::Hello { protocol, name } => Ok(Hello {
             send,
             recv,
@@ -272,7 +272,7 @@ async fn read_loop(shared: &Shared, player: u32, recv: &mut RecvStream) -> Stop 
             Ok(None) | Err(NetError::Closed) => return Stop::Closed,
             Err(err) => return Stop::Protocol(err.to_string()),
         };
-        let (name, args) = match decode_payload::<ClientMessage>(&payload) {
+        let (name, args) = match decode_client_message(&payload) {
             Ok(ClientMessage::Event { name, args }) => (name, args),
             Ok(ClientMessage::Hello { .. }) => {
                 return Stop::Protocol("Hello may only be sent once".to_owned());

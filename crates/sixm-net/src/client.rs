@@ -17,11 +17,12 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 use crate::error::NetError;
+use crate::identity::Fingerprint;
 use crate::protocol::{
     ClientMessage, MAX_FRAME, MAX_PLAYER_NAME_LEN, PROTOCOL_VERSION, SERVER_NAME, ServerMessage,
 };
-use crate::transport::{client_config, close_connection, closing_reason};
-use crate::wire::{decode_payload, encode_event, encode_frame, read_frame};
+use crate::transport::{ServerVerifier, Trust, client_config, close_connection, closing_reason};
+use crate::wire::{decode_server_message, encode_event, encode_frame, read_frame};
 
 /// Time allowed for the connection to close after the client disconnects.
 const DISCONNECT_GRACE: Duration = Duration::from_secs(1);
@@ -53,12 +54,36 @@ struct Welcome {
 }
 
 impl NetClient {
-    /// Connects to `addr`, sends a `Hello` with `name` and waits for the
-    /// server to accept or reject the connection.
+    /// Connects to `addr` without checking the server's certificate, sends a
+    /// `Hello` with `name` and waits for the server to accept or reject the
+    /// connection. The connection is encrypted, but nothing shows that the
+    /// server is the one the player meant to reach; use
+    /// [`connect_pinned`](Self::connect_pinned) for that.
     ///
     /// Returns [`NetError::Rejected`] if the server refuses, and
     /// [`NetError::Timeout`] if the whole handshake takes longer than `timeout`.
     pub fn connect(addr: SocketAddr, name: &str, timeout: Duration) -> Result<Self, NetError> {
+        Self::connect_with(addr, name, timeout, Trust::Any)
+    }
+
+    /// Like [`connect`](Self::connect), but accepts only a server whose
+    /// certificate has the given fingerprint. Otherwise the handshake fails
+    /// with [`NetError::CertificateMismatch`].
+    pub fn connect_pinned(
+        addr: SocketAddr,
+        name: &str,
+        fingerprint: &Fingerprint,
+        timeout: Duration,
+    ) -> Result<Self, NetError> {
+        Self::connect_with(addr, name, timeout, Trust::Pinned(*fingerprint))
+    }
+
+    fn connect_with(
+        addr: SocketAddr,
+        name: &str,
+        timeout: Duration,
+        trust: Trust,
+    ) -> Result<Self, NetError> {
         let name = name.trim().to_owned();
         if name.is_empty() || name.chars().count() > MAX_PLAYER_NAME_LEN {
             return Err(NetError::InvalidInput(format!(
@@ -70,7 +95,9 @@ impl NetClient {
         let (ready_tx, ready_rx) = sync_channel(1);
         let thread = thread::Builder::new()
             .name("sixm-client".to_owned())
-            .spawn(move || run_thread(addr, name, timeout, ready_tx, command_rx, events_tx))
+            .spawn(move || {
+                run_thread(addr, name, timeout, trust, ready_tx, command_rx, events_tx);
+            })
             .map_err(NetError::Io)?;
         match ready_rx.recv() {
             Ok(Ok(welcome)) => Ok(Self {
@@ -157,6 +184,7 @@ fn run_thread(
     addr: SocketAddr,
     name: String,
     timeout: Duration,
+    trust: Trust,
     ready: SyncSender<Result<Welcome, NetError>>,
     commands: mpsc::UnboundedReceiver<Arc<[u8]>>,
     events: Sender<ClientEvent>,
@@ -172,7 +200,7 @@ fn run_thread(
         }
     };
     runtime.block_on(async move {
-        let handshake = tokio::time::timeout(timeout, establish(addr, &name)).await;
+        let handshake = tokio::time::timeout(timeout, establish(addr, &name, trust)).await;
         let established = match handshake {
             Ok(Ok((established, welcome))) => {
                 if ready.send(Ok(welcome)).is_err() {
@@ -194,21 +222,26 @@ fn run_thread(
 }
 
 /// Connects, sends the `Hello` and reads the server's first message.
-async fn establish(addr: SocketAddr, name: &str) -> Result<(Established, Welcome), NetError> {
+async fn establish(
+    addr: SocketAddr,
+    name: &str,
+    trust: Trust,
+) -> Result<(Established, Welcome), NetError> {
     let bind = if addr.is_ipv4() {
         SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
     } else {
         SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
     };
+    let verifier = ServerVerifier::new(trust);
     let mut endpoint =
         Endpoint::client(bind).map_err(|source| NetError::Bind { addr: bind, source })?;
-    endpoint.set_default_client_config(client_config()?);
+    endpoint.set_default_client_config(client_config(&verifier)?);
     let connecting = endpoint
         .connect(addr, SERVER_NAME)
         .map_err(|err| NetError::Connect(err.to_string()))?;
     let connection = connecting
         .await
-        .map_err(|err| NetError::Connect(err.to_string()))?;
+        .map_err(|err| verifier.handshake_error(&err))?;
     let (mut send, mut recv) = connection
         .open_bi()
         .await
@@ -226,7 +259,7 @@ async fn establish(addr: SocketAddr, name: &str) -> Result<(Established, Welcome
     let payload = read_frame(&mut recv, MAX_FRAME)
         .await?
         .ok_or(NetError::Closed)?;
-    let welcome = match decode_payload::<ServerMessage>(&payload)? {
+    let welcome = match decode_server_message(&payload)? {
         ServerMessage::Welcome {
             player,
             server_name,
@@ -290,7 +323,7 @@ async fn session(
 async fn pump_events(mut recv: RecvStream, connection: Connection, events: Sender<ClientEvent>) {
     loop {
         let event = match read_frame(&mut recv, MAX_FRAME).await {
-            Ok(Some(payload)) => match decode_payload::<ServerMessage>(&payload) {
+            Ok(Some(payload)) => match decode_server_message(&payload) {
                 Ok(ServerMessage::Event { name, args }) => {
                     ClientEvent::Event { name, args: args.0 }
                 }

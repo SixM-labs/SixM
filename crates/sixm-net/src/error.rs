@@ -1,5 +1,8 @@
 use std::io;
 use std::net::SocketAddr;
+use std::path::PathBuf;
+
+use crate::identity::Fingerprint;
 
 /// Errors returned by the network layer.
 #[derive(Debug, thiserror::Error)]
@@ -17,6 +20,15 @@ pub enum NetError {
     /// The certificate or TLS configuration could not be built.
     #[error("TLS setup failed: {0}")]
     Tls(String),
+    /// The persistent identity file could not be read, written or parsed.
+    #[error("server identity file {}: {reason}", path.display())]
+    Identity { path: PathBuf, reason: String },
+    /// The server presented a certificate other than the pinned one.
+    #[error("server certificate fingerprint {actual} does not match the pinned {expected}")]
+    CertificateMismatch {
+        expected: Fingerprint,
+        actual: Fingerprint,
+    },
     /// The network configuration is invalid.
     #[error("invalid configuration: {0}")]
     Config(String),

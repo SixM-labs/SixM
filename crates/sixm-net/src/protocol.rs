@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::wire::Args;
 
@@ -23,6 +23,10 @@ pub(crate) const MAX_FRAME: usize = 1024 * 1024;
 /// Deepest nesting of container values that is encoded or decoded. A value
 /// directly inside an event's argument list has depth 1.
 pub(crate) const MAX_VALUE_DEPTH: usize = 64;
+
+/// Most values one message may decode into. Every value counts, map keys
+/// included, so a frame cannot expand into more memory than this allows.
+pub(crate) const MAX_DECODED_VALUES: usize = 65_536;
 
 /// Longest event name in bytes.
 pub(crate) const MAX_EVENT_NAME_LEN: usize = 256;
@@ -48,20 +52,24 @@ pub(crate) const EVENT_FLOOD: &str = "event flood";
 /// Reason sent to every player and pending connection at shutdown.
 pub(crate) const SHUTTING_DOWN: &str = "server shutting down";
 
-/// First message a client sends on the stream.
-#[derive(Serialize, Deserialize)]
+/// Messages a client sends on the stream. Decoding is done by the wire module,
+/// which must know every variant's tag.
+#[derive(Serialize)]
 pub(crate) enum ClientMessage {
     Hello { protocol: u32, name: String },
     Event { name: String, args: Args },
 }
 
 impl ClientMessage {
+    /// Variant index of [`ClientMessage::Hello`] on the wire.
+    pub(crate) const HELLO_TAG: u32 = 0;
     /// Variant index of [`ClientMessage::Event`] on the wire.
     pub(crate) const EVENT_TAG: u32 = 1;
 }
 
-/// Message the server sends on the stream.
-#[derive(Serialize, Deserialize)]
+/// Messages the server sends on the stream. Decoding is done by the wire
+/// module, which must know every variant's tag.
+#[derive(Serialize)]
 pub(crate) enum ServerMessage {
     Welcome { player: u32, server_name: String },
     Rejected { reason: String },
@@ -70,6 +78,12 @@ pub(crate) enum ServerMessage {
 }
 
 impl ServerMessage {
+    /// Variant index of [`ServerMessage::Welcome`] on the wire.
+    pub(crate) const WELCOME_TAG: u32 = 0;
+    /// Variant index of [`ServerMessage::Rejected`] on the wire.
+    pub(crate) const REJECTED_TAG: u32 = 1;
     /// Variant index of [`ServerMessage::Event`] on the wire.
     pub(crate) const EVENT_TAG: u32 = 2;
+    /// Variant index of [`ServerMessage::Kicked`] on the wire.
+    pub(crate) const KICKED_TAG: u32 = 3;
 }

@@ -113,7 +113,12 @@ impl Server {
     /// keeps running without console input.
     pub fn run(&self, sender: &Sender<Input>, input: &Receiver<Input>) {
         match self.start_network(sender.clone()) {
-            Ok(addr) => info!("Listening on {addr}"),
+            Ok(addr) => {
+                info!("Listening on {addr}");
+                if let Some(fingerprint) = self.manager.network_fingerprint() {
+                    info!("Server fingerprint: {fingerprint}");
+                }
+            }
             Err(err) => error!("network is disabled: {err}"),
         }
         let mut next_frame = Instant::now();

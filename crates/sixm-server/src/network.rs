@@ -13,7 +13,7 @@ use std::rc::Rc;
 use std::sync::mpsc::Sender;
 
 use sixm_core::{ClientTarget, EventSource, PlayerInfo, ScriptError, Value};
-use sixm_net::{ConnectionId, NetError, NetEvent, NetServer, ServerConfig};
+use sixm_net::{ConnectionId, Fingerprint, NetError, NetEvent, NetServer, ServerConfig};
 use tracing::{debug, info};
 
 use crate::host_functions::HostFn;
@@ -102,11 +102,12 @@ impl ResourceManager {
                 "the network is already running".to_owned(),
             ));
         }
-        let (endpoint, server_name) = {
+        let (endpoint, server_name, identity) = {
             let convars = self.convars.borrow();
             (
                 convars.endpoint().to_owned(),
                 convars.server_name().to_owned(),
+                convars.identity(),
             )
         };
         let bind: SocketAddr = endpoint.parse().map_err(|_| {
@@ -117,6 +118,7 @@ impl ResourceManager {
         let config = ServerConfig {
             bind,
             server_name,
+            identity,
             ..ServerConfig::default()
         };
         let server = NetServer::bind(config, move |event| {
@@ -126,6 +128,15 @@ impl ResourceManager {
         let addr = server.local_addr();
         *self.network.server.borrow_mut() = Some(server);
         Ok(addr)
+    }
+
+    /// The fingerprint of the certificate clients are shown, while the network runs.
+    pub(crate) fn network_fingerprint(&self) -> Option<Fingerprint> {
+        self.network
+            .server
+            .borrow()
+            .as_ref()
+            .map(NetServer::fingerprint)
     }
 
     /// Closes every connection and joins the network thread. Does nothing when

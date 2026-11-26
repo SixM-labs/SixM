@@ -21,6 +21,7 @@ use tracing::{debug, error, warn};
 
 use crate::connection::{self, Decision, Shared, Ticket};
 use crate::error::NetError;
+use crate::identity::{Credentials, Fingerprint, Identity};
 use crate::protocol::{
     MAX_FRAME, OUTBOUND_QUEUE_LEN, SEND_QUEUE_OVERFLOW, SHUTTING_DOWN, ServerMessage,
 };
@@ -44,6 +45,8 @@ pub struct ServerConfig {
     /// Largest frame accepted or sent, in bytes. Must not exceed 1 MiB, the
     /// largest frame clients accept.
     pub max_frame: usize,
+    /// Where the certificate presented to clients comes from.
+    pub identity: Identity,
 }
 
 impl Default for ServerConfig {
@@ -53,6 +56,7 @@ impl Default for ServerConfig {
             server_name: "SixM Server".to_owned(),
             handshake_timeout: Duration::from_secs(10),
             max_frame: MAX_FRAME,
+            identity: Identity::Ephemeral,
         }
     }
 }
@@ -119,6 +123,7 @@ enum Command {
 pub struct NetServer {
     commands: Option<mpsc::UnboundedSender<Command>>,
     local_addr: SocketAddr,
+    fingerprint: Fingerprint,
     max_frame: usize,
     thread: Option<JoinHandle<()>>,
 }
@@ -126,8 +131,9 @@ pub struct NetServer {
 impl NetServer {
     /// Starts listening on `config.bind` and spawns the network thread.
     ///
-    /// The certificate is generated here. `on_event` runs on the network
-    /// thread, so it must not block.
+    /// The certificate comes from `config.identity`; its fingerprint is
+    /// available from [`fingerprint`](Self::fingerprint). `on_event` runs on
+    /// the network thread, so it must not block.
     pub fn bind(
         config: ServerConfig,
         on_event: impl Fn(NetEvent) + Send + Sync + 'static,
@@ -140,6 +146,8 @@ impl NetServer {
         }
         let max_frame = config.max_frame;
         let bind = config.bind;
+        let credentials = Credentials::load(&config.identity)?;
+        let fingerprint = credentials.fingerprint();
         let shared = Arc::new(Shared {
             on_event: Arc::new(on_event),
             server_name: config.server_name,
@@ -150,12 +158,13 @@ impl NetServer {
         let (ready_tx, ready_rx) = sync_channel(1);
         let thread = thread::Builder::new()
             .name("sixm-net".to_owned())
-            .spawn(move || run_thread(bind, shared, command_rx, ready_tx))
+            .spawn(move || run_thread(bind, credentials, shared, command_rx, ready_tx))
             .map_err(NetError::Io)?;
         let local_addr = ready_rx.recv().map_err(|_| NetError::Closed)??;
         Ok(Self {
             commands: Some(commands),
             local_addr,
+            fingerprint,
             max_frame,
             thread: Some(thread),
         })
@@ -164,6 +173,13 @@ impl NetServer {
     /// Address the server is listening on, with the port resolved.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// Fingerprint of the certificate clients are shown. Clients that pass it
+    /// to [`NetClient::connect_pinned`](crate::NetClient::connect_pinned)
+    /// accept only this server.
+    pub fn fingerprint(&self) -> Fingerprint {
+        self.fingerprint
     }
 
     /// Admits a pending connection as `player` and sends it the welcome.
@@ -248,6 +264,7 @@ impl fmt::Debug for NetServer {
 
 fn run_thread(
     bind: SocketAddr,
+    credentials: Credentials,
     shared: Arc<Shared>,
     commands: mpsc::UnboundedReceiver<Command>,
     ready: SyncSender<Result<SocketAddr, NetError>>,
@@ -263,7 +280,7 @@ fn run_thread(
         }
     };
     runtime.block_on(async move {
-        let endpoint = match open_endpoint(bind) {
+        let endpoint = match open_endpoint(bind, credentials) {
             Ok(endpoint) => endpoint,
             Err(err) => {
                 let _ = ready.send(Err(err));
@@ -282,8 +299,8 @@ fn run_thread(
     });
 }
 
-fn open_endpoint(bind: SocketAddr) -> Result<Endpoint, NetError> {
-    let config = transport::server_config()?;
+fn open_endpoint(bind: SocketAddr, credentials: Credentials) -> Result<Endpoint, NetError> {
+    let config = transport::server_config(credentials)?;
     Endpoint::server(config, bind).map_err(|source| NetError::Bind { addr: bind, source })
 }
 
