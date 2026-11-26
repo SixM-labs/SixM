@@ -13,10 +13,12 @@
 //! without fighting the borrow checker. Implementations must never hold a
 //! `RefCell` borrow across a call into a runtime or the host.
 
+mod console;
 mod runtime;
 mod state;
 mod value;
 
+pub use console::{TokenError, tokenize};
 pub use runtime::{
     ClientHost, ClientTarget, EventContext, EventSource, Host, PlayerInfo, ScriptError,
     ScriptRuntime, ServerHost,

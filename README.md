@@ -38,7 +38,8 @@ separate adapters, starting with GTA VI once a PC version is released.
 | Players, net events and client events (`sixm-server`, `sixm-lua`) | ✅ done |
 | State bags (`sixm-server`, `sixm-lua`, `sixm-net`) | ✅ done |
 | Entity sync | ⏳ planned |
-| Game client and GTA VI adapter | ⏳ planned (needs a PC release) |
+| Headless client: resource sync, client scripts (`sixm-client`) | ✅ done |
+| GTA VI game adapter | ⏳ planned (needs a PC release) |
 
 ## Layout
 

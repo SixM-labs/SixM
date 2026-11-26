@@ -995,6 +995,7 @@ version = "0.1.0"
 dependencies = [
  "ctrlc",
  "sixm-core",
+ "sixm-lua",
  "sixm-net",
  "sixm-resources",
  "tempfile",

@@ -1,27 +1,28 @@
-//! Command-line client: connects to a server, syncs its resource files and
-//! logs what the server does until Ctrl+C or a disconnect.
+//! Command-line entry point of the SixM client: connects to a server, syncs its
+//! resources and runs their client scripts until Ctrl+C, `quit` or a disconnect.
 
-use std::io::{self, IsTerminal};
+use std::io::{self, BufRead, IsTerminal};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Sender};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use sixm_client::{Client, ClientNotice};
+use sixm_client::{Client, ClientRuntime, Input};
 use sixm_net::Fingerprint;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 /// Usage line printed on bad arguments.
-const USAGE: &str = "usage: sixm-client <addr> <name> [--fingerprint HEX] [--cache DIR]";
+const USAGE: &str =
+    "usage: sixm-client <addr> <name> [--fingerprint HEX] [--cache DIR] [+command args...]";
 /// Cache folder used when `--cache` is not given.
 const DEFAULT_CACHE: &str = "sixm-cache";
+/// Folder inside the cache that holds each resource's data folder.
+const DATA_FOLDER: &str = "data";
 /// Longest the handshake and the resource list may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// How often the loop checks for Ctrl+C when the server is quiet.
-const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Parsed command line.
 #[derive(Debug)]
@@ -30,6 +31,8 @@ struct Options {
     name: String,
     fingerprint: Option<Fingerprint>,
     cache: PathBuf,
+    /// Console commands given as `+name args...`, each one its words, name first.
+    commands: Vec<Vec<String>>,
 }
 
 fn main() -> ExitCode {
@@ -42,14 +45,19 @@ fn main() -> ExitCode {
         }
     };
 
-    let stop = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&stop);
-    if let Err(err) = ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst)) {
+    let (sender, input) = mpsc::channel();
+    if let Err(err) = spawn_stdin_reader(sender.clone()) {
+        error!("cannot read the console: {err}");
+    }
+    let interrupt = sender.clone();
+    if let Err(err) = ctrlc::set_handler(move || {
+        let _ = interrupt.send(Input::Quit("interrupted".to_owned()));
+    }) {
         error!("cannot install the Ctrl+C handler: {err}");
         return ExitCode::FAILURE;
     }
 
-    let mut client = match Client::connect(
+    let client = match Client::connect(
         options.addr,
         &options.name,
         options.fingerprint,
@@ -64,29 +72,31 @@ fn main() -> ExitCode {
     };
     log_sync(&client);
 
-    while !stop.load(Ordering::SeqCst) {
-        let Some(notice) = client.poll(POLL_INTERVAL) else {
-            continue;
-        };
-        log_notice(&notice);
-        if matches!(
-            notice,
-            ClientNotice::Kicked { .. } | ClientNotice::Disconnected { .. }
-        ) {
-            break;
-        }
+    let runtime = ClientRuntime::new(client, options.cache.join(DATA_FOLDER));
+    runtime.start_synced();
+    for command in &options.commands {
+        runtime.execute_words(command);
     }
+    runtime.run(&input);
     ExitCode::SUCCESS
 }
 
 /// Parses `<addr> <name>` with optional `--fingerprint HEX` and `--cache DIR`,
-/// in any order.
+/// in any order. Arguments after the first `+command` belong to that command.
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {
     let mut args = args;
     let mut positional = Vec::new();
     let mut fingerprint = None;
     let mut cache = PathBuf::from(DEFAULT_CACHE);
+    let mut commands: Vec<Vec<String>> = Vec::new();
     while let Some(arg) = args.next() {
+        if let Some(name) = arg.strip_prefix('+') {
+            if name.is_empty() {
+                return Err("a bare `+` is not a command".to_owned());
+            }
+            commands.push(vec![name.to_owned()]);
+            continue;
+        }
         match arg.as_str() {
             "--fingerprint" => {
                 let value = args.next().ok_or("--fingerprint needs a value")?;
@@ -98,7 +108,10 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {
             "--cache" => {
                 cache = PathBuf::from(args.next().ok_or("--cache needs a folder")?);
             }
-            _ => positional.push(arg),
+            _ => match commands.last_mut() {
+                Some(command) => command.push(arg),
+                None => positional.push(arg),
+            },
         }
     }
     let [addr, name] = <[String; 2]>::try_from(positional)
@@ -111,10 +124,11 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {
         name,
         fingerprint,
         cache,
+        commands,
     })
 }
 
-/// Logs every synced resource and file, then the download totals.
+/// Logs the connection, then every synced resource and file, then the download totals.
 fn log_sync(client: &Client) {
     info!(
         "connected to {} as player {}",
@@ -136,23 +150,25 @@ fn log_sync(client: &Client) {
     );
 }
 
-fn log_notice(notice: &ClientNotice) {
-    match notice {
-        ClientNotice::ResourceStarted {
-            name,
-            downloaded,
-            cached,
-        } => info!("resource {name} started: {downloaded} downloaded, {cached} cached"),
-        ClientNotice::ResourceFailed { name, reason } => {
-            error!("resource {name} could not be synced: {reason}");
-        }
-        ClientNotice::ResourceStopped { name } => info!("resource {name} stopped"),
-        ClientNotice::Event { name, args } => info!("event {name} ({} arguments)", args.len()),
-        ClientNotice::StateBag { bag, key, .. } => info!("state {bag}.{key} changed"),
-        ClientNotice::StateBagRemoved { bag } => info!("state bag {bag} removed"),
-        ClientNotice::Kicked { reason } => info!("kicked: {reason}"),
-        ClientNotice::Disconnected { reason } => info!("disconnected: {reason}"),
-    }
+/// Starts a thread that sends each line of standard input to `sink`. The
+/// thread ends at end of input, and the client keeps running without console input.
+fn spawn_stdin_reader(sink: Sender<Input>) -> io::Result<JoinHandle<()>> {
+    thread::Builder::new()
+        .name("console".to_owned())
+        .spawn(move || {
+            for line in io::stdin().lock().lines() {
+                let line = match line {
+                    Ok(line) => line,
+                    Err(err) => {
+                        warn!("console input closed: {err}");
+                        break;
+                    }
+                };
+                if sink.send(Input::Line(line)).is_err() {
+                    break;
+                }
+            }
+        })
 }
 
 /// Logs to standard output with `RUST_LOG` as the filter, defaulting to `info`.

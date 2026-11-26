@@ -138,6 +138,11 @@ impl Client {
         self.net.server_name()
     }
 
+    /// Sends an event to the server.
+    pub fn send_event(&self, name: &str, args: &[Value]) -> Result<(), NetError> {
+        self.net.send_event(name, args)
+    }
+
     /// The running resources, in start order, with their files in the cache.
     pub fn resources(&self) -> &[SyncedResource] {
         &self.resources
