@@ -133,6 +133,22 @@ pub trait Host {
     /// Disconnects a player with a reason shown to them. Takes effect after
     /// the current script call returns.
     fn drop_player(&self, player: u32, reason: &str);
+
+    /// Value stored under `key` in state bag `bag`, or `None` when the bag or
+    /// the key is not set.
+    fn state_get(&self, bag: &str, key: &str) -> Option<Value>;
+
+    /// Stores `value` under `key` in state bag `bag`, or deletes the key when
+    /// `value` is nil. Every write runs the change handlers. A replicated write
+    /// is also sent to every client. Fails for an unknown bag, a key that is
+    /// empty or too long, or a value that holds a function reference.
+    fn state_set(
+        &self,
+        bag: &str,
+        key: &str,
+        value: Value,
+        replicated: bool,
+    ) -> Result<(), ScriptError>;
 }
 
 /// One running resource inside one scripting language.
@@ -181,6 +197,10 @@ pub trait ScriptRuntime {
 
     /// See [`Host::release_ref`].
     fn release_ref(&self, id: u32);
+
+    /// Runs this runtime's state change handlers that match `bag` and `key`.
+    /// Each handler runs as its own task, like an event handler.
+    fn deliver_state_change(&self, bag: &str, key: &str, value: &Value, replicated: bool);
 
     /// Drops all tasks, handlers and references. The runtime is unusable
     /// afterwards; the host removes it.

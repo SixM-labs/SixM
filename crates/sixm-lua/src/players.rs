@@ -85,7 +85,7 @@ fn client_target(value: &LuaValue) -> mlua::Result<ClientTarget> {
 }
 
 /// A server id for a player argument, or `None` when it is not one.
-fn player_id(value: &LuaValue) -> Option<u32> {
+pub(crate) fn player_id(value: &LuaValue) -> Option<u32> {
     whole_number(value).and_then(|number| u32::try_from(number).ok())
 }
 
@@ -107,6 +107,6 @@ fn whole_float(float: f64) -> Option<i64> {
     (float.fract() == 0.0 && float.abs() <= EXACT_FLOAT_LIMIT).then_some(float as i64)
 }
 
-fn invalid_player(function: &str) -> mlua::Error {
+pub(crate) fn invalid_player(function: &str) -> mlua::Error {
     mlua::Error::runtime(format!("{function}: expected a player id"))
 }

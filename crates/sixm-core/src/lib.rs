@@ -14,9 +14,11 @@
 //! `RefCell` borrow across a call into a runtime or the host.
 
 mod runtime;
+mod state;
 mod value;
 
 pub use runtime::{
     ClientTarget, EventContext, EventSource, Host, PlayerInfo, ScriptError, ScriptRuntime,
 };
+pub use state::{GLOBAL_BAG, MAX_STATE_NAME_LEN, player_bag, player_of_bag};
 pub use value::{FuncRef, ResourceName, Value};

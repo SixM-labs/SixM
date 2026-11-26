@@ -36,7 +36,7 @@ separate adapters, starting with GTA VI once a PC version is released.
 | Server binary: `server.cfg`, console, resource manager (`sixm-server`) | ✅ done |
 | Networking: QUIC transport and protocol (`sixm-net`) | ✅ done |
 | Players, net events and client events (`sixm-server`, `sixm-lua`) | ✅ done |
-| State bags | ⏳ planned |
+| State bags (`sixm-server`, `sixm-lua`, `sixm-net`) | ✅ done |
 | Entity sync | ⏳ planned |
 | Game client and GTA VI adapter | ⏳ planned (needs a PC release) |
 
@@ -79,8 +79,8 @@ cargo run --release -p sixm-server
 ```
 
 The console accepts `start`, `stop`, `restart`, `ensure`, `refresh`, `set`,
-`exec`, `endpoint_add_udp`, `players`, `help` and `quit`, plus every command
-registered with `RegisterCommand`.
+`exec`, `endpoint_add_udp`, `players`, `state`, `help` and `quit`, plus every
+command registered with `RegisterCommand`.
 
 A test client can connect while the example server runs:
 
@@ -151,6 +151,49 @@ client that knows it can pin it and refuse any other server. Unpinned
 connections are encrypted but not authenticated, so a man in the middle can
 impersonate the server. An empty `sixm_identityFile` makes a new certificate on
 every start instead.
+
+## State bags
+
+A state bag is a table of keys that the server keeps, and that clients can
+receive. There are two kinds of bag:
+
+- `GlobalState` is the bag shared by the whole server.
+- `Player(id).state` is the bag of a connected player. It is created just
+  before `playerJoining` and removed after `playerDropped`. Writing to the bag
+  of a player who is not connected is an error.
+
+```lua
+GlobalState.playerCount = #GetPlayers()        -- replicated to clients
+Player(source).state.joinedAt = GetGameTimer() -- replicated to clients
+GlobalState:set('debug', true, false)          -- kept on the server only
+GlobalState.playerCount = nil                  -- deletes the key
+
+AddStateBagChangeHandler('playerCount', nil, function(bagName, key, value, reserved, replicated)
+    print(bagName, key, value, replicated)
+end)
+local cookie = AddStateBagChangeHandler(nil, nil, print)
+RemoveStateBagChangeHandler(cookie)
+
+GetPlayerFromStateBagName('player:3') -- 3, or 0 for any other bag name
+```
+
+- Plain assignment replicates. `bag:set(key, value, replicated)` chooses, and
+  replicates when `replicated` is omitted.
+- A replicated write is sent to every connected player. A new player gets every
+  replicated key of every bag when it joins. A player bag is announced as
+  removed when its player leaves.
+- A non-replicated write stays on the server. Clients keep the last replicated
+  value they were sent, so a non-replicated write does not change it.
+- Every write runs the change handlers on the server, replicated or not. A
+  handler gets `(bagName, key, value, reserved, replicated)`. `reserved` is
+  always `0`, as in FiveM. A filter of `nil` matches every key or bag.
+- Keys are 1 to 256 bytes. Values are plain data: functions cannot be stored.
+- `set` is the method name of a bag. A key called `set` can be written, but
+  reading it returns the method, so choose another name.
+- Clients cannot write state. The server accepts no state messages from
+  clients, so only server scripts change it.
+- The console command `state` lists the bags. `state <bag>` prints the keys of
+  one bag, with their values.
 
 Events sent by players reach only handlers registered with `RegisterNetEvent`.
 Use `TriggerClientEvent(name, id, ...)` to send to one player, or `-1` for

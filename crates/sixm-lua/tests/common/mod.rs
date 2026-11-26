@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use sixm_core::{
-    ClientTarget, EventContext, EventSource, FuncRef, Host, PlayerInfo, ResourceName, ScriptError,
-    ScriptRuntime, Value,
+    ClientTarget, EventContext, EventSource, FuncRef, GLOBAL_BAG, Host, PlayerInfo, ResourceName,
+    ScriptError, ScriptRuntime, Value, player_of_bag,
 };
 use sixm_lua::LuaRuntime;
 use tempfile::TempDir;
@@ -35,6 +35,8 @@ pub struct TestHost {
     pub client_events: RefCell<Vec<(String, ClientTarget, Vec<Value>)>>,
     /// Players dropped, as `(id, reason)`, in order.
     pub dropped: RefCell<Vec<(u32, String)>>,
+    /// State values by `(bag, key)`.
+    pub state: RefCell<HashMap<(String, String), Value>>,
 }
 
 impl TestHost {
@@ -137,7 +139,7 @@ impl Host for TestHost {
         target: ClientTarget,
         args: &[Value],
     ) -> Result<(), ScriptError> {
-        if args.iter().any(contains_func_ref) {
+        if args.iter().any(Value::contains_func_ref) {
             return Err(ScriptError::Runtime(
                 "function references cannot be sent to clients".to_owned(),
             ));
@@ -163,17 +165,49 @@ impl Host for TestHost {
     fn drop_player(&self, player: u32, reason: &str) {
         self.dropped.borrow_mut().push((player, reason.to_owned()));
     }
-}
 
-/// Whether a function reference is anywhere inside `value`.
-fn contains_func_ref(value: &Value) -> bool {
-    match value {
-        Value::FuncRef(_) => true,
-        Value::Array(items) => items.iter().any(contains_func_ref),
-        Value::Map(pairs) => pairs
-            .iter()
-            .any(|(key, item)| contains_func_ref(key) || contains_func_ref(item)),
-        _ => false,
+    fn state_get(&self, bag: &str, key: &str) -> Option<Value> {
+        self.state
+            .borrow()
+            .get(&(bag.to_owned(), key.to_owned()))
+            .cloned()
+    }
+
+    /// Stores the value like the server does, refusing unknown player bags, and
+    /// runs the change handlers of every runtime. Replication is not modelled.
+    fn state_set(
+        &self,
+        bag: &str,
+        key: &str,
+        value: Value,
+        replicated: bool,
+    ) -> Result<(), ScriptError> {
+        let player_connected = player_of_bag(bag).is_some_and(|id| {
+            self.players
+                .borrow()
+                .iter()
+                .any(|(connected, _)| *connected == id)
+        });
+        if bag != GLOBAL_BAG && !player_connected {
+            return Err(ScriptError::Runtime(format!(
+                "state bag `{bag}` does not exist"
+            )));
+        }
+        if value.contains_func_ref() {
+            return Err(ScriptError::Runtime(
+                "state values cannot contain functions".to_owned(),
+            ));
+        }
+        let slot = (bag.to_owned(), key.to_owned());
+        if matches!(value, Value::Nil) {
+            self.state.borrow_mut().remove(&slot);
+        } else {
+            self.state.borrow_mut().insert(slot, value.clone());
+        }
+        for runtime in self.snapshot() {
+            runtime.deliver_state_change(bag, key, &value, replicated);
+        }
+        Ok(())
     }
 }
 

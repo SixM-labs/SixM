@@ -62,7 +62,7 @@ impl Players {
         self.by_id.len()
     }
 
-    fn contains(&self, id: u32) -> bool {
+    pub(crate) fn contains(&self, id: u32) -> bool {
         self.by_id.contains_key(&id)
     }
 
@@ -218,6 +218,7 @@ impl ResourceManager {
                 endpoint,
             },
         );
+        self.join_state(id);
         self.dispatch("playerJoining", EventSource::Player(id), &[]);
         info!("{name} ({id}) joined from {endpoint}");
     }
@@ -256,11 +257,12 @@ impl ResourceManager {
             &[Value::from(reason)],
         );
         self.network.players.borrow_mut().remove(player);
+        self.leave_state(player);
         info!("{name} ({player}) left: {reason}");
     }
 
     /// Runs `f` with the socket if the network is running.
-    fn with_server(&self, f: impl FnOnce(&NetServer)) {
+    pub(crate) fn with_server(&self, f: impl FnOnce(&NetServer)) {
         if let Some(server) = self.network.server.borrow().as_ref() {
             f(server);
         }

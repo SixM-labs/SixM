@@ -18,7 +18,8 @@ use serde::de::{
 };
 use serde::ser::{SerializeSeq, SerializeStructVariant};
 use serde::{Serialize, Serializer};
-use sixm_core::Value;
+use sixm_core::{MAX_STATE_NAME_LEN, Value};
+use tracing::warn;
 
 use crate::error::NetError;
 use crate::protocol::{
@@ -37,7 +38,15 @@ const TAG_ARRAY: u32 = 5;
 const TAG_MAP: u32 = 6;
 const VALUE_VARIANTS: &[&str] = &["Nil", "Bool", "Int", "Float", "String", "Array", "Map"];
 const CLIENT_VARIANTS: &[&str] = &["Hello", "Event"];
-const SERVER_VARIANTS: &[&str] = &["Welcome", "Rejected", "Event", "Kicked"];
+const SERVER_VARIANTS: &[&str] = &[
+    "Welcome",
+    "Rejected",
+    "Event",
+    "Kicked",
+    "StateBag",
+    "StateBagRemoved",
+    "StateSnapshot",
+];
 
 /// Argument list of an event. Decoding enforces [`MAX_VALUE_DEPTH`] and
 /// [`MAX_DECODED_VALUES`].
@@ -68,6 +77,38 @@ impl Serialize for EventFrame<'_> {
     }
 }
 
+/// A state value as the server sends it. Nil means the key was deleted.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct StateValue(pub(crate) Value);
+
+impl Serialize for StateValue {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Encode(&self.0).serialize(serializer)
+    }
+}
+
+/// Borrowed encoding of a state change, so that broadcasting never copies the value.
+struct StateFrame<'a> {
+    bag: &'a str,
+    key: &'a str,
+    value: &'a Value,
+}
+
+impl Serialize for StateFrame<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut variant = serializer.serialize_struct_variant(
+            MESSAGE_NAME,
+            ServerMessage::STATE_BAG_TAG,
+            "StateBag",
+            3,
+        )?;
+        variant.serialize_field("bag", self.bag)?;
+        variant.serialize_field("key", self.key)?;
+        variant.serialize_field("value", &Encode(self.value))?;
+        variant.end()
+    }
+}
+
 /// Checks that a value list can be encoded: no function references and no
 /// nesting beyond [`MAX_VALUE_DEPTH`].
 pub(crate) fn check_values(values: &[Value]) -> Result<(), NetError> {
@@ -93,13 +134,154 @@ fn check_value(value: &Value, depth: usize) -> Result<(), NetError> {
 
 /// Validates an event name, which must be 1 to 256 bytes.
 pub(crate) fn validate_event_name(name: &str) -> Result<(), NetError> {
-    if name.is_empty() || name.len() > MAX_EVENT_NAME_LEN {
+    validate_length("event name", name, MAX_EVENT_NAME_LEN)
+}
+
+/// Checks that `name` is 1 to `max` bytes long. `what` names it in the error.
+fn validate_length(what: &str, name: &str, max: usize) -> Result<(), NetError> {
+    if name.is_empty() || name.len() > max {
         return Err(NetError::InvalidInput(format!(
-            "event name must be 1 to {MAX_EVENT_NAME_LEN} bytes, got {}",
+            "{what} must be 1 to {max} bytes, got {}",
             name.len()
         )));
     }
     Ok(())
+}
+
+/// Encodes a state change as a complete frame, validating the names and the value first.
+pub(crate) fn encode_state(
+    bag: &str,
+    key: &str,
+    value: &Value,
+    max_frame: usize,
+) -> Result<Arc<[u8]>, NetError> {
+    validate_length("state bag name", bag, MAX_STATE_NAME_LEN)?;
+    validate_length("state key", key, MAX_STATE_NAME_LEN)?;
+    check_values(std::slice::from_ref(value))?;
+    encode_frame(&StateFrame { bag, key, value }, max_frame)
+}
+
+/// Encodes the removal of a state bag as a complete frame.
+pub(crate) fn encode_state_removed(bag: &str, max_frame: usize) -> Result<Arc<[u8]>, NetError> {
+    validate_length("state bag name", bag, MAX_STATE_NAME_LEN)?;
+    encode_frame(
+        &ServerMessage::StateBagRemoved {
+            bag: bag.to_owned(),
+        },
+        max_frame,
+    )
+}
+
+/// Encodes a snapshot of state changes as the fewest frames that can carry
+/// them in order. Each frame holds whole entries, and stays within `max_frame`
+/// bytes and [`MAX_DECODED_VALUES`] decoded values, so a receiver can always
+/// decode it. An entry too large for any frame on its own is skipped with a
+/// warning. Names and values are validated up front, so an invalid entry fails
+/// the whole call.
+pub(crate) fn encode_state_snapshot(
+    entries: &[(&str, &str, &Value)],
+    max_frame: usize,
+) -> Result<Vec<Arc<[u8]>>, NetError> {
+    let mut frames = Vec::new();
+    let mut chunk = SnapshotChunk::default();
+    for &(bag, key, value) in entries {
+        validate_length("state bag name", bag, MAX_STATE_NAME_LEN)?;
+        validate_length("state key", key, MAX_STATE_NAME_LEN)?;
+        check_values(std::slice::from_ref(value))?;
+        let encoded = postcard::to_extend(&(bag, key, Encode(value)), Vec::<u8>::new())
+            .map_err(|err| NetError::Protocol(format!("cannot encode message: {err}")))?;
+        let values = count_values(value);
+        if !chunk.is_empty() && !chunk.accepts(encoded.len(), values, max_frame) {
+            frames.push(chunk.seal(max_frame)?);
+            chunk = SnapshotChunk::default();
+        }
+        if !chunk.accepts(encoded.len(), values, max_frame) {
+            warn!(
+                bag,
+                key, "state entry is too large for one frame, skipping it"
+            );
+            continue;
+        }
+        chunk.push(&encoded, values);
+    }
+    if !chunk.is_empty() {
+        frames.push(chunk.seal(max_frame)?);
+    }
+    Ok(frames)
+}
+
+/// Entries of a snapshot frame that are being collected. `bytes` holds the
+/// encoded entries back to back, and `values` counts their decoded values.
+#[derive(Default)]
+struct SnapshotChunk {
+    bytes: Vec<u8>,
+    count: usize,
+    values: usize,
+}
+
+impl SnapshotChunk {
+    fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Whether an entry of `entry_len` bytes and `values` decoded values can
+    /// join this chunk without exceeding the frame or the decoding budget.
+    fn accepts(&self, entry_len: usize, values: usize, max_frame: usize) -> bool {
+        let payload = varint_len(u64::from(ServerMessage::STATE_SNAPSHOT_TAG))
+            + varint_len(u64::try_from(self.count + 1).unwrap_or(u64::MAX))
+            + self.bytes.len()
+            + entry_len;
+        FRAME_HEADER_LEN + payload <= max_frame && self.values + values <= MAX_DECODED_VALUES
+    }
+
+    fn push(&mut self, encoded: &[u8], values: usize) {
+        self.bytes.extend_from_slice(encoded);
+        self.count += 1;
+        self.values += values;
+    }
+
+    /// Writes the variant index and entry count, then the entries, as one frame.
+    /// A variant index and a sequence length are both varints, so the first two
+    /// fields form the start of the `StateSnapshot` encoding.
+    fn seal(self, max_frame: usize) -> Result<Arc<[u8]>, NetError> {
+        let mut buffer = postcard::to_extend(
+            &(ServerMessage::STATE_SNAPSHOT_TAG, self.count),
+            vec![0_u8; FRAME_HEADER_LEN],
+        )
+        .map_err(|err| NetError::Protocol(format!("cannot encode message: {err}")))?;
+        buffer.extend_from_slice(&self.bytes);
+        finish_frame(buffer, max_frame)
+    }
+}
+
+/// Number of bytes that postcard uses to encode `n` as a varint.
+fn varint_len(mut n: u64) -> usize {
+    let mut len = 1;
+    while n >= 0x80 {
+        n >>= 7;
+        len += 1;
+    }
+    len
+}
+
+/// Number of values that `value` decodes into: every nested value and map key
+/// counts, as in [`ValueBudget`].
+fn count_values(value: &Value) -> usize {
+    match value {
+        Value::Array(items) => 1 + items.iter().map(count_values).sum::<usize>(),
+        Value::Map(entries) => {
+            1 + entries
+                .iter()
+                .map(|(key, value)| count_values(key) + count_values(value))
+                .sum::<usize>()
+        }
+        Value::Nil
+        | Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::String(_)
+        | Value::FuncRef(_) => 1,
+    }
 }
 
 /// Encodes an event as a complete frame, validating name and arguments first.
@@ -119,8 +301,14 @@ pub(crate) fn encode_frame<T: Serialize>(
     message: &T,
     max_frame: usize,
 ) -> Result<Arc<[u8]>, NetError> {
-    let mut buffer = postcard::to_extend(message, vec![0_u8; FRAME_HEADER_LEN])
+    let buffer = postcard::to_extend(message, vec![0_u8; FRAME_HEADER_LEN])
         .map_err(|err| NetError::Protocol(format!("cannot encode message: {err}")))?;
+    finish_frame(buffer, max_frame)
+}
+
+/// Writes the length prefix into the first [`FRAME_HEADER_LEN`] bytes of
+/// `buffer`, which hold the payload after them, and checks the payload size.
+fn finish_frame(mut buffer: Vec<u8>, max_frame: usize) -> Result<Arc<[u8]>, NetError> {
     let len = buffer.len() - FRAME_HEADER_LEN;
     let too_large = NetError::FrameTooLarge {
         len,
@@ -415,11 +603,123 @@ impl<'de> Visitor<'de> for ServerMessageVisitor<'_> {
             ServerMessage::KICKED_TAG => variant
                 .newtype_variant::<String>()
                 .map(|reason| ServerMessage::Kicked { reason }),
+            ServerMessage::STATE_BAG_TAG => variant
+                .newtype_variant_seed(StateSeed {
+                    budget: self.budget,
+                })
+                .map(|(bag, key, value)| ServerMessage::StateBag {
+                    bag,
+                    key,
+                    value: StateValue(value),
+                }),
+            ServerMessage::STATE_BAG_REMOVED_TAG => variant
+                .newtype_variant::<String>()
+                .map(|bag| ServerMessage::StateBagRemoved { bag }),
+            ServerMessage::STATE_SNAPSHOT_TAG => variant
+                .newtype_variant_seed(SnapshotSeed {
+                    budget: self.budget,
+                })
+                .map(|entries| ServerMessage::StateSnapshot { entries }),
             other => Err(de::Error::unknown_variant(
                 &other.to_string(),
                 SERVER_VARIANTS,
             )),
         }
+    }
+}
+
+/// Decodes the body of a state change, `(bag, key, value)`.
+#[derive(Clone, Copy)]
+struct StateSeed<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> DeserializeSeed<'de> for StateSeed<'_> {
+    type Value = (String, String, Value);
+
+    fn deserialize<D: Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<(String, String, Value), D::Error> {
+        deserializer.deserialize_tuple(
+            3,
+            StateVisitor {
+                budget: self.budget,
+            },
+        )
+    }
+}
+
+struct StateVisitor<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> Visitor<'de> for StateVisitor<'_> {
+    type Value = (String, String, Value);
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a state bag name, a key and a value")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let bag: String = seq
+            .next_element()?
+            .ok_or_else(|| de::Error::invalid_length(0, &"a state bag name"))?;
+        let key: String = seq
+            .next_element()?
+            .ok_or_else(|| de::Error::invalid_length(1, &"a state key"))?;
+        let value = seq
+            .next_element_seed(ValueSeed {
+                depth: 1,
+                budget: self.budget,
+            })?
+            .ok_or_else(|| de::Error::invalid_length(2, &"a state value"))?;
+        Ok((bag, key, value))
+    }
+}
+
+/// Decodes the entries of a snapshot, a sequence of state changes. Each entry
+/// spends at least one unit of the budget, so the sequence is bounded by it.
+#[derive(Clone, Copy)]
+struct SnapshotSeed<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> DeserializeSeed<'de> for SnapshotSeed<'_> {
+    type Value = Vec<(String, String, StateValue)>;
+
+    fn deserialize<D: Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Vec<(String, String, StateValue)>, D::Error> {
+        deserializer.deserialize_seq(SnapshotVisitor {
+            budget: self.budget,
+        })
+    }
+}
+
+struct SnapshotVisitor<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> Visitor<'de> for SnapshotVisitor<'_> {
+    type Value = Vec<(String, String, StateValue)>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a sequence of state changes")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(
+        self,
+        mut seq: A,
+    ) -> Result<Vec<(String, String, StateValue)>, A::Error> {
+        let mut entries = Vec::new();
+        while let Some((bag, key, value)) = seq.next_element_seed(StateSeed {
+            budget: self.budget,
+        })? {
+            entries.push((bag, key, StateValue(value)));
+        }
+        Ok(entries)
     }
 }
 
@@ -794,6 +1094,183 @@ mod tests {
         assert!(matches!(
             decode_server_message(&payload_of(&kicked)),
             Ok(ServerMessage::Kicked { reason }) if reason == "bye"
+        ));
+        let removed = ServerMessage::StateBagRemoved {
+            bag: "player:4".to_owned(),
+        };
+        assert!(matches!(
+            decode_server_message(&payload_of(&removed)),
+            Ok(ServerMessage::StateBagRemoved { bag }) if bag == "player:4"
+        ));
+    }
+
+    #[test]
+    fn state_frames_decode_to_the_change_they_carry() {
+        let value = Value::Map(vec![(Value::from("k"), Value::Float(1.5))]);
+        let frame = encode_state("global", "score", &value, MAX_FRAME).expect("state encodes");
+        let decoded = decode_server_message(&frame[FRAME_HEADER_LEN..]);
+        assert!(matches!(
+            decoded,
+            Ok(ServerMessage::StateBag { bag, key, value: StateValue(got) })
+                if bag == "global" && key == "score" && got == value
+        ));
+
+        let frame = encode_state_removed("player:4", MAX_FRAME).expect("removal encodes");
+        assert!(matches!(
+            decode_server_message(&frame[FRAME_HEADER_LEN..]),
+            Ok(ServerMessage::StateBagRemoved { bag }) if bag == "player:4"
+        ));
+    }
+
+    #[test]
+    fn state_names_are_limited_like_event_names() {
+        let long = "x".repeat(MAX_STATE_NAME_LEN + 1);
+        assert!(encode_state(&long, "key", &Value::Nil, MAX_FRAME).is_err());
+        assert!(encode_state("global", "", &Value::Nil, MAX_FRAME).is_err());
+        assert!(encode_state("global", &long, &Value::Nil, MAX_FRAME).is_err());
+        assert!(encode_state_removed("", MAX_FRAME).is_err());
+    }
+
+    #[test]
+    fn state_values_cannot_hold_functions() {
+        let value = Value::Array(vec![Value::FuncRef(sixm_core::FuncRef {
+            owner: Arc::from("r"),
+            instance: 1,
+            id: 1,
+        })]);
+        assert!(matches!(
+            encode_state("global", "f", &value, MAX_FRAME),
+            Err(NetError::FunctionNotSendable)
+        ));
+    }
+
+    /// Decodes every frame of a snapshot, checking each frame's length prefix
+    /// and size, and returns the entries in the order they arrived.
+    fn decode_snapshot_frames(
+        frames: &[Arc<[u8]>],
+        max_frame: usize,
+    ) -> Vec<(String, String, Value)> {
+        let mut decoded = Vec::new();
+        for frame in frames {
+            let len = frame.len() - FRAME_HEADER_LEN;
+            assert!(len <= max_frame, "frame of {len} bytes exceeds {max_frame}");
+            let prefix = u32::try_from(len).expect("frame fits a u32");
+            assert_eq!(&frame[..FRAME_HEADER_LEN], &prefix.to_le_bytes());
+            match decode_server_message(&frame[FRAME_HEADER_LEN..]) {
+                Ok(ServerMessage::StateSnapshot { entries }) => {
+                    decoded.extend(
+                        entries
+                            .into_iter()
+                            .map(|(bag, key, value)| (bag, key, value.0)),
+                    );
+                }
+                Ok(_) => panic!("the frame is not a snapshot"),
+                Err(err) => panic!("the frame does not decode: {err}"),
+            }
+        }
+        decoded
+    }
+
+    #[test]
+    fn state_snapshot_round_trips_in_order() {
+        let first = Value::from("a");
+        let second = Value::Map(vec![(Value::from("k"), Value::Float(2.5))]);
+        let third = Value::Nil;
+        let entries = [
+            ("global", "x", &first),
+            ("player:1", "y", &second),
+            ("global", "z", &third),
+        ];
+        let frames = encode_state_snapshot(&entries, MAX_FRAME).expect("snapshot encodes");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            decode_snapshot_frames(&frames, MAX_FRAME),
+            vec![
+                ("global".to_owned(), "x".to_owned(), first),
+                ("player:1".to_owned(), "y".to_owned(), second),
+                ("global".to_owned(), "z".to_owned(), third),
+            ]
+        );
+    }
+
+    #[test]
+    fn many_small_entries_split_into_frames_within_the_limit() {
+        const MAX: usize = 512;
+        let keys: Vec<String> = (0..3000).map(|i| format!("key{i}")).collect();
+        let values: Vec<Value> = (0..3000_i64).map(Value::Int).collect();
+        let entries: Vec<(&str, &str, &Value)> = keys
+            .iter()
+            .zip(&values)
+            .map(|(key, value)| ("player:1", key.as_str(), value))
+            .collect();
+
+        let frames = encode_state_snapshot(&entries, MAX).expect("snapshot encodes");
+        assert!(
+            frames.len() > 1,
+            "3000 entries cannot fit one 512-byte frame"
+        );
+        let expected: Vec<(String, String, Value)> = entries
+            .iter()
+            .map(|&(bag, key, value)| (bag.to_owned(), key.to_owned(), value.clone()))
+            .collect();
+        assert_eq!(decode_snapshot_frames(&frames, MAX), expected);
+    }
+
+    #[test]
+    fn snapshot_frames_respect_the_decoding_budget() {
+        // Each entry decodes into 10 001 values, so six fit under the budget of
+        // 65 536 and ten entries need exactly two frames.
+        let value = Value::Array(vec![Value::Nil; 10_000]);
+        let keys: Vec<String> = (0..10).map(|i| format!("key{i}")).collect();
+        let entries: Vec<(&str, &str, &Value)> = keys
+            .iter()
+            .map(|key| ("global", key.as_str(), &value))
+            .collect();
+
+        let frames = encode_state_snapshot(&entries, MAX_FRAME).expect("snapshot encodes");
+        assert_eq!(frames.len(), 2);
+        assert_eq!(decode_snapshot_frames(&frames, MAX_FRAME).len(), 10);
+    }
+
+    #[test]
+    fn entries_too_large_for_one_frame_are_skipped() {
+        let small = Value::Int(1);
+        let big = Value::from("x".repeat(100).as_str());
+        let entries = [("global", "big", &big), ("global", "small", &small)];
+
+        let frames = encode_state_snapshot(&entries, 64).expect("snapshot encodes");
+        assert_eq!(
+            decode_snapshot_frames(&frames, 64),
+            vec![("global".to_owned(), "small".to_owned(), small.clone())]
+        );
+    }
+
+    #[test]
+    fn entries_over_the_decoding_budget_are_skipped() {
+        // Smaller than a frame in bytes, but more values than one message may hold.
+        let small = Value::Int(1);
+        let over = Value::Array(vec![Value::Nil; MAX_DECODED_VALUES]);
+        let entries = [("global", "over", &over), ("global", "small", &small)];
+
+        let frames = encode_state_snapshot(&entries, MAX_FRAME).expect("snapshot encodes");
+        assert_eq!(
+            decode_snapshot_frames(&frames, MAX_FRAME),
+            vec![("global".to_owned(), "small".to_owned(), small.clone())]
+        );
+    }
+
+    #[test]
+    fn invalid_snapshot_entries_fail_the_whole_call() {
+        let value = Value::Nil;
+        assert!(encode_state_snapshot(&[("global", "", &value)], MAX_FRAME).is_err());
+        let func = Value::Array(vec![Value::FuncRef(sixm_core::FuncRef {
+            owner: Arc::from("r"),
+            instance: 1,
+            id: 1,
+        })]);
+        assert!(matches!(
+            encode_state_snapshot(&[("global", "f", &func)], MAX_FRAME),
+            Err(NetError::FunctionNotSendable)
         ));
     }
 

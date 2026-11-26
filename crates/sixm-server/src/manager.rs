@@ -18,6 +18,7 @@ use tracing::{error, info, warn};
 use crate::convars::Convars;
 use crate::host_functions::{HostFunctions, is_host};
 use crate::network::Network;
+use crate::state::StateStore;
 
 /// Why a resource operation did not complete.
 #[derive(Debug, thiserror::Error)]
@@ -80,6 +81,8 @@ pub struct ResourceManager {
     quit: Cell<bool>,
     /// The listening socket, connected players and pending kicks.
     pub(crate) network: Network,
+    /// State bags and their keys.
+    pub(crate) state: RefCell<StateStore>,
     /// Functions the server offers to scripts, such as `setKickReason`.
     pub(crate) host_functions: RefCell<HostFunctions>,
 }
@@ -100,6 +103,7 @@ impl ResourceManager {
             queued: RefCell::default(),
             quit: Cell::new(false),
             network: Network::default(),
+            state: RefCell::default(),
             host_functions: RefCell::default(),
         })
     }
@@ -308,7 +312,8 @@ impl ResourceManager {
             .cloned()
     }
 
-    fn snapshot(&self) -> Rc<[Rc<LuaRuntime>]> {
+    /// The running runtimes, in start order, as a shared slice that needs no borrow.
+    pub(crate) fn snapshot(&self) -> Rc<[Rc<LuaRuntime>]> {
         self.snapshot.borrow().clone()
     }
 
@@ -556,5 +561,19 @@ impl Host for ResourceManager {
 
     fn drop_player(&self, player: u32, reason: &str) {
         self.queue_drop(player, reason);
+    }
+
+    fn state_get(&self, bag: &str, key: &str) -> Option<Value> {
+        self.state.borrow().get(bag, key).cloned()
+    }
+
+    fn state_set(
+        &self,
+        bag: &str,
+        key: &str,
+        value: Value,
+        replicated: bool,
+    ) -> Result<(), ScriptError> {
+        self.write_state(bag, key, &value, replicated)
     }
 }

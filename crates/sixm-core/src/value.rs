@@ -34,6 +34,18 @@ impl Value {
             _ => None,
         }
     }
+
+    /// Whether a function reference appears anywhere inside this value.
+    pub fn contains_func_ref(&self) -> bool {
+        match self {
+            Self::FuncRef(_) => true,
+            Self::Array(items) => items.iter().any(Self::contains_func_ref),
+            Self::Map(pairs) => pairs
+                .iter()
+                .any(|(key, item)| key.contains_func_ref() || item.contains_func_ref()),
+            Self::Nil | Self::Bool(_) | Self::Int(_) | Self::Float(_) | Self::String(_) => false,
+        }
+    }
 }
 
 impl From<&str> for Value {

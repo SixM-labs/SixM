@@ -16,6 +16,7 @@ use crate::natives;
 use crate::refs::RefTable;
 use crate::sandbox;
 use crate::scheduler::Sched;
+use crate::state::ChangeHandlers;
 
 /// A sandboxed Lua 5.4 state running one resource instance.
 ///
@@ -38,6 +39,7 @@ pub struct LuaRuntime {
     pub(crate) shut: Cell<bool>,
     pub(crate) sched: RefCell<Sched>,
     pub(crate) events: RefCell<Events>,
+    pub(crate) state: RefCell<ChangeHandlers>,
     pub(crate) exports: RefCell<Exports>,
     pub(crate) refs: RefCell<RefTable>,
     /// Releases requested while `refs` was borrowed, applied at the next safe point.
@@ -73,6 +75,7 @@ impl LuaRuntime {
             shut: Cell::new(false),
             sched: RefCell::default(),
             events: RefCell::default(),
+            state: RefCell::default(),
             exports: RefCell::default(),
             refs: RefCell::default(),
             deferred_releases: RefCell::default(),
@@ -133,10 +136,11 @@ impl LuaRuntime {
     fn clear_state(&self) {
         let sched = std::mem::take(&mut *self.sched.borrow_mut());
         let events = std::mem::take(&mut *self.events.borrow_mut());
+        let state = std::mem::take(&mut *self.state.borrow_mut());
         let exports = std::mem::take(&mut *self.exports.borrow_mut());
         let refs = std::mem::take(&mut *self.refs.borrow_mut());
         let deferred = std::mem::take(&mut *self.deferred_releases.borrow_mut());
-        drop((sched, events, exports, refs, deferred));
+        drop((sched, events, state, exports, refs, deferred));
 
         if let Err(err) = self.drop_globals() {
             tracing::warn!(target: "sixm::script", "[{}] shutdown: {err}", self.resource);
@@ -210,6 +214,12 @@ impl ScriptRuntime for LuaRuntime {
     ) -> Result<(), ScriptError> {
         self.ensure_running()?;
         self.dispatch_event(event, source, args, ctx)
+    }
+
+    fn deliver_state_change(&self, bag: &str, key: &str, value: &Value, replicated: bool) {
+        if !self.shut.get() {
+            self.dispatch_state_change(bag, key, value, replicated);
+        }
     }
 
     fn call_export(&self, export: &str, args: &[Value]) -> Result<Vec<Value>, ScriptError> {
