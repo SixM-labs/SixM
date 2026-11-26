@@ -13,4 +13,4 @@ mod resource;
 pub use catalog::{Catalog, ScanIssue};
 pub use error::{DependencyError, ManifestError, ResourceError};
 pub use manifest::{Manifest, parse_manifest};
-pub use resource::ResourceInfo;
+pub use resource::{ClientFile, ClientFileKind, ResourceInfo};

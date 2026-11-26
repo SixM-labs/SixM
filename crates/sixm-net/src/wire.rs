@@ -22,6 +22,10 @@ use sixm_core::{MAX_STATE_NAME_LEN, Value};
 use tracing::warn;
 
 use crate::error::NetError;
+use crate::files::{
+    FILE_KIND_FILE, FileEntry, FileHash, MAX_FILE_NAME_LEN, MAX_FILE_SIZE, MAX_RESOURCE_NAME_LEN,
+    ResourceEntry,
+};
 use crate::protocol::{
     ClientMessage, MAX_DECODED_VALUES, MAX_EVENT_NAME_LEN, MAX_VALUE_DEPTH, ServerMessage,
 };
@@ -37,7 +41,7 @@ const TAG_STRING: u32 = 4;
 const TAG_ARRAY: u32 = 5;
 const TAG_MAP: u32 = 6;
 const VALUE_VARIANTS: &[&str] = &["Nil", "Bool", "Int", "Float", "String", "Array", "Map"];
-const CLIENT_VARIANTS: &[&str] = &["Hello", "Event"];
+const CLIENT_VARIANTS: &[&str] = &["Hello", "Event", "RequestFile"];
 const SERVER_VARIANTS: &[&str] = &[
     "Welcome",
     "Rejected",
@@ -46,7 +50,14 @@ const SERVER_VARIANTS: &[&str] = &[
     "StateBag",
     "StateBagRemoved",
     "StateSnapshot",
+    "Resources",
+    "ResourceStarted",
+    "ResourceStopped",
+    "FileUnavailable",
 ];
+/// Most files one snapshot entry carries. Larger resources are split into
+/// several entries of the same name, so one entry always fits a frame.
+const MAX_FILES_PER_ENTRY: usize = 256;
 
 /// Argument list of an event. Decoding enforces [`MAX_VALUE_DEPTH`] and
 /// [`MAX_DECODED_VALUES`].
@@ -138,7 +149,7 @@ pub(crate) fn validate_event_name(name: &str) -> Result<(), NetError> {
 }
 
 /// Checks that `name` is 1 to `max` bytes long. `what` names it in the error.
-fn validate_length(what: &str, name: &str, max: usize) -> Result<(), NetError> {
+pub(crate) fn validate_length(what: &str, name: &str, max: usize) -> Result<(), NetError> {
     if name.is_empty() || name.len() > max {
         return Err(NetError::InvalidInput(format!(
             "{what} must be 1 to {max} bytes, got {}",
@@ -183,7 +194,7 @@ pub(crate) fn encode_state_snapshot(
     max_frame: usize,
 ) -> Result<Vec<Arc<[u8]>>, NetError> {
     let mut frames = Vec::new();
-    let mut chunk = SnapshotChunk::default();
+    let mut chunk = SnapshotChunk::new(ServerMessage::STATE_SNAPSHOT_TAG);
     for &(bag, key, value) in entries {
         validate_length("state bag name", bag, MAX_STATE_NAME_LEN)?;
         validate_length("state key", key, MAX_STATE_NAME_LEN)?;
@@ -193,7 +204,7 @@ pub(crate) fn encode_state_snapshot(
         let values = count_values(value);
         if !chunk.is_empty() && !chunk.accepts(encoded.len(), values, max_frame) {
             frames.push(chunk.seal(max_frame)?);
-            chunk = SnapshotChunk::default();
+            chunk = SnapshotChunk::new(ServerMessage::STATE_SNAPSHOT_TAG);
         }
         if !chunk.accepts(encoded.len(), values, max_frame) {
             warn!(
@@ -210,16 +221,80 @@ pub(crate) fn encode_state_snapshot(
     Ok(frames)
 }
 
+/// The part of a [`ResourceEntry`] that one snapshot chunk carries: a name and
+/// a run of its files. Its encoding is the encoding of a `ResourceEntry`.
+#[derive(Serialize)]
+struct EntryPart<'a> {
+    name: &'a str,
+    files: &'a [FileEntry],
+}
+
+/// Encodes the client files of `entries` as the frames of a `Resources`
+/// snapshot, in order, followed by an empty frame that ends it. A resource with
+/// more than [`MAX_FILES_PER_ENTRY`] files is split across consecutive entries
+/// of the same name. Every frame stays within `max_frame` bytes and the
+/// decoding budget.
+pub(crate) fn encode_resources_snapshot(
+    entries: &[ResourceEntry],
+    max_frame: usize,
+) -> Result<Vec<Arc<[u8]>>, NetError> {
+    let mut frames = Vec::new();
+    let mut chunk = SnapshotChunk::new(ServerMessage::RESOURCES_TAG);
+    for entry in entries {
+        // A resource without files still needs one part, so that it is listed.
+        let parts: Vec<&[FileEntry]> = if entry.files.is_empty() {
+            vec![&entry.files[..]]
+        } else {
+            entry.files.chunks(MAX_FILES_PER_ENTRY).collect()
+        };
+        for files in parts {
+            let part = EntryPart {
+                name: &entry.name,
+                files,
+            };
+            let encoded = postcard::to_extend(&part, Vec::<u8>::new())
+                .map_err(|err| NetError::Protocol(format!("cannot encode message: {err}")))?;
+            // The entry itself and each file count as one decoded value.
+            let units = 1 + files.len();
+            if !chunk.is_empty() && !chunk.accepts(encoded.len(), units, max_frame) {
+                frames.push(chunk.seal(max_frame)?);
+                chunk = SnapshotChunk::new(ServerMessage::RESOURCES_TAG);
+            }
+            chunk.push(&encoded, units);
+        }
+    }
+    if !chunk.is_empty() {
+        frames.push(chunk.seal(max_frame)?);
+    }
+    frames.push(encode_frame(
+        &ServerMessage::Resources {
+            entries: Vec::new(),
+        },
+        max_frame,
+    )?);
+    Ok(frames)
+}
+
 /// Entries of a snapshot frame that are being collected. `bytes` holds the
 /// encoded entries back to back, and `values` counts their decoded values.
-#[derive(Default)]
+/// `tag` is the variant index of the frame's message.
 struct SnapshotChunk {
+    tag: u32,
     bytes: Vec<u8>,
     count: usize,
     values: usize,
 }
 
 impl SnapshotChunk {
+    fn new(tag: u32) -> Self {
+        Self {
+            tag,
+            bytes: Vec::new(),
+            count: 0,
+            values: 0,
+        }
+    }
+
     fn is_empty(&self) -> bool {
         self.count == 0
     }
@@ -227,7 +302,7 @@ impl SnapshotChunk {
     /// Whether an entry of `entry_len` bytes and `values` decoded values can
     /// join this chunk without exceeding the frame or the decoding budget.
     fn accepts(&self, entry_len: usize, values: usize, max_frame: usize) -> bool {
-        let payload = varint_len(u64::from(ServerMessage::STATE_SNAPSHOT_TAG))
+        let payload = varint_len(u64::from(self.tag))
             + varint_len(u64::try_from(self.count + 1).unwrap_or(u64::MAX))
             + self.bytes.len()
             + entry_len;
@@ -242,13 +317,10 @@ impl SnapshotChunk {
 
     /// Writes the variant index and entry count, then the entries, as one frame.
     /// A variant index and a sequence length are both varints, so the first two
-    /// fields form the start of the `StateSnapshot` encoding.
+    /// fields form the start of a snapshot message with a sequence payload.
     fn seal(self, max_frame: usize) -> Result<Arc<[u8]>, NetError> {
-        let mut buffer = postcard::to_extend(
-            &(ServerMessage::STATE_SNAPSHOT_TAG, self.count),
-            vec![0_u8; FRAME_HEADER_LEN],
-        )
-        .map_err(|err| NetError::Protocol(format!("cannot encode message: {err}")))?;
+        let mut buffer = postcard::to_extend(&(self.tag, self.count), vec![0_u8; FRAME_HEADER_LEN])
+            .map_err(|err| NetError::Protocol(format!("cannot encode message: {err}")))?;
         buffer.extend_from_slice(&self.bytes);
         finish_frame(buffer, max_frame)
     }
@@ -542,6 +614,9 @@ impl<'de> Visitor<'de> for ClientMessageVisitor<'_> {
                     budget: self.budget,
                 })
                 .map(|(name, args)| ClientMessage::Event { name, args }),
+            ClientMessage::REQUEST_FILE_TAG => variant
+                .newtype_variant::<FileHash>()
+                .map(|hash| ClientMessage::RequestFile { hash }),
             other => Err(de::Error::unknown_variant(
                 &other.to_string(),
                 CLIENT_VARIANTS,
@@ -620,6 +695,23 @@ impl<'de> Visitor<'de> for ServerMessageVisitor<'_> {
                     budget: self.budget,
                 })
                 .map(|entries| ServerMessage::StateSnapshot { entries }),
+            ServerMessage::RESOURCES_TAG => variant
+                .newtype_variant_seed(ResourcesSeed {
+                    budget: self.budget,
+                })
+                .map(|entries| ServerMessage::Resources { entries }),
+            ServerMessage::RESOURCE_STARTED_TAG => variant
+                .newtype_variant_seed(ResourceEntrySeed {
+                    budget: self.budget,
+                })
+                .map(|entry| ServerMessage::ResourceStarted { entry }),
+            ServerMessage::RESOURCE_STOPPED_TAG => variant
+                .newtype_variant::<String>()
+                .and_then(|name| checked_name::<A::Error>(name, MAX_RESOURCE_NAME_LEN))
+                .map(|name| ServerMessage::ResourceStopped { name }),
+            ServerMessage::FILE_UNAVAILABLE_TAG => variant
+                .newtype_variant::<FileHash>()
+                .map(|hash| ServerMessage::FileUnavailable { hash }),
             other => Err(de::Error::unknown_variant(
                 &other.to_string(),
                 SERVER_VARIANTS,
@@ -720,6 +812,198 @@ impl<'de> Visitor<'de> for SnapshotVisitor<'_> {
             entries.push((bag, key, StateValue(value)));
         }
         Ok(entries)
+    }
+}
+
+/// Decodes the body of a `Resources` frame: a sequence of resource entries.
+#[derive(Clone, Copy)]
+struct ResourcesSeed<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> DeserializeSeed<'de> for ResourcesSeed<'_> {
+    type Value = Vec<ResourceEntry>;
+
+    fn deserialize<D: Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Vec<ResourceEntry>, D::Error> {
+        deserializer.deserialize_seq(ResourcesVisitor {
+            budget: self.budget,
+        })
+    }
+}
+
+struct ResourcesVisitor<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> Visitor<'de> for ResourcesVisitor<'_> {
+    type Value = Vec<ResourceEntry>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a sequence of resource entries")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<ResourceEntry>, A::Error> {
+        let mut entries = Vec::new();
+        while let Some(entry) = seq.next_element_seed(ResourceEntrySeed {
+            budget: self.budget,
+        })? {
+            entries.push(entry);
+        }
+        Ok(entries)
+    }
+}
+
+/// Decodes one resource entry, `(name, files)`. The entry costs one unit of
+/// the budget, and each file costs one more.
+#[derive(Clone, Copy)]
+struct ResourceEntrySeed<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> DeserializeSeed<'de> for ResourceEntrySeed<'_> {
+    type Value = ResourceEntry;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<ResourceEntry, D::Error> {
+        self.budget.spend::<D::Error>()?;
+        deserializer.deserialize_tuple(
+            2,
+            ResourceEntryVisitor {
+                budget: self.budget,
+            },
+        )
+    }
+}
+
+struct ResourceEntryVisitor<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> Visitor<'de> for ResourceEntryVisitor<'_> {
+    type Value = ResourceEntry;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a resource name and its files")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<ResourceEntry, A::Error> {
+        let name: String = seq
+            .next_element()?
+            .ok_or_else(|| de::Error::invalid_length(0, &"a resource name"))?;
+        let name = checked_name::<A::Error>(name, MAX_RESOURCE_NAME_LEN)?;
+        let files = seq
+            .next_element_seed(FilesSeed {
+                budget: self.budget,
+            })?
+            .ok_or_else(|| de::Error::invalid_length(1, &"a list of files"))?;
+        Ok(ResourceEntry { name, files })
+    }
+}
+
+/// Decodes a list of files, each of which costs one unit of the budget.
+#[derive(Clone, Copy)]
+struct FilesSeed<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> DeserializeSeed<'de> for FilesSeed<'_> {
+    type Value = Vec<FileEntry>;
+
+    fn deserialize<D: Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Vec<FileEntry>, D::Error> {
+        deserializer.deserialize_seq(FilesVisitor {
+            budget: self.budget,
+        })
+    }
+}
+
+struct FilesVisitor<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> Visitor<'de> for FilesVisitor<'_> {
+    type Value = Vec<FileEntry>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a list of files")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<FileEntry>, A::Error> {
+        let mut files = Vec::new();
+        while let Some(file) = seq.next_element_seed(FileEntrySeed {
+            budget: self.budget,
+        })? {
+            files.push(file);
+        }
+        Ok(files)
+    }
+}
+
+/// Decodes one file entry, `(name, kind, hash, size)`.
+#[derive(Clone, Copy)]
+struct FileEntrySeed<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> DeserializeSeed<'de> for FileEntrySeed<'_> {
+    type Value = FileEntry;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<FileEntry, D::Error> {
+        self.budget.spend::<D::Error>()?;
+        deserializer.deserialize_tuple(4, FileEntryVisitor)
+    }
+}
+
+struct FileEntryVisitor;
+
+impl<'de> Visitor<'de> for FileEntryVisitor {
+    type Value = FileEntry;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a file name, kind, hash and size")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<FileEntry, A::Error> {
+        let name: String = seq
+            .next_element()?
+            .ok_or_else(|| de::Error::invalid_length(0, &"a file name"))?;
+        let name = checked_name::<A::Error>(name, MAX_FILE_NAME_LEN)?;
+        let kind: u8 = seq
+            .next_element()?
+            .ok_or_else(|| de::Error::invalid_length(1, &"a file kind"))?;
+        if kind > FILE_KIND_FILE {
+            return Err(de::Error::custom(format!("unknown file kind {kind}")));
+        }
+        let hash: FileHash = seq
+            .next_element()?
+            .ok_or_else(|| de::Error::invalid_length(2, &"a file hash"))?;
+        let size: u64 = seq
+            .next_element()?
+            .ok_or_else(|| de::Error::invalid_length(3, &"a file size"))?;
+        if size > MAX_FILE_SIZE {
+            return Err(de::Error::custom(format!(
+                "file size {size} is over the limit"
+            )));
+        }
+        Ok(FileEntry {
+            name,
+            kind,
+            hash,
+            size,
+        })
+    }
+}
+
+/// Checks a decoded name against its limit, as the encoder does.
+fn checked_name<E: de::Error>(name: String, max: usize) -> Result<String, E> {
+    if name.is_empty() || name.len() > max {
+        Err(E::custom(format!("name must be 1 to {max} bytes")))
+    } else {
+        Ok(name)
     }
 }
 
@@ -1008,6 +1292,7 @@ impl<'de> Visitor<'de> for PairVisitor<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::files::{FILE_KIND_CLIENT, FILE_KIND_SHARED};
     use crate::protocol::MAX_FRAME;
 
     /// The payload of `message` encoded as a complete frame.
@@ -1282,5 +1567,150 @@ mod tests {
             decode_client_message(&payload),
             Err(NetError::Protocol(reason)) if reason.contains("trailing")
         ));
+    }
+
+    fn file(name: &str, kind: u8, byte: u8) -> FileEntry {
+        FileEntry {
+            name: name.to_owned(),
+            kind,
+            hash: [byte; 32],
+            size: u64::from(byte) * 100,
+        }
+    }
+
+    #[test]
+    fn file_request_round_trips() {
+        let request = ClientMessage::RequestFile { hash: [7; 32] };
+        assert!(matches!(
+            decode_client_message(&payload_of(&request)),
+            Ok(ClientMessage::RequestFile { hash }) if hash == [7; 32]
+        ));
+    }
+
+    #[test]
+    fn resource_messages_round_trip() {
+        let entry = ResourceEntry {
+            name: "hello".to_owned(),
+            files: vec![file("client/main.lua", FILE_KIND_CLIENT, 1)],
+        };
+        let started = ServerMessage::ResourceStarted {
+            entry: entry.clone(),
+        };
+        assert!(matches!(
+            decode_server_message(&payload_of(&started)),
+            Ok(ServerMessage::ResourceStarted { entry: got }) if got == entry
+        ));
+        let stopped = ServerMessage::ResourceStopped {
+            name: "hello".to_owned(),
+        };
+        assert!(matches!(
+            decode_server_message(&payload_of(&stopped)),
+            Ok(ServerMessage::ResourceStopped { name }) if name == "hello"
+        ));
+        let unavailable = ServerMessage::FileUnavailable { hash: [9; 32] };
+        assert!(matches!(
+            decode_server_message(&payload_of(&unavailable)),
+            Ok(ServerMessage::FileUnavailable { hash }) if hash == [9; 32]
+        ));
+        let whole = ServerMessage::Resources {
+            entries: vec![entry.clone()],
+        };
+        assert!(matches!(
+            decode_server_message(&payload_of(&whole)),
+            Ok(ServerMessage::Resources { entries }) if entries == [entry]
+        ));
+    }
+
+    #[test]
+    fn unknown_file_kind_is_rejected() {
+        let entry = ResourceEntry {
+            name: "bad".to_owned(),
+            files: vec![file("x.lua", 9, 1)],
+        };
+        let payload = payload_of(&ServerMessage::ResourceStarted { entry });
+        assert!(matches!(
+            decode_server_message(&payload),
+            Err(NetError::Protocol(_))
+        ));
+    }
+
+    /// Decodes every frame of a `Resources` snapshot. Consecutive entries with
+    /// the same name are merged, as the client does, and the empty frame that
+    /// ends the snapshot must come last.
+    fn decode_resources_snapshot(frames: &[Arc<[u8]>], max_frame: usize) -> Vec<ResourceEntry> {
+        let mut merged: Vec<ResourceEntry> = Vec::new();
+        for (index, frame) in frames.iter().enumerate() {
+            let len = frame.len() - FRAME_HEADER_LEN;
+            assert!(len <= max_frame, "frame of {len} bytes exceeds {max_frame}");
+            let entries = match decode_server_message(&frame[FRAME_HEADER_LEN..]) {
+                Ok(ServerMessage::Resources { entries }) => entries,
+                other => panic!("frame {index} is not a resources frame: {other:?}"),
+            };
+            if index == frames.len() - 1 {
+                assert!(entries.is_empty(), "the last frame must be empty");
+                break;
+            }
+            assert!(!entries.is_empty(), "only the last frame may be empty");
+            for entry in entries {
+                match merged.last_mut() {
+                    Some(last) if last.name == entry.name => last.files.extend(entry.files),
+                    _ => merged.push(entry),
+                }
+            }
+        }
+        merged
+    }
+
+    #[test]
+    fn resources_snapshot_round_trips_across_frames() {
+        // One entry of 256 files is about 12 KiB, so each frame holds one entry.
+        const MAX: usize = 16 * 1024;
+        let many: Vec<FileEntry> = (0..600)
+            .map(|i| {
+                let byte = u8::try_from(i % 200).expect("fits a byte");
+                file(&format!("file{i}.lua"), FILE_KIND_FILE, byte)
+            })
+            .collect();
+        let resources = vec![
+            ResourceEntry {
+                name: "empty".to_owned(),
+                files: Vec::new(),
+            },
+            ResourceEntry {
+                name: "big".to_owned(),
+                files: many,
+            },
+            ResourceEntry {
+                name: "after".to_owned(),
+                files: vec![file("a.lua", FILE_KIND_SHARED, 3)],
+            },
+        ];
+        let frames = encode_resources_snapshot(&resources, MAX).expect("snapshot encodes");
+        assert!(frames.len() > 2, "the snapshot must span several frames");
+        assert_eq!(decode_resources_snapshot(&frames, MAX), resources);
+    }
+
+    #[test]
+    fn empty_snapshot_is_one_terminating_frame() {
+        let frames = encode_resources_snapshot(&[], MAX_FRAME).expect("snapshot encodes");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            decode_resources_snapshot(&frames, MAX_FRAME),
+            Vec::<ResourceEntry>::new()
+        );
+    }
+
+    #[test]
+    fn snapshot_within_the_decoding_budget_decodes() {
+        // 300 resources of 256 files are about 2.7 MB and 77 000 decoded values,
+        // so they need several frames whatever the byte limit.
+        let resources: Vec<ResourceEntry> = (0..300)
+            .map(|i| ResourceEntry {
+                name: format!("res{i}"),
+                files: (0..256).map(|_| file("f", FILE_KIND_CLIENT, 0)).collect(),
+            })
+            .collect();
+        let frames = encode_resources_snapshot(&resources, MAX_FRAME).expect("snapshot encodes");
+        assert_eq!(decode_resources_snapshot(&frames, MAX_FRAME), resources);
     }
 }

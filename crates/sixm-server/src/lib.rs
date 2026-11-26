@@ -11,6 +11,7 @@ mod convars;
 mod host_functions;
 mod manager;
 mod network;
+mod resource_files;
 mod server;
 mod state;
 

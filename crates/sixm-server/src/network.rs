@@ -14,7 +14,7 @@ use std::sync::mpsc::Sender;
 
 use sixm_core::{ClientTarget, EventSource, PlayerInfo, ScriptError, Value};
 use sixm_net::{ConnectionId, Fingerprint, NetError, NetEvent, NetServer, ServerConfig};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::host_functions::HostFn;
 use crate::manager::ResourceManager;
@@ -127,6 +127,7 @@ impl ResourceManager {
         })?;
         let addr = server.local_addr();
         *self.network.server.borrow_mut() = Some(server);
+        self.publish_advertised();
         Ok(addr)
     }
 
@@ -218,6 +219,11 @@ impl ResourceManager {
                 endpoint,
             },
         );
+        self.with_server(|server| {
+            if let Err(err) = server.send_resources(id) {
+                warn!("cannot send the resource list to player {id}: {err}");
+            }
+        });
         self.join_state(id);
         self.dispatch("playerJoining", EventSource::Player(id), &[]);
         info!("{name} ({id}) joined from {endpoint}");

@@ -83,13 +83,7 @@ impl ResourceInfo {
         &self,
         resolve_resource: impl Fn(&str) -> Option<PathBuf>,
     ) -> Result<Vec<PathBuf>, ResourceError> {
-        let mut expansion = Expansion {
-            owner: &self.name,
-            resolve: &resolve_resource,
-            listings: HashMap::new(),
-            seen: HashSet::new(),
-            matches: Vec::new(),
-        };
+        let mut expansion = Expansion::new(&self.name, &resolve_resource);
         for pattern in self
             .manifest
             .shared_scripts
@@ -98,8 +92,65 @@ impl ResourceInfo {
         {
             expansion.add(&self.root, pattern)?;
         }
-        Ok(expansion.matches)
+        Ok(expansion
+            .matches
+            .into_iter()
+            .map(|matched| matched.path)
+            .collect())
     }
+
+    /// Files the server sends to clients: `shared_scripts`, then
+    /// `client_scripts`, then `files`, each in declaration order.
+    ///
+    /// Expansion follows the same rules as
+    /// [`server_script_files`](Self::server_script_files). A file that several
+    /// patterns match appears once, with the kind of its first declaration.
+    pub fn client_files(
+        &self,
+        resolve_resource: impl Fn(&str) -> Option<PathBuf>,
+    ) -> Result<Vec<ClientFile>, ResourceError> {
+        let mut expansion = Expansion::new(&self.name, &resolve_resource);
+        let groups = [
+            (&self.manifest.shared_scripts, ClientFileKind::SharedScript),
+            (&self.manifest.client_scripts, ClientFileKind::ClientScript),
+            (&self.manifest.files, ClientFileKind::File),
+        ];
+        let mut files = Vec::new();
+        for (patterns, kind) in groups {
+            for pattern in patterns {
+                expansion.add(&self.root, pattern)?;
+            }
+            files.extend(expansion.matches.drain(..).map(|matched| ClientFile {
+                path: matched.path,
+                name: matched.name,
+                kind,
+            }));
+        }
+        Ok(files)
+    }
+}
+
+/// A file a resource sends to clients, and where it sits in the load order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientFile {
+    /// Absolute path of the file on disk.
+    pub path: PathBuf,
+    /// `/`-separated name relative to the resource folder. A file reached
+    /// through `@other/...` is named `@other/...` after the reference.
+    pub name: String,
+    /// The manifest directive that declared the file.
+    pub kind: ClientFileKind,
+}
+
+/// The manifest directive that declared a [`ClientFile`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientFileKind {
+    /// Declared in `shared_scripts`.
+    SharedScript,
+    /// Declared in `client_scripts`.
+    ClientScript,
+    /// Declared in `files`.
+    File,
 }
 
 /// Path of the manifest in `root`, if it has one.
@@ -110,7 +161,14 @@ pub(crate) fn find_manifest(root: &Path) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-/// State of one `server_script_files` call.
+/// A file found by one expansion: its path and its stable name.
+struct Matched {
+    path: PathBuf,
+    name: String,
+}
+
+/// State of one expansion of manifest patterns, shared by every directive so
+/// that a file is never listed twice.
 struct Expansion<'a> {
     /// The resource whose manifest declares the patterns.
     owner: &'a ResourceName,
@@ -120,16 +178,26 @@ struct Expansion<'a> {
     listings: HashMap<PathBuf, Vec<String>>,
     /// Every path already in `matches`.
     seen: HashSet<PathBuf>,
-    /// Result, in load order.
-    matches: Vec<PathBuf>,
+    /// Result, in load order. Callers may drain it between groups of patterns.
+    matches: Vec<Matched>,
 }
 
-impl Expansion<'_> {
+impl<'a> Expansion<'a> {
+    fn new(owner: &'a ResourceName, resolve: &'a dyn Fn(&str) -> Option<PathBuf>) -> Self {
+        Self {
+            owner,
+            resolve,
+            listings: HashMap::new(),
+            seen: HashSet::new(),
+            matches: Vec::new(),
+        }
+    }
+
     /// Adds the files matched by one manifest pattern, relative to `root`.
     fn add(&mut self, root: &Path, pattern: &str) -> Result<(), ResourceError> {
         let normalized = pattern.replace('\\', "/");
         let Some(rest) = normalized.strip_prefix('@') else {
-            return self.add_in(root, pattern, &normalized);
+            return self.add_in(root, pattern, &normalized, None);
         };
         let (other, inner) = rest
             .split_once('/')
@@ -141,12 +209,19 @@ impl Expansion<'_> {
             resource: self.owner.clone(),
             referenced: other.to_owned(),
         })?;
-        self.add_in(&other_root, pattern, inner)
+        self.add_in(&other_root, pattern, inner, Some(other))
     }
 
     /// Expands `relative` (a `/`-separated pattern) inside `root`. `original` is
-    /// the pattern as written, for error messages.
-    fn add_in(&mut self, root: &Path, original: &str, relative: &str) -> Result<(), ResourceError> {
+    /// the pattern as written, for error messages. `reference` is the resource
+    /// named by an `@` reference, which prefixes the names of the matches.
+    fn add_in(
+        &mut self,
+        root: &Path,
+        original: &str,
+        relative: &str,
+        reference: Option<&str>,
+    ) -> Result<(), ResourceError> {
         let pattern = self.clean(original, relative)?;
 
         if !pattern.contains(GLOB_META) {
@@ -157,7 +232,8 @@ impl Expansion<'_> {
                     pattern: original.to_owned(),
                 });
             }
-            self.push(path);
+            let name = stable_name(reference, &pattern);
+            self.push(path, name);
             return Ok(());
         }
 
@@ -170,16 +246,16 @@ impl Expansion<'_> {
             })?
             .compile_matcher();
         let files = self.listing(root)?;
-        let hits: Vec<PathBuf> = files
+        let hits: Vec<(PathBuf, String)> = files
             .iter()
             .filter(|file| matcher.is_match(file))
-            .map(|file| root.join(file))
+            .map(|file| (root.join(file), stable_name(reference, file)))
             .collect();
         if hits.is_empty() {
             tracing::warn!(resource = %self.owner, pattern = %original, "script pattern matched no files");
         }
-        for path in hits {
-            self.push(path);
+        for (path, name) in hits {
+            self.push(path, name);
         }
         Ok(())
     }
@@ -217,10 +293,19 @@ impl Expansion<'_> {
         Ok(files.as_slice())
     }
 
-    fn push(&mut self, path: PathBuf) {
+    fn push(&mut self, path: PathBuf, name: String) {
         if self.seen.insert(path.clone()) {
-            self.matches.push(path);
+            self.matches.push(Matched { path, name });
         }
+    }
+}
+
+/// The name of a matched file: its relative path, or `@other/path` when it was
+/// reached through an `@other` reference.
+fn stable_name(reference: Option<&str>, relative: &str) -> String {
+    match reference {
+        Some(other) => format!("@{other}/{relative}"),
+        None => relative.to_owned(),
     }
 }
 
@@ -467,5 +552,112 @@ mod tests {
         let info = ResourceInfo::load(&root).expect("load");
         let error = info.server_script_files(no_resolver).unwrap_err();
         assert!(matches!(error, ResourceError::BadPattern { .. }));
+    }
+
+    fn client_names(info: &ResourceInfo, resolve: impl Fn(&str) -> Option<PathBuf>) -> Vec<String> {
+        info.client_files(resolve)
+            .expect("expand")
+            .into_iter()
+            .map(|file| format!("{:?}:{}", file.kind, file.name))
+            .collect()
+    }
+
+    #[test]
+    fn client_files_follow_shared_client_then_file_order() {
+        let (_dir, root) = resource(
+            "files { 'data/a.txt' }\nclient_scripts { 'client.lua' }\nshared_scripts { 'shared.lua' }",
+            &["data/a.txt", "client.lua", "shared.lua"],
+        );
+        let info = ResourceInfo::load(&root).expect("load");
+        assert_eq!(
+            client_names(&info, no_resolver),
+            [
+                "SharedScript:shared.lua",
+                "ClientScript:client.lua",
+                "File:data/a.txt",
+            ]
+        );
+    }
+
+    #[test]
+    fn client_files_are_absolute_and_match_the_expansion_of_server_scripts() {
+        let (_dir, root) = resource("client_scripts { 'c/*.lua' }", &["c/b.lua", "c/a.lua"]);
+        let info = ResourceInfo::load(&root).expect("load");
+        let files = info.client_files(no_resolver).expect("expand");
+        assert!(files.iter().all(|file| file.path.is_absolute()));
+        let paths: Vec<PathBuf> = files.into_iter().map(|file| file.path).collect();
+        assert_eq!(names(&root, &paths), ["c/a.lua", "c/b.lua"]);
+    }
+
+    #[test]
+    fn client_files_dedupe_keeps_the_first_declaration() {
+        let (_dir, root) = resource(
+            "files { 'x.lua' }\nclient_scripts { 'x.lua', 'x*.lua' }\nshared_scripts { 'x.lua' }",
+            &["x.lua", "xy.lua"],
+        );
+        let info = ResourceInfo::load(&root).expect("load");
+        assert_eq!(
+            client_names(&info, no_resolver),
+            ["SharedScript:x.lua", "ClientScript:xy.lua"]
+        );
+    }
+
+    #[test]
+    fn client_files_glob_matches_are_sorted_per_group() {
+        let (_dir, root) = resource(
+            "client_scripts { 'c/*.lua' }\nfiles { 'd/*' }",
+            &["c/z.lua", "c/a.lua", "d/2.txt", "d/1.txt"],
+        );
+        let info = ResourceInfo::load(&root).expect("load");
+        assert_eq!(
+            client_names(&info, no_resolver),
+            [
+                "ClientScript:c/a.lua",
+                "ClientScript:c/z.lua",
+                "File:d/1.txt",
+                "File:d/2.txt",
+            ]
+        );
+    }
+
+    #[test]
+    fn client_files_through_at_references_get_prefixed_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let other = dir.path().join("oxmysql");
+        write(&other.join("lib/MySQL.lua"), "");
+        write(&other.join("lib/extra.lua"), "");
+        let root = dir.path().join("my_res");
+        write(
+            &root.join("fxmanifest.lua"),
+            "client_scripts { '@oxmysql/lib/MySQL.lua', '@oxmysql/lib/*.lua' }",
+        );
+        let info = ResourceInfo::load(&root).expect("load");
+        let resolve = |name: &str| (name == "oxmysql").then(|| other.clone());
+        assert_eq!(
+            client_names(&info, resolve),
+            [
+                "ClientScript:@oxmysql/lib/MySQL.lua",
+                "ClientScript:@oxmysql/lib/extra.lua",
+            ]
+        );
+    }
+
+    #[test]
+    fn client_files_missing_literal_is_an_error() {
+        let (_dir, root) = resource("files { 'gone.txt' }", &[]);
+        let info = ResourceInfo::load(&root).expect("load");
+        let error = info.client_files(no_resolver).unwrap_err();
+        assert!(matches!(
+            error,
+            ResourceError::MissingFile { ref pattern, .. } if pattern == "gone.txt"
+        ));
+    }
+
+    #[test]
+    fn client_files_reject_escapes_like_server_scripts() {
+        let (_dir, root) = resource("files { '../outside.txt' }", &[]);
+        let info = ResourceInfo::load(&root).expect("load");
+        let error = info.client_files(no_resolver).unwrap_err();
+        assert!(matches!(error, ResourceError::PathEscape { .. }));
     }
 }

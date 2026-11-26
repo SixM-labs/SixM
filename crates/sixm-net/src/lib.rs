@@ -7,20 +7,28 @@
 //!
 //! Transport is QUIC with the `sixm/1` application protocol. The client opens
 //! one bidirectional stream and every message flows on it in order, each frame
-//! prefixed with its `u32` little-endian payload length.
+//! prefixed with its `u32` little-endian payload length. Resource files travel
+//! on unidirectional streams of their own, so a large download never delays
+//! events: the server opens one for each file the client requests.
 
 mod client;
 mod connection;
 mod error;
+mod files;
 mod identity;
 mod protocol;
 mod ratelimit;
 mod server;
+mod transfer;
 mod transport;
 mod wire;
 
 pub use client::{ClientEvent, NetClient};
 pub use error::NetError;
+pub use files::{
+    FILE_KIND_CLIENT, FILE_KIND_FILE, FILE_KIND_SHARED, FileEntry, FileHash, MAX_FILE_SIZE,
+    PublishedFile, PublishedResource, ResourceEntry, hash_hex,
+};
 pub use identity::{Fingerprint, Identity, ParseFingerprintError};
 pub use protocol::PROTOCOL_VERSION;
 pub use server::{ConnectionId, NetEvent, NetServer, ServerConfig};

@@ -239,6 +239,8 @@ fn joining_client_with_thousands_of_replicated_keys_is_not_kicked() {
     h.wait_for("the whole snapshot", || {
         while let Some(event) = alice.recv_timeout(Duration::ZERO) {
             match event {
+                // The resource list comes first on join; it is not under test here.
+                ClientEvent::Resources { .. } => {}
                 ClientEvent::StateBag { bag, key, value } => {
                     assert_eq!(bag, "global");
                     received.insert(key, value);

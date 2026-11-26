@@ -1,0 +1,28 @@
+[package]
+name = "sixm-client"
+description = "SixM client core: connects to a server, syncs resource files into a content-addressed cache."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "sixm-client"
+path = "src/main.rs"
+
+[dependencies]
+sixm-core.workspace = true
+sixm-net.workspace = true
+sixm-resources.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ctrlc.workspace = true
+
+[lints]
+workspace = true

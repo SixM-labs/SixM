@@ -56,6 +56,20 @@ pub enum NetError {
     /// A frame is larger than the configured maximum.
     #[error("frame of {len} bytes exceeds the maximum of {max} bytes")]
     FrameTooLarge { len: usize, max: usize },
+    /// A downloaded file does not match the size or hash that was advertised.
+    #[error("file {hash} failed verification: {reason}")]
+    Integrity {
+        /// Hex digest the file was requested by.
+        hash: String,
+        /// What did not match.
+        reason: String,
+    },
+    /// The server does not advertise a file with the requested hash.
+    #[error("file {hash} is not available from the server")]
+    FileUnavailable {
+        /// Hex digest the file was requested by.
+        hash: String,
+    },
     /// The connection or the network thread is gone.
     #[error("connection closed")]
     Closed,

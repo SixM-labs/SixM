@@ -990,6 +990,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "sixm-client"
+version = "0.1.0"
+dependencies = [
+ "ctrlc",
+ "sixm-core",
+ "sixm-net",
+ "sixm-resources",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "sixm-core"
 version = "0.1.0"
 dependencies = [
@@ -1042,6 +1056,8 @@ name = "sixm-server"
 version = "0.1.0"
 dependencies = [
  "ctrlc",
+ "ring",
+ "sixm-client",
  "sixm-core",
  "sixm-lua",
  "sixm-net",
@@ -1213,6 +1229,7 @@ version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
+ "bytes",
  "libc",
  "mio",
  "pin-project-lite",

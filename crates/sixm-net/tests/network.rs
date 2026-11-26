@@ -10,14 +10,19 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::Duration;
 
+use std::fs;
+use std::path::{Path, PathBuf};
+
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
+use ring::digest;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use sixm_core::{FuncRef, Value};
 use sixm_net::{
-    ClientEvent, ConnectionId, NetClient, NetError, NetEvent, NetServer, PROTOCOL_VERSION,
-    ServerConfig,
+    ClientEvent, ConnectionId, FILE_KIND_CLIENT, FILE_KIND_FILE, FileEntry, FileHash,
+    MAX_FILE_SIZE, NetClient, NetError, NetEvent, NetServer, PROTOCOL_VERSION, PublishedFile,
+    PublishedResource, ResourceEntry, ServerConfig,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -562,5 +567,371 @@ fn player_who_stops_reading_is_kicked_when_its_queue_overflows() {
                 .expect("event is queued");
         }
         assert_eq!(expect_disconnected(&server, 30), "send queue overflow");
+    });
+}
+
+/// SHA-256 of `bytes`, as the file hash the protocol uses.
+fn sha256(bytes: &[u8]) -> FileHash {
+    let digest = digest::digest(&digest::SHA256, bytes);
+    let mut hash = [0_u8; 32];
+    hash.copy_from_slice(digest.as_ref());
+    hash
+}
+
+/// Writes `bytes` to `dir/name` and describes it as an advertised file.
+fn published_file(dir: &Path, name: &str, kind: u8, bytes: &[u8]) -> PublishedFile {
+    let path = dir.join(name);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("folder is created");
+    }
+    fs::write(&path, bytes).expect("file is written");
+    PublishedFile {
+        entry: FileEntry {
+            name: name.to_owned(),
+            kind,
+            hash: sha256(bytes),
+            size: u64::try_from(bytes.len()).expect("size fits"),
+        },
+        path,
+    }
+}
+
+/// A resource with one file per `(name, contents)` pair.
+fn resource(dir: &Path, name: &str, files: &[(&str, &[u8])]) -> PublishedResource {
+    PublishedResource {
+        name: name.to_owned(),
+        files: files
+            .iter()
+            .map(|(file, bytes)| published_file(dir, file, FILE_KIND_CLIENT, bytes))
+            .collect(),
+    }
+}
+
+/// The wire form of a published resource.
+fn entry_of(resource: &PublishedResource) -> ResourceEntry {
+    ResourceEntry {
+        name: resource.name.clone(),
+        files: resource
+            .files
+            .iter()
+            .map(|file| file.entry.clone())
+            .collect(),
+    }
+}
+
+/// Bytes that vary, so that hashes differ between files.
+fn patterned(len: usize, seed: u8) -> Vec<u8> {
+    (0..251_u8)
+        .cycle()
+        .take(len)
+        .map(|byte| byte.wrapping_add(seed))
+        .collect()
+}
+
+/// Collects the snapshot that follows the welcome: frames until the empty one.
+fn snapshot_of(client: &NetClient) -> Vec<ResourceEntry> {
+    let mut merged: Vec<ResourceEntry> = Vec::new();
+    loop {
+        match client_event(client) {
+            ClientEvent::Resources { entries } if entries.is_empty() => return merged,
+            ClientEvent::Resources { entries } => {
+                for entry in entries {
+                    match merged.last_mut() {
+                        Some(last) if last.name == entry.name => last.files.extend(entry.files),
+                        _ => merged.push(entry),
+                    }
+                }
+            }
+            other => panic!("expected the resource snapshot, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn snapshot_on_join_lists_every_resource_in_start_order() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let server = start();
+    let names: Vec<String> = (0..600).map(|i| format!("f{i}.lua")).collect();
+    let contents: Vec<Vec<u8>> = (0..600)
+        .map(|i| patterned(8, u8::try_from(i % 200).expect("byte")))
+        .collect();
+    let big_refs: Vec<(&str, &[u8])> = names
+        .iter()
+        .zip(&contents)
+        .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+        .collect();
+    let resources = vec![
+        resource(dir.path(), "second", &[("a.lua", b"a")]),
+        resource(dir.path(), "big", &big_refs),
+        resource(dir.path(), "empty", &[]),
+    ];
+    let expected: Vec<ResourceEntry> = resources.iter().map(entry_of).collect();
+    server
+        .net
+        .publish_resources(resources)
+        .expect("resources are published");
+
+    let client = join(&server, "tester", 1);
+    server.net.send_resources(1).expect("snapshot is queued");
+    assert_eq!(snapshot_of(&client), expected);
+}
+
+#[test]
+fn resource_start_and_stop_are_broadcast_to_joined_players() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let server = start();
+    let client = join(&server, "tester", 1);
+    server.net.send_resources(1).expect("snapshot is queued");
+    assert_eq!(snapshot_of(&client), Vec::new());
+
+    let started = resource(dir.path(), "hello", &[("client/main.lua", b"print('hi')")]);
+    let entry = entry_of(&started);
+    server
+        .net
+        .publish_resources(vec![started])
+        .expect("resources are published");
+    server
+        .net
+        .broadcast_resource_started(entry.clone())
+        .expect("broadcast is queued");
+    assert_eq!(
+        client_event(&client),
+        ClientEvent::ResourceStarted { entry }
+    );
+
+    server
+        .net
+        .publish_resources(Vec::new())
+        .expect("resources are published");
+    server
+        .net
+        .broadcast_resource_stopped("hello")
+        .expect("broadcast is queued");
+    assert_eq!(
+        client_event(&client),
+        ClientEvent::ResourceStopped {
+            name: "hello".to_owned()
+        }
+    );
+}
+
+#[test]
+fn advertised_files_download_intact_including_five_mebibytes() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let server = start();
+    let small = patterned(100, 1);
+    let large = patterned(5 * 1024 * 1024, 2);
+    let small_file = published_file(dir.path(), "small.lua", FILE_KIND_FILE, &small);
+    let large_file = published_file(dir.path(), "large.bin", FILE_KIND_FILE, &large);
+    let small_entry = small_file.entry.clone();
+    let large_entry = large_file.entry.clone();
+    server
+        .net
+        .publish_resources(vec![PublishedResource {
+            name: "files".to_owned(),
+            files: vec![small_file, large_file],
+        }])
+        .expect("resources are published");
+
+    let client = join(&server, "tester", 1);
+    assert_eq!(
+        client
+            .download(small_entry.hash, small_entry.size, TIMEOUT)
+            .expect("small file downloads"),
+        small
+    );
+    assert_eq!(
+        client
+            .download(large_entry.hash, large_entry.size, TIMEOUT)
+            .expect("large file downloads"),
+        large
+    );
+}
+
+#[test]
+fn unknown_hash_is_reported_as_unavailable() {
+    let server = start();
+    let client = join(&server, "tester", 1);
+    let result = client.download([0xab; 32], 10, TIMEOUT);
+    assert!(
+        matches!(result, Err(NetError::FileUnavailable { ref hash }) if hash.starts_with("abab")),
+        "got {result:?}"
+    );
+}
+
+#[test]
+fn unpublished_file_becomes_unavailable() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let server = start();
+    let bytes = patterned(300, 4);
+    let file = published_file(dir.path(), "gone.lua", FILE_KIND_FILE, &bytes);
+    let (hash, size) = (file.entry.hash, file.entry.size);
+    server
+        .net
+        .publish_resources(vec![PublishedResource {
+            name: "gone".to_owned(),
+            files: vec![file],
+        }])
+        .expect("resources are published");
+    let client = join(&server, "tester", 1);
+    assert_eq!(
+        client
+            .download(hash, size, TIMEOUT)
+            .expect("file downloads"),
+        bytes
+    );
+
+    server
+        .net
+        .publish_resources(Vec::new())
+        .expect("resources are published");
+    assert!(matches!(
+        client.download(hash, size, TIMEOUT),
+        Err(NetError::FileUnavailable { .. })
+    ));
+}
+
+#[test]
+fn file_changed_after_hashing_fails_verification() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let server = start();
+    let original = patterned(2048, 5);
+    let file = published_file(dir.path(), "edited.lua", FILE_KIND_FILE, &original);
+    let (hash, size, path) = (file.entry.hash, file.entry.size, file.path.clone());
+    server
+        .net
+        .publish_resources(vec![PublishedResource {
+            name: "edited".to_owned(),
+            files: vec![file],
+        }])
+        .expect("resources are published");
+    fs::write(&path, patterned(2048, 6)).expect("file is changed");
+
+    let client = join(&server, "tester", 1);
+    assert!(matches!(
+        client.download(hash, size, TIMEOUT),
+        Err(NetError::Integrity { .. })
+    ));
+}
+
+#[test]
+fn invalid_publish_is_refused_and_the_previous_set_stays() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let server = start();
+    let bytes = patterned(64, 7);
+    let file = published_file(dir.path(), "kept.lua", FILE_KIND_FILE, &bytes);
+    let (hash, size) = (file.entry.hash, file.entry.size);
+    server
+        .net
+        .publish_resources(vec![PublishedResource {
+            name: "kept".to_owned(),
+            files: vec![file],
+        }])
+        .expect("resources are published");
+
+    let relative = PublishedResource {
+        name: "bad".to_owned(),
+        files: vec![PublishedFile {
+            entry: FileEntry {
+                name: "x.lua".to_owned(),
+                kind: FILE_KIND_FILE,
+                hash: [1; 32],
+                size: 1,
+            },
+            path: PathBuf::from("relative/x.lua"),
+        }],
+    };
+    assert!(matches!(
+        server.net.publish_resources(vec![relative]),
+        Err(NetError::InvalidInput(_))
+    ));
+
+    let oversized = PublishedResource {
+        name: "huge".to_owned(),
+        files: vec![PublishedFile {
+            entry: FileEntry {
+                name: "huge.bin".to_owned(),
+                kind: FILE_KIND_FILE,
+                hash: [2; 32],
+                size: MAX_FILE_SIZE + 1,
+            },
+            path: dir.path().join("huge.bin"),
+        }],
+    };
+    assert!(matches!(
+        server.net.publish_resources(vec![oversized]),
+        Err(NetError::InvalidInput(_))
+    ));
+
+    let client = join(&server, "tester", 1);
+    assert_eq!(
+        client.download(hash, size, TIMEOUT).expect("still served"),
+        bytes
+    );
+}
+
+#[test]
+fn many_requests_on_one_connection_are_all_served() {
+    // Twenty requests against eight transfer slots: the extra requests wait
+    // for a slot, and every file still arrives.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let server = start();
+    let contents: Vec<Vec<u8>> = (0..20_u8).map(|i| patterned(200_000, i)).collect();
+    let files: Vec<PublishedFile> = contents
+        .iter()
+        .enumerate()
+        .map(|(i, bytes)| published_file(dir.path(), &format!("f{i}.bin"), FILE_KIND_FILE, bytes))
+        .collect();
+    let hashes: Vec<FileHash> = files.iter().map(|file| file.entry.hash).collect();
+    server
+        .net
+        .publish_resources(vec![PublishedResource {
+            name: "many".to_owned(),
+            files,
+        }])
+        .expect("resources are published");
+
+    let runtime = new_runtime();
+    runtime.block_on(async {
+        let (mut raw, id, _) = raw_hello(&server, "burst").await;
+        server.net.accept(id, 1);
+        server.net.send_resources(1).expect("snapshot is queued");
+        // Welcome, then the snapshot: one frame of entries and the empty frame.
+        for _ in 0..3 {
+            read_payload(&mut raw.recv).await;
+        }
+        for hash in &hashes {
+            let request = postcard::to_allocvec(&(2_u32, *hash)).expect("request encodes");
+            raw.send
+                .write_all(&frame(&request))
+                .await
+                .expect("request is written");
+        }
+
+        let mut received: Vec<(FileHash, Vec<u8>)> = Vec::new();
+        for _ in 0..hashes.len() {
+            let mut stream = tokio::time::timeout(TIMEOUT, raw.connection.accept_uni())
+                .await
+                .expect("a transfer starts in time")
+                .expect("transfer stream opens");
+            let mut header = [0_u8; 40];
+            stream.read_exact(&mut header).await.expect("header");
+            let mut hash = [0_u8; 32];
+            hash.copy_from_slice(&header[..32]);
+            let mut size = [0_u8; 8];
+            size.copy_from_slice(&header[32..]);
+            let len = usize::try_from(u64::from_le_bytes(size)).expect("size fits");
+            let mut body = vec![0_u8; len];
+            stream.read_exact(&mut body).await.expect("body");
+            received.push((hash, body));
+        }
+        assert_eq!(received.len(), 20);
+        for (hash, body) in &received {
+            let index = hashes
+                .iter()
+                .position(|known| known == hash)
+                .expect("advertised hash");
+            assert_eq!(body, &contents[index]);
+        }
     });
 }

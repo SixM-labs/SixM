@@ -2,19 +2,23 @@
 //! writer task for an accepted player.
 
 use std::pin::pin;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use quinn::{Connection, Incoming, RecvStream, SendStream, VarInt};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{Semaphore, mpsc, oneshot, watch};
+use tokio::task::JoinSet;
 use tracing::{debug, warn};
 
 use crate::error::NetError;
+use crate::files::FileHash;
 use crate::protocol::{
-    ClientMessage, EVENT_FLOOD, MAX_PLAYER_NAME_LEN, PROTOCOL_VERSION, SHUTTING_DOWN, ServerMessage,
+    ClientMessage, EVENT_FLOOD, MAX_CONCURRENT_TRANSFERS, MAX_PENDING_REQUESTS,
+    MAX_PLAYER_NAME_LEN, PROTOCOL_VERSION, SHUTTING_DOWN, ServerMessage, TOO_MANY_REQUESTS,
 };
 use crate::ratelimit::{RateLimiter, Verdict};
 use crate::server::{ConnectionId, NetEvent};
+use crate::transfer::{Advertised, Transfer, serve_file};
 use crate::transport::{close_connection, closing_reason};
 use crate::wire::{decode_client_message, encode_frame, read_frame, validate_event_name};
 
@@ -31,6 +35,8 @@ pub(crate) struct Shared {
     pub(crate) server_name: String,
     pub(crate) handshake_timeout: Duration,
     pub(crate) max_frame: usize,
+    /// The files the server advertises, shared with the server handle.
+    pub(crate) advertised: Arc<RwLock<Advertised>>,
 }
 
 /// The server's answer to a connection that completed its `Hello`.
@@ -44,6 +50,8 @@ pub(crate) struct Ticket {
     pub(crate) id: ConnectionId,
     pub(crate) decision: oneshot::Receiver<Decision>,
     pub(crate) outbound: mpsc::Receiver<Arc<[u8]>>,
+    /// Another sender of the outbound queue, for replies the reader sends.
+    pub(crate) reply: mpsc::Sender<Arc<[u8]>>,
     pub(crate) kick: Arc<watch::Sender<Option<Arc<str>>>>,
 }
 
@@ -53,6 +61,7 @@ pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket)
         id,
         decision,
         outbound,
+        reply,
         kick,
     } = ticket;
     let connecting = match incoming.accept() {
@@ -124,6 +133,7 @@ pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket)
                 send,
                 recv,
                 outbound,
+                reply,
                 kick,
             };
             serve(&shared, accepted).await;
@@ -160,7 +170,7 @@ async fn read_hello(connection: &Connection, max_frame: usize) -> Result<Hello, 
             protocol,
             name,
         }),
-        ClientMessage::Event { .. } => Err(NetError::Protocol(
+        ClientMessage::Event { .. } | ClientMessage::RequestFile { .. } => Err(NetError::Protocol(
             "the first message must be Hello".to_owned(),
         )),
     }
@@ -199,7 +209,51 @@ struct Accepted {
     send: SendStream,
     recv: RecvStream,
     outbound: mpsc::Receiver<Arc<[u8]>>,
+    reply: mpsc::Sender<Arc<[u8]>>,
     kick: Arc<watch::Sender<Option<Arc<str>>>>,
+}
+
+/// File requests of one player. Each request runs as a task that waits for a
+/// transfer slot, and the tasks are dropped with the connection.
+struct Requests {
+    connection: Connection,
+    advertised: Arc<RwLock<Advertised>>,
+    slots: Arc<Semaphore>,
+    reply: mpsc::Sender<Arc<[u8]>>,
+    tasks: JoinSet<()>,
+}
+
+impl Requests {
+    fn new(
+        connection: Connection,
+        advertised: Arc<RwLock<Advertised>>,
+        reply: mpsc::Sender<Arc<[u8]>>,
+    ) -> Self {
+        Self {
+            connection,
+            advertised,
+            slots: Arc::new(Semaphore::new(MAX_CONCURRENT_TRANSFERS)),
+            reply,
+            tasks: JoinSet::new(),
+        }
+    }
+
+    /// Starts serving the file with `hash`. Fails with the reason to kick the
+    /// player when too many requests are still pending.
+    fn request(&mut self, hash: FileHash) -> Result<(), &'static str> {
+        while self.tasks.try_join_next().is_some() {}
+        if self.tasks.len() >= MAX_PENDING_REQUESTS {
+            return Err(TOO_MANY_REQUESTS);
+        }
+        let transfer = Transfer {
+            connection: self.connection.clone(),
+            advertised: Arc::clone(&self.advertised),
+            slots: Arc::clone(&self.slots),
+            reply: self.reply.clone(),
+        };
+        self.tasks.spawn(serve_file(transfer, hash));
+        Ok(())
+    }
 }
 
 /// Why the reader stopped.
@@ -221,6 +275,7 @@ async fn serve(shared: &Shared, accepted: Accepted) {
         send,
         mut recv,
         outbound,
+        reply,
         kick,
     } = accepted;
     let mut writer = tokio::spawn(write_loop(WriteLoop {
@@ -231,7 +286,8 @@ async fn serve(shared: &Shared, accepted: Accepted) {
         kick: kick.subscribe(),
         max_frame: shared.max_frame,
     }));
-    let mut reader = pin!(read_loop(shared, player, &mut recv));
+    let mut requests = Requests::new(connection.clone(), Arc::clone(&shared.advertised), reply);
+    let mut reader = pin!(read_loop(shared, player, &mut recv, &mut requests));
     let (code, reason) = tokio::select! {
         stop = &mut reader => match stop {
             Stop::Kick(reason) => {
@@ -262,9 +318,14 @@ fn join_writer(result: Result<String, tokio::task::JoinError>) -> String {
     result.unwrap_or_else(|err| format!("connection task failed: {err}"))
 }
 
-/// Receives events from the player until the stream ends or the player is
-/// kicked for breaking a limit.
-async fn read_loop(shared: &Shared, player: u32, recv: &mut RecvStream) -> Stop {
+/// Receives events and file requests from the player until the stream ends or
+/// the player is kicked for breaking a limit.
+async fn read_loop(
+    shared: &Shared,
+    player: u32,
+    recv: &mut RecvStream,
+    requests: &mut Requests,
+) -> Stop {
     let mut limiter = RateLimiter::new(Instant::now());
     loop {
         let payload = match read_frame(recv, shared.max_frame).await {
@@ -274,6 +335,12 @@ async fn read_loop(shared: &Shared, player: u32, recv: &mut RecvStream) -> Stop 
         };
         let (name, args) = match decode_client_message(&payload) {
             Ok(ClientMessage::Event { name, args }) => (name, args),
+            Ok(ClientMessage::RequestFile { hash }) => {
+                if let Err(reason) = requests.request(hash) {
+                    return Stop::Kick(reason.to_owned());
+                }
+                continue;
+            }
             Ok(ClientMessage::Hello { .. }) => {
                 return Stop::Protocol("Hello may only be sent once".to_owned());
             }
