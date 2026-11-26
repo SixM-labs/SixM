@@ -37,5 +37,4 @@ pinning, file transfer), `sixm-server`, `sixm-client`. Example server in
 
 ## Known gaps
 
-- Client exports are not declared yet.
 - No game adapter yet; the client is headless.

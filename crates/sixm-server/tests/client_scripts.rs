@@ -114,30 +114,58 @@ TriggerServerEvent('hello:report', 'load own ' .. tostring(LoadResourceFile(name
 TriggerServerEvent('hello:report', 'missing ' .. tostring(LoadResourceFile(name, 'nope.txt')))
 ";
 
+/// Provider side of the export test: declares `greet` and defines it, and also
+/// defines `notDeclared`, which no manifest declares.
+const PROVIDER_CLIENT_SCRIPT: &str = r"
+function greet(name)
+    return 'hello ' .. name
+end
+
+function notDeclared()
+    return 'reachable'
+end
+";
+
+/// Consumer server side of the export test: records the consumer's reports.
+const CONSUMER_SERVER_SCRIPT: &str = r"
+local lines = {}
+
+RegisterNetEvent('consumer:report', function(text)
+    lines[#lines + 1] = ('%d: %s'):format(source, text)
+end)
+
+function report()
+    return table.concat(lines, '\n')
+end
+";
+
+/// Consumer client side of the export test: calls the provider's exports as
+/// soon as it starts, after the provider has loaded.
+const CONSUMER_CLIENT_SCRIPT: &str = r"
+AddEventHandler('onClientResourceStart', function(name)
+    if name ~= GetCurrentResourceName() then
+        return
+    end
+    local ok, greeting = pcall(function() return exports.provider:greet('bob') end)
+    TriggerServerEvent('consumer:report', ('greet %s %s'):format(tostring(ok), tostring(greeting)))
+    local reached = pcall(function() return exports.provider:notDeclared() end)
+    TriggerServerEvent('consumer:report', ('undeclared %s'):format(tostring(reached)))
+end)
+";
+
 /// A server listening on loopback, whose inputs are handled by the test thread.
 struct Harness {
     fx: Fixture,
     input: Receiver<Input>,
     addr: SocketAddr,
-    /// The resource whose reports `wait_for_report` reads.
-    resource: &'static str,
+    /// The resource whose `report` export the test reads.
+    reporter: &'static str,
 }
 
 impl Harness {
-    /// A server with the `hello` resource started and its network running.
-    fn new() -> Self {
-        Self::serving(RESOURCE, CLIENT_SCRIPT, "", &[])
-    }
-
-    /// A server with `resource` started and its network running. The resource
-    /// has the server script, `client_script` as its client script, the extra
-    /// manifest lines and the extra files.
-    fn serving(
-        resource: &'static str,
-        client_script: &str,
-        extra_manifest: &str,
-        extra_files: &[(&str, &str)],
-    ) -> Self {
+    /// A server with its network running on loopback and no resource started.
+    /// `reporter` is the resource whose `report` export holds the log.
+    fn bare(reporter: &'static str) -> Self {
         let fx = Fixture::new();
         fx.server.execute("endpoint_add_udp 127.0.0.1:0");
         let (sender, input) = mpsc::channel();
@@ -145,19 +173,37 @@ impl Harness {
             .server
             .start_network(sender)
             .expect("the network starts on loopback");
-        let text = manifest(&["server.lua"], &["report", "poke"], &[])
-            + "client_scripts { 'client.lua' }\n"
-            + extra_manifest;
-        let mut files = vec![("server.lua", SERVER_SCRIPT), ("client.lua", client_script)];
-        files.extend_from_slice(extra_files);
-        fx.add_resource(resource, &text, &files);
-        fx.server.execute(&format!("start {resource}"));
         Self {
             fx,
             input,
             addr,
-            resource,
+            reporter,
         }
+    }
+
+    /// A server with the `hello` resource started and its network running.
+    fn new() -> Self {
+        let h = Self::bare(RESOURCE);
+        let text = manifest(&["server.lua"], &["report", "poke"], &[])
+            + "client_scripts { 'client.lua' }\n";
+        h.add(
+            RESOURCE,
+            &text,
+            &[("server.lua", SERVER_SCRIPT), ("client.lua", CLIENT_SCRIPT)],
+        );
+        h.start(RESOURCE);
+        h
+    }
+
+    /// Writes resource `name`. The catalog is scanned once, when the first
+    /// resource starts, so every resource must be added before that.
+    fn add(&self, name: &str, text: &str, files: &[(&str, &str)]) {
+        self.fx.add_resource(name, text, files);
+    }
+
+    /// Starts resource `name`, after the resources it depends on.
+    fn start(&self, name: &str) {
+        self.fx.server.execute(&format!("start {name}"));
     }
 
     /// Handles every queued server input.
@@ -207,7 +253,7 @@ impl Harness {
             self.pump_server();
             runtime.pump(STEP);
             runtime.tick(Instant::now());
-            let log = self.fx.text(self.resource, "report");
+            let log = self.fx.text(self.reporter, "report");
             if done(&log) {
                 return log;
             }
@@ -330,6 +376,35 @@ fn is_duplicity_version_is_false_on_the_client() {
 }
 
 #[test]
+fn client_exports_declared_by_one_resource_are_callable_from_another() {
+    let h = Harness::bare("consumer");
+    h.add(
+        "provider",
+        "fx_version 'cerulean'\ngame 'common'\nexport 'greet'\nclient_scripts { 'client.lua' }\n",
+        &[("client.lua", PROVIDER_CLIENT_SCRIPT)],
+    );
+    let consumer =
+        manifest(&["server.lua"], &["report"], &["provider"]) + "client_scripts { 'client.lua' }\n";
+    h.add(
+        "consumer",
+        &consumer,
+        &[
+            ("server.lua", CONSUMER_SERVER_SCRIPT),
+            ("client.lua", CONSUMER_CLIENT_SCRIPT),
+        ],
+    );
+    h.start("consumer");
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let runtime = h.connect(&dir.path().join("cache"), &dir.path().join("data"));
+    let log = h.wait_for_report(&runtime, "the export calls", |log| {
+        has_line(log, "1: greet true hello bob") && has_line(log, "1: undeclared false")
+    });
+    assert!(has_line(&log, "1: greet true hello bob"), "{log}");
+    assert!(has_line(&log, "1: undeclared false"), "{log}");
+}
+
+#[test]
 fn restart_on_the_server_stops_and_restarts_the_client_runtime() {
     let s = session();
     s.h.wait_for_report(&s.runtime, "the first start and its pong", |log| {
@@ -346,12 +421,19 @@ fn restart_on_the_server_stops_and_restarts_the_client_runtime() {
 
 #[test]
 fn client_reads_declared_files_and_writes_only_its_own_data_folder() {
-    let h = Harness::serving(
+    let h = Harness::bare("files_demo");
+    let text = manifest(&["server.lua"], &["report", "poke"], &[])
+        + "client_scripts { 'client.lua' }\nfiles { 'data/config.json' }\n";
+    h.add(
         "files_demo",
-        FILES_CLIENT_SCRIPT,
-        "files { 'data/config.json' }\n",
-        &[("data/config.json", r#"{"answer":42}"#)],
+        &text,
+        &[
+            ("server.lua", SERVER_SCRIPT),
+            ("client.lua", FILES_CLIENT_SCRIPT),
+            ("data/config.json", r#"{"answer":42}"#),
+        ],
     );
+    h.start("files_demo");
     let dir = tempfile::tempdir().expect("temp dir");
     let runtime = h.connect(&dir.path().join("cache"), &dir.path().join("data"));
     let log = h.wait_for_report(&runtime, "the file reports", |log| {

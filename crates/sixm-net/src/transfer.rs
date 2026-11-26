@@ -60,6 +60,7 @@ impl Advertised {
             listed.push(ResourceEntry {
                 name: resource.name,
                 files: entries,
+                exports: resource.exports,
             });
         }
         Self {

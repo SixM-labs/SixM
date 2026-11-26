@@ -21,6 +21,12 @@ pub const MAX_RESOURCE_NAME_LEN: usize = 256;
 /// Longest file name in bytes.
 pub const MAX_FILE_NAME_LEN: usize = 1024;
 
+/// Longest export name in bytes.
+pub const MAX_EXPORT_NAME_LEN: usize = 256;
+
+/// Most exports one resource declares.
+pub const MAX_EXPORTS: usize = 256;
+
 /// [`FileEntry::kind`] of a file declared in `shared_scripts`.
 pub const FILE_KIND_SHARED: u8 = 0;
 
@@ -50,6 +56,9 @@ pub struct ResourceEntry {
     pub name: String,
     /// The resource's files, in load order.
     pub files: Vec<FileEntry>,
+    /// Names of the client exports the manifest declares with `export`. A global
+    /// function with one of these names is callable as an export.
+    pub exports: Vec<String>,
 }
 
 /// A file a server advertises: its wire entry and where it is on disk.
@@ -68,6 +77,9 @@ pub struct PublishedResource {
     pub name: String,
     /// The resource's files, in load order.
     pub files: Vec<PublishedFile>,
+    /// Names of the client exports the manifest declares with `export`. A global
+    /// function with one of these names is callable as an export.
+    pub exports: Vec<String>,
 }
 
 /// Lowercase hexadecimal text of `hash`, as used in logs and cache paths.
@@ -80,10 +92,21 @@ pub fn hash_hex(hash: &FileHash) -> String {
 }
 
 /// Checks that `resources` can be advertised: names within their limits, known
-/// kinds, sizes within [`MAX_FILE_SIZE`] and absolute paths.
+/// kinds, sizes within [`MAX_FILE_SIZE`], absolute paths and export counts
+/// within [`MAX_EXPORTS`].
 pub(crate) fn check_published(resources: &[PublishedResource]) -> Result<(), NetError> {
     for resource in resources {
         validate_length("resource name", &resource.name, MAX_RESOURCE_NAME_LEN)?;
+        if resource.exports.len() > MAX_EXPORTS {
+            return Err(NetError::InvalidInput(format!(
+                "resource `{}` declares {} exports, more than the {MAX_EXPORTS} limit",
+                resource.name,
+                resource.exports.len()
+            )));
+        }
+        for export in &resource.exports {
+            validate_length("export name", export, MAX_EXPORT_NAME_LEN)?;
+        }
         for file in &resource.files {
             validate_length("file name", &file.entry.name, MAX_FILE_NAME_LEN)?;
             if file.entry.kind > FILE_KIND_FILE {

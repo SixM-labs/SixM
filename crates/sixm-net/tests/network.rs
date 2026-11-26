@@ -21,8 +21,8 @@ use rustls::{DigitallySignedStruct, SignatureScheme};
 use sixm_core::{FuncRef, Value};
 use sixm_net::{
     ClientEvent, ConnectionId, FILE_KIND_CLIENT, FILE_KIND_FILE, FileEntry, FileHash,
-    MAX_FILE_SIZE, NetClient, NetError, NetEvent, NetServer, PROTOCOL_VERSION, PublishedFile,
-    PublishedResource, ResourceEntry, ServerConfig,
+    MAX_EXPORT_NAME_LEN, MAX_FILE_SIZE, NetClient, NetError, NetEvent, NetServer, PROTOCOL_VERSION,
+    PublishedFile, PublishedResource, ResourceEntry, ServerConfig,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -604,6 +604,7 @@ fn resource(dir: &Path, name: &str, files: &[(&str, &[u8])]) -> PublishedResourc
             .iter()
             .map(|(file, bytes)| published_file(dir, file, FILE_KIND_CLIENT, bytes))
             .collect(),
+        exports: Vec::new(),
     }
 }
 
@@ -616,6 +617,7 @@ fn entry_of(resource: &PublishedResource) -> ResourceEntry {
             .iter()
             .map(|file| file.entry.clone())
             .collect(),
+        exports: resource.exports.clone(),
     }
 }
 
@@ -637,7 +639,10 @@ fn snapshot_of(client: &NetClient) -> Vec<ResourceEntry> {
             ClientEvent::Resources { entries } => {
                 for entry in entries {
                     match merged.last_mut() {
-                        Some(last) if last.name == entry.name => last.files.extend(entry.files),
+                        Some(last) if last.name == entry.name => {
+                            last.files.extend(entry.files);
+                            last.exports.extend(entry.exports);
+                        }
                         _ => merged.push(entry),
                     }
                 }
@@ -660,8 +665,10 @@ fn snapshot_on_join_lists_every_resource_in_start_order() {
         .zip(&contents)
         .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
         .collect();
+    let mut second = resource(dir.path(), "second", &[("a.lua", b"a")]);
+    second.exports = vec!["greet".to_owned(), "sum".to_owned()];
     let resources = vec![
-        resource(dir.path(), "second", &[("a.lua", b"a")]),
+        second,
         resource(dir.path(), "big", &big_refs),
         resource(dir.path(), "empty", &[]),
     ];
@@ -730,6 +737,7 @@ fn advertised_files_download_intact_including_five_mebibytes() {
         .publish_resources(vec![PublishedResource {
             name: "files".to_owned(),
             files: vec![small_file, large_file],
+            exports: Vec::new(),
         }])
         .expect("resources are published");
 
@@ -771,6 +779,7 @@ fn unpublished_file_becomes_unavailable() {
         .publish_resources(vec![PublishedResource {
             name: "gone".to_owned(),
             files: vec![file],
+            exports: Vec::new(),
         }])
         .expect("resources are published");
     let client = join(&server, "tester", 1);
@@ -803,6 +812,7 @@ fn file_changed_after_hashing_fails_verification() {
         .publish_resources(vec![PublishedResource {
             name: "edited".to_owned(),
             files: vec![file],
+            exports: Vec::new(),
         }])
         .expect("resources are published");
     fs::write(&path, patterned(2048, 6)).expect("file is changed");
@@ -826,6 +836,7 @@ fn invalid_publish_is_refused_and_the_previous_set_stays() {
         .publish_resources(vec![PublishedResource {
             name: "kept".to_owned(),
             files: vec![file],
+            exports: Vec::new(),
         }])
         .expect("resources are published");
 
@@ -840,6 +851,7 @@ fn invalid_publish_is_refused_and_the_previous_set_stays() {
             },
             path: PathBuf::from("relative/x.lua"),
         }],
+        exports: Vec::new(),
     };
     assert!(matches!(
         server.net.publish_resources(vec![relative]),
@@ -857,9 +869,20 @@ fn invalid_publish_is_refused_and_the_previous_set_stays() {
             },
             path: dir.path().join("huge.bin"),
         }],
+        exports: Vec::new(),
     };
     assert!(matches!(
         server.net.publish_resources(vec![oversized]),
+        Err(NetError::InvalidInput(_))
+    ));
+
+    let overlong_export = PublishedResource {
+        name: "exports".to_owned(),
+        files: Vec::new(),
+        exports: vec!["x".repeat(MAX_EXPORT_NAME_LEN + 1)],
+    };
+    assert!(matches!(
+        server.net.publish_resources(vec![overlong_export]),
         Err(NetError::InvalidInput(_))
     ));
 
@@ -888,6 +911,7 @@ fn many_requests_on_one_connection_are_all_served() {
         .publish_resources(vec![PublishedResource {
             name: "many".to_owned(),
             files,
+            exports: Vec::new(),
         }])
         .expect("resources are published");
 
