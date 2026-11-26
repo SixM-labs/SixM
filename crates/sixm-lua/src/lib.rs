@@ -15,5 +15,6 @@ mod refs;
 mod runtime;
 mod sandbox;
 mod scheduler;
+mod state;
 
 pub use runtime::LuaRuntime;

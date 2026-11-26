@@ -12,6 +12,7 @@ mod host_functions;
 mod manager;
 mod network;
 mod server;
+mod state;
 
 pub use config::{ArgError, Invocation, TokenError, parse_args, tokenize};
 pub use console::spawn_stdin_reader;

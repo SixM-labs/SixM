@@ -51,6 +51,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             Some(ClientEvent::Event { name, args }) => {
                 println!("event {name}({})", Values(&args));
             }
+            Some(ClientEvent::StateBag { bag, key, value }) => {
+                println!("state {bag}.{key} = {}", Shown(&value));
+            }
+            Some(ClientEvent::StateBagRemoved { bag }) => {
+                println!("state bag removed: {bag}");
+            }
             Some(ClientEvent::Kicked { reason }) => {
                 println!("kicked: {reason}");
                 break;

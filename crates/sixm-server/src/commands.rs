@@ -15,7 +15,7 @@ use crate::manager::{ManagerError, ResourceManager};
 const MAX_EXEC_DEPTH: usize = 16;
 
 /// Built-in command names, as listed by `help`.
-const BUILT_IN: [&str; 14] = [
+const BUILT_IN: [&str; 15] = [
     "endpoint_add_tcp",
     "endpoint_add_udp",
     "ensure",
@@ -29,6 +29,7 @@ const BUILT_IN: [&str; 14] = [
     "setr",
     "sets",
     "start",
+    "state",
     "stop",
 ];
 
@@ -60,6 +61,7 @@ pub(crate) fn run_words(manager: &ResourceManager, words: &[String], raw: &str, 
         "endpoint_add_udp" => endpoint(manager, args, false),
         "endpoint_add_tcp" => endpoint(manager, args, true),
         "players" => players(manager),
+        "state" => state(manager, args),
         "quit" => quit(manager, args),
         "exec" => exec(manager, args, depth),
         "help" => help(manager),
@@ -156,6 +158,25 @@ fn players(manager: &ResourceManager) {
     info!("{} player(s) connected", players.len());
     for (id, player) in players {
         info!("{id:>5}  {}  {}", player.name, player.endpoint);
+    }
+}
+
+/// `state [bag]`: lists the state bags, or prints the keys of one bag with
+/// their values and whether they are replicated.
+fn state(manager: &ResourceManager, args: &[String]) {
+    let Some(bag) = args.first() else {
+        info!("State bags: {}", manager.state_bag_names().join(", "));
+        return;
+    };
+    match manager.state_bag_entries(bag) {
+        Some(entries) if entries.is_empty() => info!("State bag {bag} has no keys"),
+        Some(entries) => {
+            for (key, value, replicated) in entries {
+                let flag = if replicated { " (replicated)" } else { "" };
+                info!("{bag}.{key} = {value:?}{flag}");
+            }
+        }
+        None => warn!("No such state bag {bag}."),
     }
 }
 

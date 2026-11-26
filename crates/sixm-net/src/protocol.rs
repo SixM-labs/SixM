@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::wire::Args;
+use crate::wire::{Args, StateValue};
 
 /// Version of the wire protocol. A client must send it in its `Hello`.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -30,7 +30,6 @@ pub(crate) const MAX_DECODED_VALUES: usize = 65_536;
 
 /// Longest event name in bytes.
 pub(crate) const MAX_EVENT_NAME_LEN: usize = 256;
-
 /// Longest player name in characters, after trimming.
 pub(crate) const MAX_PLAYER_NAME_LEN: usize = 64;
 
@@ -71,10 +70,36 @@ impl ClientMessage {
 /// module, which must know every variant's tag.
 #[derive(Serialize)]
 pub(crate) enum ServerMessage {
-    Welcome { player: u32, server_name: String },
-    Rejected { reason: String },
-    Event { name: String, args: Args },
-    Kicked { reason: String },
+    Welcome {
+        player: u32,
+        server_name: String,
+    },
+    Rejected {
+        reason: String,
+    },
+    Event {
+        name: String,
+        args: Args,
+    },
+    Kicked {
+        reason: String,
+    },
+    /// A state bag key was set. A nil `value` means the key was deleted.
+    StateBag {
+        bag: String,
+        key: String,
+        value: StateValue,
+    },
+    /// A state bag was removed, because its player left.
+    StateBagRemoved {
+        bag: String,
+    },
+    /// Several state bag keys at once, in order, as `(bag, key, value)`. A
+    /// nil `value` means the key was deleted. The client sees one
+    /// `StateBag` event per entry.
+    StateSnapshot {
+        entries: Vec<(String, String, StateValue)>,
+    },
 }
 
 impl ServerMessage {
@@ -86,4 +111,10 @@ impl ServerMessage {
     pub(crate) const EVENT_TAG: u32 = 2;
     /// Variant index of [`ServerMessage::Kicked`] on the wire.
     pub(crate) const KICKED_TAG: u32 = 3;
+    /// Variant index of [`ServerMessage::StateBag`] on the wire.
+    pub(crate) const STATE_BAG_TAG: u32 = 4;
+    /// Variant index of [`ServerMessage::StateBagRemoved`] on the wire.
+    pub(crate) const STATE_BAG_REMOVED_TAG: u32 = 5;
+    /// Variant index of [`ServerMessage::StateSnapshot`] on the wire.
+    pub(crate) const STATE_SNAPSHOT_TAG: u32 = 6;
 }

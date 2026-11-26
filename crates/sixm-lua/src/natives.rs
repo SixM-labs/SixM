@@ -15,6 +15,7 @@ use crate::players;
 use crate::runtime::{LuaRuntime, bind_fn, lua_err};
 use crate::sandbox::Helpers;
 use crate::scheduler::delay_from_value;
+use crate::state;
 
 /// Process-wide clock behind `GetGameTimer`.
 static START: OnceLock<Instant> = OnceLock::new();
@@ -34,6 +35,7 @@ pub(crate) fn install(runtime: &Rc<LuaRuntime>, helpers: &Helpers) -> mlua::Resu
     install_events(lua, weak, &globals)?;
     install_host(lua, weak, &globals)?;
     players::install(lua, weak, &globals)?;
+    state::install(lua, weak, &globals)?;
     globals.raw_set("exports", exports::table(runtime)?)?;
     Ok(())
 }

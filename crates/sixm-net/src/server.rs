@@ -26,7 +26,7 @@ use crate::protocol::{
     MAX_FRAME, OUTBOUND_QUEUE_LEN, SEND_QUEUE_OVERFLOW, SHUTTING_DOWN, ServerMessage,
 };
 use crate::transport;
-use crate::wire::encode_event;
+use crate::wire::{encode_event, encode_state, encode_state_removed, encode_state_snapshot};
 
 /// Default UDP port, the one FiveM clients expect.
 const DEFAULT_PORT: u16 = 30120;
@@ -210,6 +210,46 @@ impl NetServer {
     /// Sends an event to every accepted player. The message is encoded once.
     pub fn broadcast_event(&self, name: &str, args: &[Value]) -> Result<(), NetError> {
         let frame = encode_event(ServerMessage::EVENT_TAG, name, args, self.max_frame)?;
+        self.post(Command::Broadcast { frame })
+    }
+
+    /// Sends one state bag key to one player. A nil `value` tells the player
+    /// that the key was deleted. The message is encoded on the calling thread.
+    pub fn send_state(
+        &self,
+        player: u32,
+        bag: &str,
+        key: &str,
+        value: &Value,
+    ) -> Result<(), NetError> {
+        let frame = encode_state(bag, key, value, self.max_frame)?;
+        self.post(Command::Send { player, frame })
+    }
+
+    /// Sends several state bag keys to one player, in order, as the fewest
+    /// frames that fit. The player sees one state event per entry. Entries
+    /// too large for any frame are skipped with a warning. Names and values
+    /// are validated before anything is sent.
+    pub fn send_state_snapshot(
+        &self,
+        player: u32,
+        entries: &[(&str, &str, &Value)],
+    ) -> Result<(), NetError> {
+        for frame in encode_state_snapshot(entries, self.max_frame)? {
+            self.post(Command::Send { player, frame })?;
+        }
+        Ok(())
+    }
+
+    /// Sends one state bag key to every accepted player. The message is encoded once.
+    pub fn broadcast_state(&self, bag: &str, key: &str, value: &Value) -> Result<(), NetError> {
+        let frame = encode_state(bag, key, value, self.max_frame)?;
+        self.post(Command::Broadcast { frame })
+    }
+
+    /// Tells every accepted player that the state bag `bag` was removed.
+    pub fn broadcast_state_removed(&self, bag: &str) -> Result<(), NetError> {
+        let frame = encode_state_removed(bag, self.max_frame)?;
         self.post(Command::Broadcast { frame })
     }
 

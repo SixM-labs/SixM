@@ -32,6 +32,14 @@ const DISCONNECT_GRACE: Duration = Duration::from_secs(1);
 pub enum ClientEvent {
     /// The server sent an event.
     Event { name: String, args: Vec<Value> },
+    /// A state bag key was set. `value` is nil when the key was deleted.
+    StateBag {
+        bag: String,
+        key: String,
+        value: Value,
+    },
+    /// A state bag was removed, because its player left.
+    StateBagRemoved { bag: String },
     /// The server kicked the client, or shut down, and gave a reason.
     Kicked { reason: String },
     /// The connection ended without a kick.
@@ -270,9 +278,12 @@ async fn establish(
         ServerMessage::Rejected { reason } | ServerMessage::Kicked { reason } => {
             return Err(NetError::Rejected(reason));
         }
-        ServerMessage::Event { .. } => {
+        ServerMessage::Event { .. }
+        | ServerMessage::StateBag { .. }
+        | ServerMessage::StateBagRemoved { .. }
+        | ServerMessage::StateSnapshot { .. } => {
             return Err(NetError::Protocol(
-                "the server sent an event before the welcome".to_owned(),
+                "the server sent a message before the welcome".to_owned(),
             ));
         }
     };
@@ -326,6 +337,26 @@ async fn pump_events(mut recv: RecvStream, connection: Connection, events: Sende
             Ok(Some(payload)) => match decode_server_message(&payload) {
                 Ok(ServerMessage::Event { name, args }) => {
                     ClientEvent::Event { name, args: args.0 }
+                }
+                Ok(ServerMessage::StateBag { bag, key, value }) => ClientEvent::StateBag {
+                    bag,
+                    key,
+                    value: value.0,
+                },
+                Ok(ServerMessage::StateBagRemoved { bag }) => ClientEvent::StateBagRemoved { bag },
+                Ok(ServerMessage::StateSnapshot { entries }) => {
+                    for (bag, key, value) in entries {
+                        let event = ClientEvent::StateBag {
+                            bag,
+                            key,
+                            value: value.0,
+                        };
+                        if events.send(event).is_err() {
+                            debug!("the client handle was dropped, stopping the event reader");
+                            return;
+                        }
+                    }
+                    continue;
                 }
                 Ok(ServerMessage::Kicked { reason }) => {
                     let _ = events.send(ClientEvent::Kicked { reason });

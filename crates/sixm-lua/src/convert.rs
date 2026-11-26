@@ -60,8 +60,13 @@ impl LuaRuntime {
     pub(crate) fn to_network_values(&self, values: &[LuaValue]) -> Result<Vec<Value>, ScriptError> {
         values
             .iter()
-            .map(|value| self.value_at(value, 0, Functions::Refuse))
+            .map(|value| self.to_network_value(value))
             .collect()
+    }
+
+    /// Converts one value bound for the network. See [`to_network_values`](Self::to_network_values).
+    pub(crate) fn to_network_value(&self, value: &LuaValue) -> Result<Value, ScriptError> {
+        self.value_at(value, 0, Functions::Refuse)
     }
 
     /// Converts a list of script values into a Lua multi-value.
