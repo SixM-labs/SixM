@@ -1,11 +1,13 @@
-//! Player functions: client events, the connected-player list, names and drops.
+//! Server-only player functions: client events, the connected-player list,
+//! names, endpoints, drops and `Player(id)`.
 
 use std::rc::Weak;
 
 use mlua::{Lua, MultiValue, Table, Value as LuaValue};
-use sixm_core::{ClientTarget, PlayerInfo};
+use sixm_core::{ClientTarget, Host, PlayerInfo, ServerHost, player_bag};
 
 use crate::runtime::{LuaRuntime, bind_fn, lua_err};
+use crate::state::state_bag;
 
 /// Reason given to connected players when a script drops them without one.
 const DEFAULT_DROP_REASON: &str = "Dropped by server";
@@ -14,7 +16,8 @@ const DEFAULT_DROP_REASON: &str = "Dropped by server";
 const EXACT_FLOAT_LIMIT: f64 = 9_007_199_254_740_992.0;
 
 /// Installs `TriggerClientEvent`, `GetPlayers`, `GetNumPlayerIndices`,
-/// `GetPlayerName`, `GetPlayerEndpoint` and `DropPlayer`.
+/// `GetPlayerName`, `GetPlayerEndpoint`, `DropPlayer` and `Player`. Only server
+/// runtimes call this.
 pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::Result<()> {
     let trigger_client_event = bind_fn(
         lua,
@@ -22,17 +25,19 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
         |rt, (name, target, args): (String, LuaValue, MultiValue)| {
             let target = client_target(&target)?;
             let values = rt.to_network_values(&args.into_vec()).map_err(lua_err)?;
-            rt.host()?
+            let host = rt.host()?;
+            server(&*host)?
                 .trigger_client_event(&name, target, &values)
                 .map_err(lua_err)
         },
     )?;
     let get_players = bind_fn(lua, weak, |rt, (): ()| {
-        let ids = rt.host()?.players();
+        let ids = server(&*rt.host()?)?.players();
         rt.lua.create_sequence_from(ids.iter().map(u32::to_string))
     })?;
     let get_num_player_indices = bind_fn(lua, weak, |rt, (): ()| {
-        i64::try_from(rt.host()?.players().len()).map_err(mlua::Error::runtime)
+        let count = server(&*rt.host()?)?.players().len();
+        i64::try_from(count).map_err(mlua::Error::runtime)
     })?;
     let get_player_name = bind_fn(lua, weak, |rt, (player,): (LuaValue,)| {
         Ok(player_info(rt, &player)?.map(|info| info.name))
@@ -46,10 +51,16 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
         |rt, (player, reason): (LuaValue, Option<String>)| {
             let id = player_id(&player).ok_or_else(|| invalid_player("DropPlayer"))?;
             let reason = reason.as_deref().unwrap_or(DEFAULT_DROP_REASON);
-            rt.host()?.drop_player(id, reason);
+            server(&*rt.host()?)?.drop_player(id, reason);
             Ok(())
         },
     )?;
+    let player = bind_fn(lua, weak, |rt, (id,): (LuaValue,)| {
+        let id = player_id(&id).ok_or_else(|| invalid_player("Player"))?;
+        let object = rt.lua.create_table()?;
+        object.raw_set("state", state_bag(rt, &player_bag(id))?)?;
+        Ok(object)
+    })?;
 
     let functions = [
         ("TriggerClientEvent", trigger_client_event),
@@ -58,6 +69,7 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
         ("GetPlayerName", get_player_name),
         ("GetPlayerEndpoint", get_player_endpoint),
         ("DropPlayer", drop_player),
+        ("Player", player),
     ];
     for (name, function) in functions {
         globals.raw_set(name, function)?;
@@ -65,12 +77,19 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
     Ok(())
 }
 
+/// The server services of `host`. Only server runtimes call the functions that
+/// use this, so a missing service is a broken host rather than a script error.
+fn server(host: &dyn Host) -> mlua::Result<&dyn ServerHost> {
+    host.server()
+        .ok_or_else(|| mlua::Error::runtime("this function needs a server host"))
+}
+
 /// The player `player` names, or `None` when it names no connected player.
 fn player_info(rt: &LuaRuntime, player: &LuaValue) -> mlua::Result<Option<PlayerInfo>> {
     let Some(id) = player_id(player) else {
         return Ok(None);
     };
-    Ok(rt.host()?.player_info(id))
+    Ok(server(&*rt.host()?)?.player_info(id))
 }
 
 /// Target of `TriggerClientEvent`: `-1` addresses every player.

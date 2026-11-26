@@ -186,7 +186,7 @@ fn functions_cannot_be_stored_in_state() {
             .expect_err("a function cannot be stored");
         assert!(
             err.to_string()
-                .contains("functions cannot be sent to clients"),
+                .contains("functions cannot be sent over the network"),
             "{export}: {err}"
         );
     }

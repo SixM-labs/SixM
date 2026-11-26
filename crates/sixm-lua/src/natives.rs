@@ -8,11 +8,12 @@ use std::time::Instant;
 use mlua::{Function, Lua, LuaString, MultiValue, Table, Value as LuaValue};
 use sixm_core::EventSource;
 
+use crate::client;
 use crate::events::handle_table;
 use crate::exports;
 use crate::json;
 use crate::players;
-use crate::runtime::{LuaRuntime, bind_fn, lua_err};
+use crate::runtime::{LuaRuntime, Side, bind_fn, lua_err};
 use crate::sandbox::Helpers;
 use crate::scheduler::delay_from_value;
 use crate::state;
@@ -21,6 +22,9 @@ use crate::state;
 static START: OnceLock<Instant> = OnceLock::new();
 
 /// Installs every global function, the `Citizen` table, `exports` and `json`.
+///
+/// The common globals are installed on both sides. The player functions are
+/// server-only, and the connection functions are client-only.
 pub(crate) fn install(runtime: &Rc<LuaRuntime>, helpers: &Helpers) -> mlua::Result<()> {
     START.get_or_init(Instant::now);
     let lua = &runtime.lua;
@@ -33,8 +37,11 @@ pub(crate) fn install(runtime: &Rc<LuaRuntime>, helpers: &Helpers) -> mlua::Resu
     globals.raw_set("source", "")?;
     install_scheduling(lua, weak, &globals, helpers)?;
     install_events(lua, weak, &globals)?;
-    install_host(lua, weak, &globals)?;
-    players::install(lua, weak, &globals)?;
+    install_host(lua, weak, &globals, runtime.side)?;
+    match runtime.side {
+        Side::Server => players::install(lua, weak, &globals)?,
+        Side::Client { local_player } => client::install(runtime, &globals, local_player)?,
+    }
     state::install(lua, weak, &globals)?;
     globals.raw_set("exports", exports::table(runtime)?)?;
     Ok(())
@@ -133,7 +140,13 @@ fn install_events(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::
 }
 
 /// Installs the resource, file, convar, command and timer functions, plus `json`.
-fn install_host(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::Result<()> {
+fn install_host(
+    lua: &Lua,
+    weak: &Weak<LuaRuntime>,
+    globals: &Table,
+    side: Side,
+) -> mlua::Result<()> {
+    let is_duplicity_version = lua.create_function(move |_, (): ()| Ok(side == Side::Server))?;
     let current_name = bind_fn(lua, weak, |rt, (): ()| {
         rt.lua.create_string(rt.resource.as_bytes())
     })?;
@@ -211,6 +224,7 @@ fn install_host(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::Re
         ("ExecuteCommand", execute_command),
         ("RegisterCommand", register_command),
         ("GetGameTimer", get_game_timer),
+        ("IsDuplicityVersion", is_duplicity_version),
     ];
     for (name, function) in host_functions {
         globals.raw_set(name, function)?;

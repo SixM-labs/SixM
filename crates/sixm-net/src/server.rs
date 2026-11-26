@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::mpsc::{SyncSender, sync_channel};
+use std::sync::{Arc, PoisonError, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -21,12 +21,17 @@ use tracing::{debug, error, warn};
 
 use crate::connection::{self, Decision, Shared, Ticket};
 use crate::error::NetError;
+use crate::files::{MAX_RESOURCE_NAME_LEN, PublishedResource, ResourceEntry, check_published};
 use crate::identity::{Credentials, Fingerprint, Identity};
 use crate::protocol::{
     MAX_FRAME, OUTBOUND_QUEUE_LEN, SEND_QUEUE_OVERFLOW, SHUTTING_DOWN, ServerMessage,
 };
+use crate::transfer::Advertised;
 use crate::transport;
-use crate::wire::{encode_event, encode_state, encode_state_removed, encode_state_snapshot};
+use crate::wire::{
+    encode_event, encode_frame, encode_resources_snapshot, encode_state, encode_state_removed,
+    encode_state_snapshot, validate_length,
+};
 
 /// Default UDP port, the one FiveM clients expect.
 const DEFAULT_PORT: u16 = 30120;
@@ -125,6 +130,8 @@ pub struct NetServer {
     local_addr: SocketAddr,
     fingerprint: Fingerprint,
     max_frame: usize,
+    /// Files and resources the server advertises. Read by the connections.
+    advertised: Arc<RwLock<Advertised>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -148,11 +155,13 @@ impl NetServer {
         let bind = config.bind;
         let credentials = Credentials::load(&config.identity)?;
         let fingerprint = credentials.fingerprint();
+        let advertised = Arc::new(RwLock::new(Advertised::default()));
         let shared = Arc::new(Shared {
             on_event: Arc::new(on_event),
             server_name: config.server_name,
             handshake_timeout: config.handshake_timeout,
             max_frame,
+            advertised: Arc::clone(&advertised),
         });
         let (commands, command_rx) = mpsc::unbounded_channel();
         let (ready_tx, ready_rx) = sync_channel(1);
@@ -166,6 +175,7 @@ impl NetServer {
             local_addr,
             fingerprint,
             max_frame,
+            advertised,
             thread: Some(thread),
         })
     }
@@ -250,6 +260,67 @@ impl NetServer {
     /// Tells every accepted player that the state bag `bag` was removed.
     pub fn broadcast_state_removed(&self, bag: &str) -> Result<(), NetError> {
         let frame = encode_state_removed(bag, self.max_frame)?;
+        self.post(Command::Broadcast { frame })
+    }
+
+    /// Replaces the advertised set with `resources`, which lists every running
+    /// resource in start order. Players can download the files of the new set
+    /// at once; the call does not tell them about it, so pair it with
+    /// [`broadcast_resource_started`](Self::broadcast_resource_started) or
+    /// [`broadcast_resource_stopped`](Self::broadcast_resource_stopped).
+    ///
+    /// Files that are no longer listed cannot be requested any more, including
+    /// those already queued for transfer. Files that are already streaming
+    /// finish. Fails without changing anything if an entry is invalid.
+    pub fn publish_resources(&self, resources: Vec<PublishedResource>) -> Result<(), NetError> {
+        check_published(&resources)?;
+        let fresh = Advertised::new(resources);
+        let previous = {
+            let mut advertised = self
+                .advertised
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            std::mem::replace(&mut *advertised, fresh)
+        };
+        drop(previous);
+        Ok(())
+    }
+
+    /// Sends the advertised resources to one player, in start order, as the
+    /// snapshot that ends with an empty frame. Send it right after the player
+    /// is accepted. The message is encoded on the calling thread.
+    pub fn send_resources(&self, player: u32) -> Result<(), NetError> {
+        let frames = {
+            let advertised = self
+                .advertised
+                .read()
+                .unwrap_or_else(PoisonError::into_inner);
+            encode_resources_snapshot(&advertised.resources, self.max_frame)?
+        };
+        for frame in frames {
+            self.post(Command::Send { player, frame })?;
+        }
+        Ok(())
+    }
+
+    /// Tells every accepted player that a resource started and what files it
+    /// has. Publish the new set first.
+    pub fn broadcast_resource_started(&self, entry: ResourceEntry) -> Result<(), NetError> {
+        validate_length("resource name", &entry.name, MAX_RESOURCE_NAME_LEN)?;
+        let frame = encode_frame(&ServerMessage::ResourceStarted { entry }, self.max_frame)?;
+        self.post(Command::Broadcast { frame })
+    }
+
+    /// Tells every accepted player that the resource `name` stopped. Publish
+    /// the new set first.
+    pub fn broadcast_resource_stopped(&self, name: &str) -> Result<(), NetError> {
+        validate_length("resource name", name, MAX_RESOURCE_NAME_LEN)?;
+        let frame = encode_frame(
+            &ServerMessage::ResourceStopped {
+                name: name.to_owned(),
+            },
+            self.max_frame,
+        )?;
         self.post(Command::Broadcast { frame })
     }
 
@@ -428,6 +499,7 @@ impl Supervisor {
             id,
             decision: decision_rx,
             outbound: outbound_rx,
+            reply: outbound_tx.clone(),
             kick: Arc::clone(&kick),
         };
         let shared = Arc::clone(&self.shared);

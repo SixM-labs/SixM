@@ -8,16 +8,18 @@ use std::rc::{Rc, Weak};
 use std::time::Instant;
 
 use sixm_core::{
-    ClientTarget, EventContext, EventSource, FuncRef, Host, PlayerInfo, ResourceName, ScriptError,
-    ScriptRuntime, Value,
+    ClientHost, ClientTarget, EventContext, EventSource, FuncRef, Host, PlayerInfo, ResourceName,
+    ScriptError, ScriptRuntime, ServerHost, Value,
 };
 use sixm_lua::LuaRuntime;
+use sixm_net::PublishedResource;
 use sixm_resources::{Catalog, DependencyError, ResourceError, ScanIssue};
 use tracing::{error, info, warn};
 
 use crate::convars::Convars;
 use crate::host_functions::{HostFunctions, is_host};
 use crate::network::Network;
+use crate::resource_files::{FileHashes, listing};
 use crate::state::StateStore;
 
 /// Why a resource operation did not complete.
@@ -85,6 +87,11 @@ pub struct ResourceManager {
     pub(crate) state: RefCell<StateStore>,
     /// Functions the server offers to scripts, such as `setKickReason`.
     pub(crate) host_functions: RefCell<HostFunctions>,
+    /// Client files of the running resources, in start order. Advertised to
+    /// players as a whole whenever it changes.
+    advertised: RefCell<Vec<PublishedResource>>,
+    /// Hashes of the client files, so that restarts do not read them again.
+    hashes: RefCell<FileHashes>,
 }
 
 impl ResourceManager {
@@ -105,6 +112,8 @@ impl ResourceManager {
             network: Network::default(),
             state: RefCell::default(),
             host_functions: RefCell::default(),
+            advertised: RefCell::default(),
+            hashes: RefCell::default(),
         })
     }
 
@@ -359,6 +368,7 @@ impl ResourceManager {
 
         self.running.borrow_mut().push(Rc::clone(&runtime));
         self.rebuild_snapshot();
+        self.advertise(name);
 
         for file in &files {
             if let Err(err) = runtime.load_script(file) {
@@ -370,6 +380,66 @@ impl ResourceManager {
         self.dispatch_local("onServerResourceStart", name);
         info!("Started resource {name}");
         Ok(())
+    }
+
+    /// Lists the client files of `name` to players. A resource whose files
+    /// cannot be expanded is still listed, with no files, and the error is logged.
+    fn advertise(&self, name: &ResourceName) {
+        let resource = self.client_resource(name);
+        let entry = listing(&resource);
+        self.advertised.borrow_mut().push(resource);
+        self.publish_advertised();
+        self.with_server(|server| {
+            if let Err(err) = server.broadcast_resource_started(entry) {
+                warn!("cannot announce the start of `{name}`: {err}");
+            }
+        });
+    }
+
+    /// Removes `name` from the client files and tells players it stopped.
+    fn withdraw(&self, name: &ResourceName) {
+        self.advertised
+            .borrow_mut()
+            .retain(|resource| resource.name != name.as_ref());
+        self.publish_advertised();
+        self.with_server(|server| {
+            if let Err(err) = server.broadcast_resource_stopped(name) {
+                warn!("cannot announce the stop of `{name}`: {err}");
+            }
+        });
+    }
+
+    /// Hands the whole advertised list to the network. Does nothing while the
+    /// network is not running; it is published when the network starts.
+    pub(crate) fn publish_advertised(&self) {
+        let resources = self.advertised.borrow().clone();
+        self.with_server(|server| {
+            if let Err(err) = server.publish_resources(resources) {
+                warn!("cannot publish the client files: {err}");
+            }
+        });
+    }
+
+    /// The client files of `name`, hashed and ready to advertise.
+    fn client_resource(&self, name: &ResourceName) -> PublishedResource {
+        let catalog = self.catalog.borrow();
+        let files = match catalog.get(name) {
+            Some(info) => info
+                .client_files(|dependency| catalog.get(dependency).map(|other| other.root.clone())),
+            None => Ok(Vec::new()),
+        };
+        let files = files.unwrap_or_else(|err| {
+            error!("[{name}] cannot expand its client files, none are sent: {err}");
+            Vec::new()
+        });
+        let mut hashes = self.hashes.borrow_mut();
+        PublishedResource {
+            name: name.to_string(),
+            files: files
+                .into_iter()
+                .filter_map(|file| hashes.publish(file))
+                .collect(),
+        }
     }
 
     /// The root folder, server exports and script files of `name`.
@@ -426,6 +496,7 @@ impl ResourceManager {
             .borrow_mut()
             .retain(|candidate| !Rc::ptr_eq(candidate, runtime));
         self.rebuild_snapshot();
+        self.withdraw(&name);
         runtime.shutdown();
         info!("Stopping resource {name}");
     }
@@ -449,6 +520,14 @@ impl ResourceManager {
 }
 
 impl Host for ResourceManager {
+    fn server(&self) -> Option<&dyn ServerHost> {
+        Some(self)
+    }
+
+    fn client(&self) -> Option<&dyn ClientHost> {
+        None
+    }
+
     fn trigger_event(
         &self,
         event: &str,
@@ -542,6 +621,22 @@ impl Host for ResourceManager {
             .map(|info| info.root.clone())
     }
 
+    fn state_get(&self, bag: &str, key: &str) -> Option<Value> {
+        self.state.borrow().get(bag, key).cloned()
+    }
+
+    fn state_set(
+        &self,
+        bag: &str,
+        key: &str,
+        value: Value,
+        replicated: bool,
+    ) -> Result<(), ScriptError> {
+        self.write_state(bag, key, &value, replicated)
+    }
+}
+
+impl ServerHost for ResourceManager {
     fn trigger_client_event(
         &self,
         event: &str,
@@ -561,19 +656,5 @@ impl Host for ResourceManager {
 
     fn drop_player(&self, player: u32, reason: &str) {
         self.queue_drop(player, reason);
-    }
-
-    fn state_get(&self, bag: &str, key: &str) -> Option<Value> {
-        self.state.borrow().get(bag, key).cloned()
-    }
-
-    fn state_set(
-        &self,
-        bag: &str,
-        key: &str,
-        value: Value,
-        replicated: bool,
-    ) -> Result<(), ScriptError> {
-        self.write_state(bag, key, &value, replicated)
     }
 }

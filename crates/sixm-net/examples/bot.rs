@@ -57,6 +57,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             Some(ClientEvent::StateBagRemoved { bag }) => {
                 println!("state bag removed: {bag}");
             }
+            Some(ClientEvent::Resources { entries }) => {
+                for entry in &entries {
+                    println!("resource {} has {} files", entry.name, entry.files.len());
+                }
+            }
+            Some(ClientEvent::ResourceStarted { entry }) => {
+                println!("resource {} started", entry.name);
+            }
+            Some(ClientEvent::ResourceStopped { name }) => {
+                println!("resource {name} stopped");
+            }
             Some(ClientEvent::Kicked { reason }) => {
                 println!("kicked: {reason}");
                 break;

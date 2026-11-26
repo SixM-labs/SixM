@@ -14,6 +14,8 @@ use crate::runtime::LuaRuntime;
 const MAX_DELAY: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 /// Finished coroutines kept for reuse.
 const IDLE_THREAD_LIMIT: usize = 64;
+/// The `source` of an event sent by the server, as FiveM exposes it to clients.
+const SERVER_SOURCE: i64 = 65_535;
 
 /// A coroutine the scheduler resumes.
 struct Task {
@@ -156,6 +158,7 @@ impl LuaRuntime {
         let value = match source {
             EventSource::Local => LuaValue::String(self.empty_string.clone()),
             EventSource::Net(id) | EventSource::Player(id) => LuaValue::Integer(i64::from(id)),
+            EventSource::Server => LuaValue::Integer(SERVER_SOURCE),
         };
         self.lua.globals().raw_set("source", value)
     }

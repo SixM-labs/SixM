@@ -5,6 +5,7 @@
 //! on later frames or timers. Values cross resource boundaries as
 //! [`sixm_core::Value`], and functions cross as [`sixm_core::FuncRef`].
 
+mod client;
 mod convert;
 mod events;
 mod exports;

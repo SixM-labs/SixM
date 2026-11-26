@@ -11,15 +11,31 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use sixm_core::{
-    ClientTarget, EventContext, EventSource, FuncRef, GLOBAL_BAG, Host, PlayerInfo, ResourceName,
-    ScriptError, ScriptRuntime, Value, player_of_bag,
+    ClientHost, ClientTarget, EventContext, EventSource, FuncRef, GLOBAL_BAG, Host, PlayerInfo,
+    ResourceName, ScriptError, ScriptRuntime, ServerHost, Value, player_of_bag,
 };
 use sixm_lua::LuaRuntime;
 use tempfile::TempDir;
 
+/// Which side of the connection a [`TestHost`] plays.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Side {
+    /// `server()` is available and `client()` is not.
+    #[default]
+    Server,
+    /// `client()` is available and `server()` is not.
+    Client,
+}
+
 /// Owns runtimes in start order and routes calls between them.
 #[derive(Debug, Default)]
 pub struct TestHost {
+    /// The side this host plays. Decides which services it exposes.
+    pub side: Side,
+    /// The client's server id, returned by `local_player` on a client host.
+    pub local_player: u32,
+    /// Events sent to the server by a client host, as `(event, args)`, in order.
+    pub server_events: RefCell<Vec<(String, Vec<Value>)>>,
     runtimes: RefCell<Vec<Rc<LuaRuntime>>>,
     roots: RefCell<HashMap<String, PathBuf>>,
     dirs: RefCell<Vec<TempDir>>,
@@ -73,6 +89,20 @@ impl TestHost {
 }
 
 impl Host for TestHost {
+    fn server(&self) -> Option<&dyn ServerHost> {
+        match self.side {
+            Side::Server => Some(self),
+            Side::Client => None,
+        }
+    }
+
+    fn client(&self) -> Option<&dyn ClientHost> {
+        match self.side {
+            Side::Server => None,
+            Side::Client => Some(self),
+        }
+    }
+
     fn trigger_event(
         &self,
         event: &str,
@@ -133,39 +163,6 @@ impl Host for TestHost {
         self.roots.borrow().get(resource).cloned()
     }
 
-    fn trigger_client_event(
-        &self,
-        event: &str,
-        target: ClientTarget,
-        args: &[Value],
-    ) -> Result<(), ScriptError> {
-        if args.iter().any(Value::contains_func_ref) {
-            return Err(ScriptError::Runtime(
-                "function references cannot be sent to clients".to_owned(),
-            ));
-        }
-        self.client_events
-            .borrow_mut()
-            .push((event.to_owned(), target, args.to_vec()));
-        Ok(())
-    }
-
-    fn players(&self) -> Vec<u32> {
-        self.players.borrow().iter().map(|(id, _)| *id).collect()
-    }
-
-    fn player_info(&self, player: u32) -> Option<PlayerInfo> {
-        self.players
-            .borrow()
-            .iter()
-            .find(|(id, _)| *id == player)
-            .map(|(_, info)| info.clone())
-    }
-
-    fn drop_player(&self, player: u32, reason: &str) {
-        self.dropped.borrow_mut().push((player, reason.to_owned()));
-    }
-
     fn state_get(&self, bag: &str, key: &str) -> Option<Value> {
         self.state
             .borrow()
@@ -211,11 +208,73 @@ impl Host for TestHost {
     }
 }
 
-/// Creates a host with a few convars set.
+impl ServerHost for TestHost {
+    fn trigger_client_event(
+        &self,
+        event: &str,
+        target: ClientTarget,
+        args: &[Value],
+    ) -> Result<(), ScriptError> {
+        if args.iter().any(Value::contains_func_ref) {
+            return Err(ScriptError::Runtime(
+                "function references cannot be sent to clients".to_owned(),
+            ));
+        }
+        self.client_events
+            .borrow_mut()
+            .push((event.to_owned(), target, args.to_vec()));
+        Ok(())
+    }
+
+    fn players(&self) -> Vec<u32> {
+        self.players.borrow().iter().map(|(id, _)| *id).collect()
+    }
+
+    fn player_info(&self, player: u32) -> Option<PlayerInfo> {
+        self.players
+            .borrow()
+            .iter()
+            .find(|(id, _)| *id == player)
+            .map(|(_, info)| info.clone())
+    }
+
+    fn drop_player(&self, player: u32, reason: &str) {
+        self.dropped.borrow_mut().push((player, reason.to_owned()));
+    }
+}
+
+impl ClientHost for TestHost {
+    fn trigger_server_event(&self, event: &str, args: &[Value]) -> Result<(), ScriptError> {
+        if args.iter().any(Value::contains_func_ref) {
+            return Err(ScriptError::Runtime(
+                "function references cannot be sent to the server".to_owned(),
+            ));
+        }
+        self.server_events
+            .borrow_mut()
+            .push((event.to_owned(), args.to_vec()));
+        Ok(())
+    }
+
+    fn local_player(&self) -> u32 {
+        self.local_player
+    }
+}
+
+/// Creates a server host with a few convars set.
 pub fn new_host() -> Rc<TestHost> {
     let convars = HashMap::from([("sv_maxclients".to_owned(), "32".to_owned())]);
     Rc::new(TestHost {
         convars,
+        ..TestHost::default()
+    })
+}
+
+/// Creates a client host whose server id is `local_player`.
+pub fn new_client_host(local_player: u32) -> Rc<TestHost> {
+    Rc::new(TestHost {
+        side: Side::Client,
+        local_player,
         ..TestHost::default()
     })
 }

@@ -4,23 +4,27 @@
 //! read by a separate task, so that a partially read frame is never cancelled
 //! by an outgoing command.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
 use std::sync::mpsc::{self as std_mpsc, Receiver, Sender, SyncSender, sync_channel};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use quinn::{Connection, Endpoint, RecvStream, SendStream};
+use quinn::{Connection, Endpoint, RecvStream, SendStream, VarInt};
+use ring::digest::{self, SHA256};
 use sixm_core::Value;
 use tokio::sync::mpsc;
 use tracing::debug;
 
 use crate::error::NetError;
+use crate::files::{FileHash, MAX_FILE_SIZE, ResourceEntry, hash_hex};
 use crate::identity::Fingerprint;
 use crate::protocol::{
     ClientMessage, MAX_FRAME, MAX_PLAYER_NAME_LEN, PROTOCOL_VERSION, SERVER_NAME, ServerMessage,
 };
+use crate::transfer::HEADER_LEN;
 use crate::transport::{ServerVerifier, Trust, client_config, close_connection, closing_reason};
 use crate::wire::{decode_server_message, encode_event, encode_frame, read_frame};
 
@@ -40,11 +44,27 @@ pub enum ClientEvent {
     },
     /// A state bag was removed, because its player left.
     StateBagRemoved { bag: String },
+    /// One frame of the resource snapshot sent on join. An empty list ends
+    /// the snapshot. Entries of the same name in consecutive frames belong to
+    /// one resource.
+    Resources { entries: Vec<ResourceEntry> },
+    /// A resource started. Its files replace any earlier entry of that name.
+    ResourceStarted { entry: ResourceEntry },
+    /// A resource stopped.
+    ResourceStopped { name: String },
     /// The server kicked the client, or shut down, and gave a reason.
     Kicked { reason: String },
     /// The connection ended without a kick.
     Disconnected { reason: String },
 }
+
+/// Receivers waiting for a requested file, by hash. A waiter gets the file's
+/// bytes, or `None` if the server does not advertise the file. A waiter whose
+/// sender is dropped sees the connection end.
+type Waiters = HashMap<FileHash, Vec<Sender<Option<Arc<Vec<u8>>>>>>;
+
+/// The waiters of the file requests in flight, shared with the network thread.
+type Pending = Arc<Mutex<Waiters>>;
 
 /// Connection to a SixM server.
 pub struct NetClient {
@@ -52,6 +72,7 @@ pub struct NetClient {
     server_name: String,
     commands: Option<mpsc::UnboundedSender<Arc<[u8]>>>,
     events: Receiver<ClientEvent>,
+    pending: Pending,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -101,10 +122,18 @@ impl NetClient {
         let (commands, command_rx) = mpsc::unbounded_channel();
         let (events_tx, events) = std_mpsc::channel();
         let (ready_tx, ready_rx) = sync_channel(1);
+        let pending = Pending::default();
+        let thread_pending = Arc::clone(&pending);
         let thread = thread::Builder::new()
             .name("sixm-client".to_owned())
             .spawn(move || {
-                run_thread(addr, name, timeout, trust, ready_tx, command_rx, events_tx);
+                let link = Link {
+                    ready: ready_tx,
+                    commands: command_rx,
+                    events: events_tx,
+                    pending: thread_pending,
+                };
+                run_thread(addr, name, timeout, trust, link);
             })
             .map_err(NetError::Io)?;
         match ready_rx.recv() {
@@ -113,6 +142,7 @@ impl NetClient {
                 server_name: welcome.server_name,
                 commands: Some(commands),
                 events,
+                pending,
                 thread: Some(thread),
             }),
             Ok(Err(err)) => {
@@ -152,6 +182,46 @@ impl NetClient {
         self.events.recv_timeout(timeout).ok()
     }
 
+    /// Downloads the file with `hash` and checks it against `expected_size`
+    /// and the hash. Blocks for at most `timeout` in total.
+    ///
+    /// Fails with [`NetError::FileUnavailable`] when the server does not
+    /// advertise the file, and with [`NetError::Integrity`] when the bytes do
+    /// not match the size or the hash. `expected_size` may not exceed
+    /// [`MAX_FILE_SIZE`].
+    pub fn download(
+        &self,
+        hash: FileHash,
+        expected_size: u64,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, NetError> {
+        if expected_size > MAX_FILE_SIZE {
+            return Err(NetError::InvalidInput(format!(
+                "a file of {expected_size} bytes is over the {MAX_FILE_SIZE} byte limit"
+            )));
+        }
+        let (waiter, delivered) = std_mpsc::channel();
+        lock(&self.pending).entry(hash).or_default().push(waiter);
+        let request = encode_frame(&ClientMessage::RequestFile { hash }, MAX_FRAME)?;
+        self.commands
+            .as_ref()
+            .ok_or(NetError::Closed)?
+            .send(request)
+            .map_err(|_| NetError::Closed)?;
+        let bytes = match delivered.recv_timeout(timeout) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
+                return Err(NetError::FileUnavailable {
+                    hash: hash_hex(&hash),
+                });
+            }
+            Err(std_mpsc::RecvTimeoutError::Timeout) => return Err(NetError::Timeout),
+            Err(std_mpsc::RecvTimeoutError::Disconnected) => return Err(NetError::Closed),
+        };
+        verify(&bytes, &hash, expected_size)?;
+        Ok(Arc::unwrap_or_clone(bytes))
+    }
+
     /// Closes the connection and waits for the client thread to finish.
     pub fn disconnect(self) {
         drop(self);
@@ -188,15 +258,21 @@ struct Established {
     recv: RecvStream,
 }
 
-fn run_thread(
-    addr: SocketAddr,
-    name: String,
-    timeout: Duration,
-    trust: Trust,
+/// The channels that connect the caller's thread with the client thread.
+struct Link {
     ready: SyncSender<Result<Welcome, NetError>>,
     commands: mpsc::UnboundedReceiver<Arc<[u8]>>,
     events: Sender<ClientEvent>,
-) {
+    pending: Pending,
+}
+
+fn run_thread(addr: SocketAddr, name: String, timeout: Duration, trust: Trust, link: Link) {
+    let Link {
+        ready,
+        commands,
+        events,
+        pending,
+    } = link;
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -225,7 +301,7 @@ fn run_thread(
                 return;
             }
         };
-        session(established, commands, events).await;
+        session(established, commands, events, pending).await;
     });
 }
 
@@ -281,7 +357,11 @@ async fn establish(
         ServerMessage::Event { .. }
         | ServerMessage::StateBag { .. }
         | ServerMessage::StateBagRemoved { .. }
-        | ServerMessage::StateSnapshot { .. } => {
+        | ServerMessage::StateSnapshot { .. }
+        | ServerMessage::Resources { .. }
+        | ServerMessage::ResourceStarted { .. }
+        | ServerMessage::ResourceStopped { .. }
+        | ServerMessage::FileUnavailable { .. } => {
             return Err(NetError::Protocol(
                 "the server sent a message before the welcome".to_owned(),
             ));
@@ -298,11 +378,13 @@ async fn establish(
     ))
 }
 
-/// Forwards outgoing frames and incoming events until either side ends.
+/// Forwards outgoing frames and incoming events until either side ends. Files
+/// the server sends on unidirectional streams are received alongside.
 async fn session(
     established: Established,
     mut commands: mpsc::UnboundedReceiver<Arc<[u8]>>,
     events: Sender<ClientEvent>,
+    pending: Pending,
 ) {
     let Established {
         endpoint,
@@ -311,7 +393,13 @@ async fn session(
         recv,
         ..
     } = established;
-    let mut reader = tokio::spawn(pump_events(recv, connection.clone(), events));
+    let mut reader = tokio::spawn(pump_events(
+        recv,
+        connection.clone(),
+        events,
+        Arc::clone(&pending),
+    ));
+    let files = tokio::spawn(accept_files(connection.clone(), Arc::clone(&pending)));
     loop {
         tokio::select! {
             outgoing = commands.recv() => match outgoing {
@@ -326,12 +414,86 @@ async fn session(
         }
     }
     reader.abort();
+    files.abort();
+    // Waiters for files that will never arrive see the connection end.
+    lock(&pending).clear();
     close_connection(&connection, 0, "client disconnected");
     let _ = tokio::time::timeout(DISCONNECT_GRACE, endpoint.wait_idle()).await;
 }
 
+/// Accepts the unidirectional streams that carry requested files, one task each.
+async fn accept_files(connection: Connection, pending: Pending) {
+    while let Ok(recv) = connection.accept_uni().await {
+        tokio::spawn(receive_file(recv, Arc::clone(&pending)));
+    }
+}
+
+/// Reads one file stream and hands its bytes to the callers waiting for that
+/// hash. A stream nobody waits for is stopped. A stream that fails drops the
+/// waiters, so they see the connection end.
+async fn receive_file(mut recv: RecvStream, pending: Pending) {
+    let mut header = [0_u8; HEADER_LEN];
+    if recv.read_exact(&mut header).await.is_err() {
+        return;
+    }
+    let mut hash = [0_u8; 32];
+    hash.copy_from_slice(&header[..32]);
+    let mut size_bytes = [0_u8; 8];
+    size_bytes.copy_from_slice(&header[32..]);
+    let size = u64::from_le_bytes(size_bytes);
+
+    let waiters = lock(&pending).remove(&hash);
+    let Some(waiters) = waiters else {
+        let _ = recv.stop(VarInt::from_u32(0));
+        return;
+    };
+    let Ok(len) = usize::try_from(size) else {
+        return;
+    };
+    if size > MAX_FILE_SIZE {
+        return;
+    }
+    let mut body = vec![0_u8; len];
+    if recv.read_exact(&mut body).await.is_err() {
+        return;
+    }
+    let bytes = Arc::new(body);
+    for waiter in waiters {
+        let _ = waiter.send(Some(Arc::clone(&bytes)));
+    }
+}
+
+/// Checks downloaded bytes against the size and hash the server advertised.
+fn verify(bytes: &[u8], hash: &FileHash, expected_size: u64) -> Result<(), NetError> {
+    let actual_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if actual_size != expected_size {
+        return Err(NetError::Integrity {
+            hash: hash_hex(hash),
+            reason: format!("expected {expected_size} bytes, got {actual_size}"),
+        });
+    }
+    if digest::digest(&SHA256, bytes).as_ref() != hash {
+        return Err(NetError::Integrity {
+            hash: hash_hex(hash),
+            reason: "SHA-256 does not match".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Locks the waiters. A poisoned lock still holds consistent data, since every
+/// update is a single map operation, so the guard is used anyway.
+fn lock(pending: &Pending) -> MutexGuard<'_, Waiters> {
+    pending.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Reads server messages and reports them until the connection ends.
-async fn pump_events(mut recv: RecvStream, connection: Connection, events: Sender<ClientEvent>) {
+async fn pump_events(
+    mut recv: RecvStream,
+    connection: Connection,
+    events: Sender<ClientEvent>,
+    pending: Pending,
+) {
     loop {
         let event = match read_frame(&mut recv, MAX_FRAME).await {
             Ok(Some(payload)) => match decode_server_message(&payload) {
@@ -344,6 +506,20 @@ async fn pump_events(mut recv: RecvStream, connection: Connection, events: Sende
                     value: value.0,
                 },
                 Ok(ServerMessage::StateBagRemoved { bag }) => ClientEvent::StateBagRemoved { bag },
+                Ok(ServerMessage::Resources { entries }) => ClientEvent::Resources { entries },
+                Ok(ServerMessage::ResourceStarted { entry }) => {
+                    ClientEvent::ResourceStarted { entry }
+                }
+                Ok(ServerMessage::ResourceStopped { name }) => {
+                    ClientEvent::ResourceStopped { name }
+                }
+                Ok(ServerMessage::FileUnavailable { hash }) => {
+                    let waiters = lock(&pending).remove(&hash).unwrap_or_default();
+                    for waiter in waiters {
+                        let _ = waiter.send(None);
+                    }
+                    continue;
+                }
                 Ok(ServerMessage::StateSnapshot { entries }) => {
                     for (bag, key, value) in entries {
                         let event = ClientEvent::StateBag {
