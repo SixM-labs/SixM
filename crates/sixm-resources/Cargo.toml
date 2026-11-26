@@ -1,0 +1,22 @@
+[package]
+name = "sixm-resources"
+description = "Resource discovery, fxmanifest.lua parsing and dependency ordering for SixM."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[dependencies]
+sixm-core.workspace = true
+mlua.workspace = true
+globset.workspace = true
+walkdir.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

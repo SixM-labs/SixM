@@ -1,0 +1,20 @@
+[package]
+name = "sixm-lua"
+description = "Lua 5.4 script runtime for SixM with a FiveM-compatible API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+sixm-core.workspace = true
+mlua.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
