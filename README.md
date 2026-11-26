@@ -124,6 +124,9 @@ Differences from FiveM:
 - `io` is not available. Use `LoadResourceFile` and `SaveResourceFile`
   instead.
 - `load` only accepts source text, not precompiled bytecode.
+- On the client, `LoadResourceFile` reads the files a running resource declares
+  (`files`, `client_scripts` and `shared_scripts`). `SaveResourceFile` writes to
+  that resource's local data folder, but never over a declared file.
 
 ## Players and network
 

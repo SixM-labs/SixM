@@ -163,6 +163,24 @@ impl Host for TestHost {
         self.roots.borrow().get(resource).cloned()
     }
 
+    fn load_resource_file(&self, resource: &str, path: &str) -> Option<Vec<u8>> {
+        let root = self.resource_path(resource)?;
+        fs::read(root.join(path)).ok()
+    }
+
+    fn save_resource_file(&self, resource: &str, path: &str, data: &[u8]) -> bool {
+        let Some(root) = self.resource_path(resource) else {
+            return false;
+        };
+        let full = root.join(path);
+        if let Some(parent) = full.parent() {
+            if fs::create_dir_all(parent).is_err() {
+                return false;
+            }
+        }
+        fs::write(full, data).is_ok()
+    }
+
     fn state_get(&self, bag: &str, key: &str) -> Option<Value> {
         self.state
             .borrow()

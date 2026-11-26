@@ -128,6 +128,26 @@ fn resource_files_stay_inside_the_resource() {
 }
 
 #[test]
+fn resource_files_accept_backslashes_and_refuse_other_resources() {
+    let host = new_host();
+    let rt = start(
+        &host,
+        "backslash",
+        &["roundtrip", "foreign"],
+        &[(
+            "main.lua",
+            "exports('roundtrip', function()\n\
+               SaveResourceFile(GetCurrentResourceName(), 'data/out.txt', 'saved')\n\
+               return LoadResourceFile(GetCurrentResourceName(), 'data\\\\out.txt')\n\
+             end)\n\
+             exports('foreign', function() return SaveResourceFile('other', 'x.txt', 'y') end)\n",
+        )],
+    );
+    assert_eq!(first(&rt, "roundtrip"), Value::from("saved"));
+    assert_eq!(first(&rt, "foreign"), Value::Bool(false));
+}
+
+#[test]
 fn convars_commands_and_names_reach_the_host() {
     let host = new_host();
     let rt = start(

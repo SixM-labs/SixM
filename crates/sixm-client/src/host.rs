@@ -1,6 +1,7 @@
 //! The [`Host`] and [`ClientHost`] services of [`ClientRuntime`], which the
 //! script runtimes call back into.
 
+use std::fs;
 use std::path::PathBuf;
 
 use sixm_core::{
@@ -91,11 +92,55 @@ impl Host for ClientRuntime {
         self.convars.borrow().get(name).map(str::to_owned)
     }
 
-    /// The synced files live in the content cache under their hashes, so the
-    /// client has no folder to report for any resource. A script reads its own
-    /// data folder through `LuaRuntime`, which resolves it without this call.
+    /// The synced files live in the content cache under their hashes, so there
+    /// is no folder to report for a resource. `LoadResourceFile` goes through
+    /// [`load_resource_file`](Host::load_resource_file) instead.
     fn resource_path(&self, _resource: &str) -> Option<PathBuf> {
         None
+    }
+
+    /// Reads a synced file from the cache, or any other file from the
+    /// resource's data folder. Only a running resource has files.
+    fn load_resource_file(&self, resource: &str, path: &str) -> Option<Vec<u8>> {
+        if !self.is_running(resource) {
+            return None;
+        }
+        let cached = self
+            .files
+            .borrow()
+            .get(resource)
+            .and_then(|files| files.get(path).cloned());
+        let file = match cached {
+            Some(cache_path) => cache_path,
+            None => self.data_path(resource)?.join(path),
+        };
+        fs::read(file).ok()
+    }
+
+    /// Writes into the resource's data folder. A declared file cannot be
+    /// overwritten, so a saved file never shadows one the server sent.
+    fn save_resource_file(&self, resource: &str, path: &str, data: &[u8]) -> bool {
+        if !self.is_running(resource) {
+            return false;
+        }
+        let declared = self
+            .files
+            .borrow()
+            .get(resource)
+            .is_some_and(|files| files.contains_key(path));
+        if declared {
+            return false;
+        }
+        let Some(dir) = self.data_path(resource) else {
+            return false;
+        };
+        let full = dir.join(path);
+        if let Some(parent) = full.parent() {
+            if fs::create_dir_all(parent).is_err() {
+                return false;
+            }
+        }
+        fs::write(full, data).is_ok()
     }
 
     fn state_get(&self, bag: &str, key: &str) -> Option<Value> {

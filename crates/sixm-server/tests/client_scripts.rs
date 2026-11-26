@@ -102,16 +102,42 @@ end)
 TriggerServerEvent('hello:ping', 'from the client')
 ";
 
+/// Client side of the file test: reads and writes through `LoadResourceFile`
+/// and `SaveResourceFile`, and reports each result.
+const FILES_CLIENT_SCRIPT: &str = r"
+local name = GetCurrentResourceName()
+
+TriggerServerEvent('hello:report', 'config ' .. tostring(LoadResourceFile(name, 'data/config.json')))
+TriggerServerEvent('hello:report', 'save declared ' .. tostring(SaveResourceFile(name, 'data/config.json', 'x')))
+TriggerServerEvent('hello:report', 'save own ' .. tostring(SaveResourceFile(name, 'notes.txt', 'mine')))
+TriggerServerEvent('hello:report', 'load own ' .. tostring(LoadResourceFile(name, 'notes.txt')))
+TriggerServerEvent('hello:report', 'missing ' .. tostring(LoadResourceFile(name, 'nope.txt')))
+";
+
 /// A server listening on loopback, whose inputs are handled by the test thread.
 struct Harness {
     fx: Fixture,
     input: Receiver<Input>,
     addr: SocketAddr,
+    /// The resource whose reports `wait_for_report` reads.
+    resource: &'static str,
 }
 
 impl Harness {
     /// A server with the `hello` resource started and its network running.
     fn new() -> Self {
+        Self::serving(RESOURCE, CLIENT_SCRIPT, "", &[])
+    }
+
+    /// A server with `resource` started and its network running. The resource
+    /// has the server script, `client_script` as its client script, the extra
+    /// manifest lines and the extra files.
+    fn serving(
+        resource: &'static str,
+        client_script: &str,
+        extra_manifest: &str,
+        extra_files: &[(&str, &str)],
+    ) -> Self {
         let fx = Fixture::new();
         fx.server.execute("endpoint_add_udp 127.0.0.1:0");
         let (sender, input) = mpsc::channel();
@@ -120,14 +146,18 @@ impl Harness {
             .start_network(sender)
             .expect("the network starts on loopback");
         let text = manifest(&["server.lua"], &["report", "poke"], &[])
-            + "client_scripts { 'client.lua' }\n";
-        fx.add_resource(
-            RESOURCE,
-            &text,
-            &[("server.lua", SERVER_SCRIPT), ("client.lua", CLIENT_SCRIPT)],
-        );
-        fx.server.execute(&format!("start {RESOURCE}"));
-        Self { fx, input, addr }
+            + "client_scripts { 'client.lua' }\n"
+            + extra_manifest;
+        let mut files = vec![("server.lua", SERVER_SCRIPT), ("client.lua", client_script)];
+        files.extend_from_slice(extra_files);
+        fx.add_resource(resource, &text, &files);
+        fx.server.execute(&format!("start {resource}"));
+        Self {
+            fx,
+            input,
+            addr,
+            resource,
+        }
     }
 
     /// Handles every queued server input.
@@ -177,7 +207,7 @@ impl Harness {
             self.pump_server();
             runtime.pump(STEP);
             runtime.tick(Instant::now());
-            let log = self.fx.text(RESOURCE, "report");
+            let log = self.fx.text(self.resource, "report");
             if done(&log) {
                 return log;
             }
@@ -312,4 +342,23 @@ fn restart_on_the_server_stops_and_restarts_the_client_runtime() {
     s.h.wait_for_report(&s.runtime, "the stop and the second start", |log| {
         has_line(log, "1: stopped") && has_line(log, "1: started")
     });
+}
+
+#[test]
+fn client_reads_declared_files_and_writes_only_its_own_data_folder() {
+    let h = Harness::serving(
+        "files_demo",
+        FILES_CLIENT_SCRIPT,
+        "files { 'data/config.json' }\n",
+        &[("data/config.json", r#"{"answer":42}"#)],
+    );
+    let dir = tempfile::tempdir().expect("temp dir");
+    let runtime = h.connect(&dir.path().join("cache"), &dir.path().join("data"));
+    let log = h.wait_for_report(&runtime, "the file reports", |log| {
+        has_line(log, "1: missing nil")
+    });
+    assert!(has_line(&log, r#"1: config {"answer":42}"#), "{log}");
+    assert!(has_line(&log, "1: save declared false"), "{log}");
+    assert!(has_line(&log, "1: save own true"), "{log}");
+    assert!(has_line(&log, "1: load own mine"), "{log}");
 }
