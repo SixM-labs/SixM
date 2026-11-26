@@ -11,9 +11,8 @@ use mlua::{
     AnyUserData, Function, Lua, MetaMethod, MultiValue, Table, UserData, UserDataMethods,
     Value as LuaValue,
 };
-use sixm_core::{EventSource, GLOBAL_BAG, Value, player_bag, player_of_bag};
+use sixm_core::{EventSource, GLOBAL_BAG, Value, player_of_bag};
 
-use crate::players::{invalid_player, player_id};
 use crate::runtime::{LuaRuntime, bind_fn, lua_err};
 
 /// The `reserved` argument of a change handler. FiveM passes it for
@@ -128,25 +127,20 @@ fn write(
 }
 
 /// A handle to `bag` for `runtime`.
-fn state_bag(runtime: &LuaRuntime, bag: &str) -> mlua::Result<AnyUserData> {
+pub(crate) fn state_bag(runtime: &LuaRuntime, bag: &str) -> mlua::Result<AnyUserData> {
     runtime.lua.create_userdata(StateBag {
         bag: bag.to_owned(),
         runtime: runtime.me.clone(),
     })
 }
 
-/// Installs `GlobalState`, `Player`, `AddStateBagChangeHandler`,
-/// `RemoveStateBagChangeHandler` and `GetPlayerFromStateBagName`.
+/// Installs `GlobalState`, `AddStateBagChangeHandler`,
+/// `RemoveStateBagChangeHandler` and `GetPlayerFromStateBagName`. These exist on
+/// both sides. `Player(id)` is server-only and lives in `players`.
 pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::Result<()> {
     let global = lua.create_userdata(StateBag {
         bag: GLOBAL_BAG.to_owned(),
         runtime: weak.clone(),
-    })?;
-    let player = bind_fn(lua, weak, |rt, (id,): (LuaValue,)| {
-        let id = player_id(&id).ok_or_else(|| invalid_player("Player"))?;
-        let object = rt.lua.create_table()?;
-        object.raw_set("state", state_bag(rt, &player_bag(id))?)?;
-        Ok(object)
     })?;
     let add_change_handler = bind_fn(
         lua,
@@ -165,7 +159,6 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
     })?;
 
     globals.raw_set("GlobalState", global)?;
-    globals.raw_set("Player", player)?;
     globals.raw_set("AddStateBagChangeHandler", add_change_handler)?;
     globals.raw_set("RemoveStateBagChangeHandler", remove_change_handler)?;
     globals.raw_set("GetPlayerFromStateBagName", player_from_bag)?;

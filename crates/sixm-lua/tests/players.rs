@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use common::{TestHost, call, first, new_host, start};
 use sixm_core::{
-    ClientTarget, EventContext, EventSource, FuncRef, Host, PlayerInfo, ScriptError, ScriptRuntime,
-    Value,
+    ClientTarget, EventContext, EventSource, FuncRef, PlayerInfo, ScriptError, ScriptRuntime,
+    ServerHost, Value,
 };
 
 /// Replaces the host's player list with `(id, name)` pairs, each on its own address.
@@ -113,11 +113,11 @@ fn invalid_targets_and_function_arguments_raise_catchable_errors() {
 
     let func = call(&rt, "func", &[]);
     assert_eq!(func[0], Value::Bool(false));
-    assert!(error_text(&func[1]).contains("functions cannot be sent to clients"));
+    assert!(error_text(&func[1]).contains("functions cannot be sent over the network"));
 
     let nested = call(&rt, "nested", &[]);
     assert_eq!(nested[0], Value::Bool(false));
-    assert!(error_text(&nested[1]).contains("functions cannot be sent to clients"));
+    assert!(error_text(&nested[1]).contains("functions cannot be sent over the network"));
 
     let bad = call(&rt, "badTarget", &[]);
     assert_eq!(bad[0], Value::Bool(false));

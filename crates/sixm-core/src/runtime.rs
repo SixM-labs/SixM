@@ -17,6 +17,10 @@ pub enum EventSource {
     /// `playerDropped`. `source` is the player's id, and the event reaches
     /// every handler, because the server itself is trusted.
     Player(u32),
+    /// Sent by the server to this client. Only handlers registered with
+    /// `RegisterNetEvent` receive it, the same rule as [`Net`](Self::Net), and
+    /// scripts see `source == 65535`, as they do in FiveM.
+    Server,
 }
 
 /// Receiver of a client event. Scripts pass `-1` for [`ClientTarget::All`].
@@ -71,10 +75,18 @@ pub enum ScriptError {
     Runtime(String),
 }
 
-/// Services the server provides to script runtimes.
+/// Services a host provides to script runtimes, on every side.
 ///
+/// A host is either a server or a client, and [`server`](Self::server) and
+/// [`client`](Self::client) say which: exactly one of them returns `Some`.
 /// Runtimes hold this as a `Weak<dyn Host>`; the host owns the runtimes.
 pub trait Host {
+    /// Server-only services, when this host is a server.
+    fn server(&self) -> Option<&dyn ServerHost>;
+
+    /// Client-only services, when this host is a client.
+    fn client(&self) -> Option<&dyn ClientHost>;
+
     /// Dispatches a local event to every running resource that handles it,
     /// in resource start order. Returns whether a handler canceled it.
     fn trigger_event(
@@ -115,6 +127,26 @@ pub trait Host {
     /// Root folder of a known resource (running or not).
     fn resource_path(&self, resource: &str) -> Option<PathBuf>;
 
+    /// Value stored under `key` in state bag `bag`, or `None` when the bag or
+    /// the key is not set.
+    fn state_get(&self, bag: &str, key: &str) -> Option<Value>;
+
+    /// Stores `value` under `key` in state bag `bag`, or deletes the key when
+    /// `value` is nil. Every write runs the change handlers. A replicated write
+    /// is also sent to every client. Fails for an unknown bag, a key that is
+    /// empty or too long, or a value that holds a function reference.
+    fn state_set(
+        &self,
+        bag: &str,
+        key: &str,
+        value: Value,
+        replicated: bool,
+    ) -> Result<(), ScriptError>;
+}
+
+/// Services only a server provides: the connected players and the messages
+/// that reach them.
+pub trait ServerHost {
     /// Sends an event to one connected player or to all of them. Fails when a
     /// value cannot cross the network (function references).
     fn trigger_client_event(
@@ -133,22 +165,15 @@ pub trait Host {
     /// Disconnects a player with a reason shown to them. Takes effect after
     /// the current script call returns.
     fn drop_player(&self, player: u32, reason: &str);
+}
 
-    /// Value stored under `key` in state bag `bag`, or `None` when the bag or
-    /// the key is not set.
-    fn state_get(&self, bag: &str, key: &str) -> Option<Value>;
+/// Services only a client provides: the connection to the server.
+pub trait ClientHost {
+    /// Sends an event to the server. Fails for function references.
+    fn trigger_server_event(&self, event: &str, args: &[Value]) -> Result<(), ScriptError>;
 
-    /// Stores `value` under `key` in state bag `bag`, or deletes the key when
-    /// `value` is nil. Every write runs the change handlers. A replicated write
-    /// is also sent to every client. Fails for an unknown bag, a key that is
-    /// empty or too long, or a value that holds a function reference.
-    fn state_set(
-        &self,
-        bag: &str,
-        key: &str,
-        value: Value,
-        replicated: bool,
-    ) -> Result<(), ScriptError>;
+    /// This client's server id.
+    fn local_player(&self) -> u32;
 }
 
 /// One running resource inside one scripting language.
@@ -179,7 +204,8 @@ pub trait ScriptRuntime {
 
     /// Runs this runtime's handlers for `event`. Each handler runs as its own
     /// task: it executes until it finishes or first yields (`Wait`), and is
-    /// resumed by later [`tick`](Self::tick) calls.
+    /// resumed by later [`tick`](Self::tick) calls. Network sources (`Net` and
+    /// `Server`) reach only handlers registered with `RegisterNetEvent`.
     fn deliver_event(
         &self,
         event: &str,

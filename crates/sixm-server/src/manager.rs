@@ -8,8 +8,8 @@ use std::rc::{Rc, Weak};
 use std::time::Instant;
 
 use sixm_core::{
-    ClientTarget, EventContext, EventSource, FuncRef, Host, PlayerInfo, ResourceName, ScriptError,
-    ScriptRuntime, Value,
+    ClientHost, ClientTarget, EventContext, EventSource, FuncRef, Host, PlayerInfo, ResourceName,
+    ScriptError, ScriptRuntime, ServerHost, Value,
 };
 use sixm_lua::LuaRuntime;
 use sixm_resources::{Catalog, DependencyError, ResourceError, ScanIssue};
@@ -449,6 +449,14 @@ impl ResourceManager {
 }
 
 impl Host for ResourceManager {
+    fn server(&self) -> Option<&dyn ServerHost> {
+        Some(self)
+    }
+
+    fn client(&self) -> Option<&dyn ClientHost> {
+        None
+    }
+
     fn trigger_event(
         &self,
         event: &str,
@@ -542,6 +550,22 @@ impl Host for ResourceManager {
             .map(|info| info.root.clone())
     }
 
+    fn state_get(&self, bag: &str, key: &str) -> Option<Value> {
+        self.state.borrow().get(bag, key).cloned()
+    }
+
+    fn state_set(
+        &self,
+        bag: &str,
+        key: &str,
+        value: Value,
+        replicated: bool,
+    ) -> Result<(), ScriptError> {
+        self.write_state(bag, key, &value, replicated)
+    }
+}
+
+impl ServerHost for ResourceManager {
     fn trigger_client_event(
         &self,
         event: &str,
@@ -561,19 +585,5 @@ impl Host for ResourceManager {
 
     fn drop_player(&self, player: u32, reason: &str) {
         self.queue_drop(player, reason);
-    }
-
-    fn state_get(&self, bag: &str, key: &str) -> Option<Value> {
-        self.state.borrow().get(bag, key).cloned()
-    }
-
-    fn state_set(
-        &self,
-        bag: &str,
-        key: &str,
-        value: Value,
-        replicated: bool,
-    ) -> Result<(), ScriptError> {
-        self.write_state(bag, key, &value, replicated)
     }
 }

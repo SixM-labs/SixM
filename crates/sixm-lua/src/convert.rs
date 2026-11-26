@@ -95,7 +95,7 @@ impl LuaRuntime {
             LuaValue::Table(table) => self.table_value(table, depth, functions)?,
             LuaValue::Function(_) | LuaValue::UserData(_) if functions == Functions::Refuse => {
                 return Err(ScriptError::Runtime(
-                    "functions cannot be sent to clients".to_owned(),
+                    "functions cannot be sent over the network".to_owned(),
                 ));
             }
             LuaValue::Function(function) => Value::FuncRef(self.ref_function(function.clone())?),
