@@ -17,6 +17,7 @@ pub struct Fixture {
 
 impl Fixture {
     /// A server with `sixm_resourcesPath` pointing at an empty `resources` folder.
+    /// Its network uses an ephemeral certificate, so no identity file is written.
     pub fn new() -> Self {
         let fixture = Self {
             dir: tempfile::tempdir().expect("temp dir"),
@@ -27,6 +28,7 @@ impl Fixture {
             fixture.resources().display()
         );
         fixture.server.execute(&line);
+        fixture.server.execute("set sixm_identityFile \"\"");
         fixture
     }
 

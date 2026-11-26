@@ -11,6 +11,7 @@ use sixm_core::EventSource;
 use crate::events::handle_table;
 use crate::exports;
 use crate::json;
+use crate::players;
 use crate::runtime::{LuaRuntime, bind_fn, lua_err};
 use crate::sandbox::Helpers;
 use crate::scheduler::delay_from_value;
@@ -32,6 +33,7 @@ pub(crate) fn install(runtime: &Rc<LuaRuntime>, helpers: &Helpers) -> mlua::Resu
     install_scheduling(lua, weak, &globals, helpers)?;
     install_events(lua, weak, &globals)?;
     install_host(lua, weak, &globals)?;
+    players::install(lua, weak, &globals)?;
     globals.raw_set("exports", exports::table(runtime)?)?;
     Ok(())
 }

@@ -6,6 +6,15 @@ use sixm_core::{FuncRef, ScriptError, Value};
 use crate::refs::FuncHandle;
 use crate::runtime::{IntoScriptResult, LuaRuntime, lua_err};
 
+/// Whether functions may be converted into references.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Functions {
+    /// Register them, for calls between resources.
+    Share,
+    /// Fail, for values sent over the network.
+    Refuse,
+}
+
 /// Deepest table nesting allowed to cross a resource boundary.
 pub(crate) const MAX_DEPTH: usize = 64;
 
@@ -40,7 +49,19 @@ pub(crate) fn nested(depth: usize) -> Result<usize, ScriptError> {
 impl LuaRuntime {
     /// Converts Lua arguments or results into script values.
     pub(crate) fn to_values(&self, values: &[LuaValue]) -> Result<Vec<Value>, ScriptError> {
-        values.iter().map(|value| self.value_at(value, 0)).collect()
+        values
+            .iter()
+            .map(|value| self.value_at(value, 0, Functions::Share))
+            .collect()
+    }
+
+    /// Converts values bound for the network, where functions cannot go. A
+    /// function is refused before any reference is registered for it.
+    pub(crate) fn to_network_values(&self, values: &[LuaValue]) -> Result<Vec<Value>, ScriptError> {
+        values
+            .iter()
+            .map(|value| self.value_at(value, 0, Functions::Refuse))
+            .collect()
     }
 
     /// Converts a list of script values into a Lua multi-value.
@@ -54,14 +75,24 @@ impl LuaRuntime {
 
     /// Converts a Lua value into a script value. Functions are registered and
     /// returned as references.
-    fn value_at(&self, value: &LuaValue, depth: usize) -> Result<Value, ScriptError> {
+    fn value_at(
+        &self,
+        value: &LuaValue,
+        depth: usize,
+        functions: Functions,
+    ) -> Result<Value, ScriptError> {
         Ok(match value {
             LuaValue::Nil => Value::Nil,
             LuaValue::Boolean(flag) => Value::Bool(*flag),
             LuaValue::Integer(int) => Value::Int(*int),
             LuaValue::Number(float) => Value::Float(*float),
             LuaValue::String(text) => Value::String(Box::from(&*text.as_bytes())),
-            LuaValue::Table(table) => self.table_value(table, depth)?,
+            LuaValue::Table(table) => self.table_value(table, depth, functions)?,
+            LuaValue::Function(_) | LuaValue::UserData(_) if functions == Functions::Refuse => {
+                return Err(ScriptError::Runtime(
+                    "functions cannot be sent to clients".to_owned(),
+                ));
+            }
             LuaValue::Function(function) => Value::FuncRef(self.ref_function(function.clone())?),
             LuaValue::UserData(data) => match data.borrow::<FuncHandle>() {
                 Ok(handle) => Value::FuncRef(handle.func.clone()),
@@ -74,7 +105,12 @@ impl LuaRuntime {
         })
     }
 
-    fn table_value(&self, table: &Table, depth: usize) -> Result<Value, ScriptError> {
+    fn table_value(
+        &self,
+        table: &Table,
+        depth: usize,
+        functions: Functions,
+    ) -> Result<Value, ScriptError> {
         let depth = nested(depth)?;
         let entries = table
             .pairs::<LuaValue, LuaValue>()
@@ -84,7 +120,7 @@ impl LuaRuntime {
             let mut items = vec![Value::Nil; len];
             for (key, item) in &entries {
                 if let LuaValue::Integer(index) = key {
-                    let converted = self.value_at(item, depth)?;
+                    let converted = self.value_at(item, depth, functions)?;
                     if let Some(slot) = usize::try_from(*index - 1)
                         .ok()
                         .and_then(|index| items.get_mut(index))
@@ -97,7 +133,12 @@ impl LuaRuntime {
         }
         let pairs = entries
             .iter()
-            .map(|(key, item)| Ok((self.value_at(key, depth)?, self.value_at(item, depth)?)))
+            .map(|(key, item)| {
+                Ok((
+                    self.value_at(key, depth, functions)?,
+                    self.value_at(item, depth, functions)?,
+                ))
+            })
             .collect::<Result<Vec<(Value, Value)>, ScriptError>>()?;
         Ok(Value::Map(pairs))
     }

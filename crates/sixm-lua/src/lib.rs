@@ -10,6 +10,7 @@ mod events;
 mod exports;
 mod json;
 mod natives;
+mod players;
 mod refs;
 mod runtime;
 mod sandbox;

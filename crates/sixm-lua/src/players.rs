@@ -1,0 +1,112 @@
+//! Player functions: client events, the connected-player list, names and drops.
+
+use std::rc::Weak;
+
+use mlua::{Lua, MultiValue, Table, Value as LuaValue};
+use sixm_core::{ClientTarget, PlayerInfo};
+
+use crate::runtime::{LuaRuntime, bind_fn, lua_err};
+
+/// Reason given to connected players when a script drops them without one.
+const DEFAULT_DROP_REASON: &str = "Dropped by server";
+
+/// Largest magnitude below which every whole `f64` is exact, so casting it to `i64` loses nothing.
+const EXACT_FLOAT_LIMIT: f64 = 9_007_199_254_740_992.0;
+
+/// Installs `TriggerClientEvent`, `GetPlayers`, `GetNumPlayerIndices`,
+/// `GetPlayerName`, `GetPlayerEndpoint` and `DropPlayer`.
+pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::Result<()> {
+    let trigger_client_event = bind_fn(
+        lua,
+        weak,
+        |rt, (name, target, args): (String, LuaValue, MultiValue)| {
+            let target = client_target(&target)?;
+            let values = rt.to_network_values(&args.into_vec()).map_err(lua_err)?;
+            rt.host()?
+                .trigger_client_event(&name, target, &values)
+                .map_err(lua_err)
+        },
+    )?;
+    let get_players = bind_fn(lua, weak, |rt, (): ()| {
+        let ids = rt.host()?.players();
+        rt.lua.create_sequence_from(ids.iter().map(u32::to_string))
+    })?;
+    let get_num_player_indices = bind_fn(lua, weak, |rt, (): ()| {
+        i64::try_from(rt.host()?.players().len()).map_err(mlua::Error::runtime)
+    })?;
+    let get_player_name = bind_fn(lua, weak, |rt, (player,): (LuaValue,)| {
+        Ok(player_info(rt, &player)?.map(|info| info.name))
+    })?;
+    let get_player_endpoint = bind_fn(lua, weak, |rt, (player,): (LuaValue,)| {
+        Ok(player_info(rt, &player)?.map(|info| info.endpoint))
+    })?;
+    let drop_player = bind_fn(
+        lua,
+        weak,
+        |rt, (player, reason): (LuaValue, Option<String>)| {
+            let id = player_id(&player).ok_or_else(|| invalid_player("DropPlayer"))?;
+            let reason = reason.as_deref().unwrap_or(DEFAULT_DROP_REASON);
+            rt.host()?.drop_player(id, reason);
+            Ok(())
+        },
+    )?;
+
+    let functions = [
+        ("TriggerClientEvent", trigger_client_event),
+        ("GetPlayers", get_players),
+        ("GetNumPlayerIndices", get_num_player_indices),
+        ("GetPlayerName", get_player_name),
+        ("GetPlayerEndpoint", get_player_endpoint),
+        ("DropPlayer", drop_player),
+    ];
+    for (name, function) in functions {
+        globals.raw_set(name, function)?;
+    }
+    Ok(())
+}
+
+/// The player `player` names, or `None` when it names no connected player.
+fn player_info(rt: &LuaRuntime, player: &LuaValue) -> mlua::Result<Option<PlayerInfo>> {
+    let Some(id) = player_id(player) else {
+        return Ok(None);
+    };
+    Ok(rt.host()?.player_info(id))
+}
+
+/// Target of `TriggerClientEvent`: `-1` addresses every player.
+fn client_target(value: &LuaValue) -> mlua::Result<ClientTarget> {
+    match whole_number(value) {
+        Some(-1) => Ok(ClientTarget::All),
+        number => number
+            .and_then(|number| u32::try_from(number).ok())
+            .map(ClientTarget::Player)
+            .ok_or_else(|| invalid_player("TriggerClientEvent")),
+    }
+}
+
+/// A server id for a player argument, or `None` when it is not one.
+fn player_id(value: &LuaValue) -> Option<u32> {
+    whole_number(value).and_then(|number| u32::try_from(number).ok())
+}
+
+/// Reads an integer, a float with no fraction, or a decimal string as an integer.
+fn whole_number(value: &LuaValue) -> Option<i64> {
+    match value {
+        LuaValue::Integer(int) => Some(*int),
+        LuaValue::Number(float) => whole_float(*float),
+        LuaValue::String(text) => text.to_str().ok()?.parse().ok(),
+        _ => None,
+    }
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the value is checked to be a whole number within the exact range first"
+)]
+fn whole_float(float: f64) -> Option<i64> {
+    (float.fract() == 0.0 && float.abs() <= EXACT_FLOAT_LIMIT).then_some(float as i64)
+}
+
+fn invalid_player(function: &str) -> mlua::Error {
+    mlua::Error::runtime(format!("{function}: expected a player id"))
+}

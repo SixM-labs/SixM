@@ -155,7 +155,7 @@ impl LuaRuntime {
     pub(crate) fn set_source(&self, source: EventSource) -> mlua::Result<()> {
         let value = match source {
             EventSource::Local => LuaValue::String(self.empty_string.clone()),
-            EventSource::Net(id) => LuaValue::Integer(i64::from(id)),
+            EventSource::Net(id) | EventSource::Player(id) => LuaValue::Integer(i64::from(id)),
         };
         self.lua.globals().raw_set("source", value)
     }

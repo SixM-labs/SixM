@@ -52,7 +52,7 @@ fn main() -> ExitCode {
     if let Err(err) = spawn_stdin_reader(sender.clone()) {
         error!("cannot read the console: {err}");
     }
-    let interrupt = sender;
+    let interrupt = sender.clone();
     if let Err(err) = ctrlc::set_handler(move || {
         let _ = interrupt.send(Input::Quit("interrupted".to_owned()));
     }) {
@@ -64,7 +64,7 @@ fn main() -> ExitCode {
     for command in &commands {
         server.execute_words(command);
     }
-    server.run(&input);
+    server.run(&sender, &input);
     ExitCode::SUCCESS
 }
 
