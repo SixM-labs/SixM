@@ -91,7 +91,8 @@ impl LuaRuntime {
         args: &[Value],
         ctx: &EventContext,
     ) -> Result<(), ScriptError> {
-        if matches!(source, EventSource::Net(_)) && !self.events.borrow().net_safe.contains(event) {
+        let network = matches!(source, EventSource::Net(_) | EventSource::Server);
+        if network && !self.events.borrow().net_safe.contains(event) {
             tracing::warn!(
                 target: "sixm::script",
                 "[{}] dropped network event `{event}`: it was not registered with RegisterNetEvent",

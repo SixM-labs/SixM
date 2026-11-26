@@ -18,6 +18,17 @@ use crate::sandbox;
 use crate::scheduler::Sched;
 use crate::state::ChangeHandlers;
 
+/// The side of the connection a runtime runs on, read from its host once when
+/// the runtime is created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Side {
+    Server,
+    /// `local_player` is the client's server id, fixed for the whole session.
+    Client {
+        local_player: u32,
+    },
+}
+
 /// A sandboxed Lua 5.4 state running one resource instance.
 ///
 /// Create it with [`LuaRuntime::new`], run the manifest's scripts with
@@ -28,6 +39,8 @@ pub struct LuaRuntime {
     pub(crate) root: PathBuf,
     pub(crate) declared_exports: HashSet<String>,
     pub(crate) host: Weak<dyn Host>,
+    /// Which globals this runtime installs, and which side it is.
+    pub(crate) side: Side,
     /// Weak handle to this runtime, captured by Lua closures and function handles.
     pub(crate) me: Weak<Self>,
     pub(crate) lua: Lua,
@@ -58,6 +71,7 @@ impl LuaRuntime {
         declared_exports: Vec<String>,
         host: Weak<dyn Host>,
     ) -> Result<Rc<Self>, ScriptError> {
+        let side = side_of(&host)?;
         let lua = sandbox::new_state().into_script()?;
         let helpers = sandbox::prepare(&lua).into_script()?;
         let empty_string = lua.create_string("").into_script()?;
@@ -67,6 +81,7 @@ impl LuaRuntime {
             root,
             declared_exports: declared_exports.into_iter().collect(),
             host,
+            side,
             me: me.clone(),
             lua,
             task_wrapper: helpers.task_wrapper.clone(),
@@ -246,6 +261,24 @@ impl ScriptRuntime for LuaRuntime {
         if !self.shut.replace(true) {
             self.clear_state();
         }
+    }
+}
+
+/// Asks the host which side it is. A host that is both is treated as a server.
+fn side_of(host: &Weak<dyn Host>) -> Result<Side, ScriptError> {
+    let host = host
+        .upgrade()
+        .ok_or_else(|| ScriptError::Runtime("the server is no longer available".to_owned()))?;
+    if host.server().is_some() {
+        return Ok(Side::Server);
+    }
+    match host.client() {
+        Some(client) => Ok(Side::Client {
+            local_player: client.local_player(),
+        }),
+        None => Err(ScriptError::Runtime(
+            "the host is neither a server nor a client".to_owned(),
+        )),
     }
 }
 

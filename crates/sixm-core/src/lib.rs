@@ -1,7 +1,7 @@
 //! Shared types for SixM.
 //!
-//! This crate is the contract between the server (which owns resources and
-//! routes events) and script runtimes (Lua today, others later). It has no
+//! This crate is the contract between the host (the server, or a client that
+//! joins one) and script runtimes (Lua today, others later). It has no
 //! knowledge of any particular game or scripting language.
 //!
 //! # Threading model
@@ -18,7 +18,8 @@ mod state;
 mod value;
 
 pub use runtime::{
-    ClientTarget, EventContext, EventSource, Host, PlayerInfo, ScriptError, ScriptRuntime,
+    ClientHost, ClientTarget, EventContext, EventSource, Host, PlayerInfo, ScriptError,
+    ScriptRuntime, ServerHost,
 };
 pub use state::{GLOBAL_BAG, MAX_STATE_NAME_LEN, player_bag, player_of_bag};
 pub use value::{FuncRef, ResourceName, Value};
