@@ -45,6 +45,10 @@ may change the protocol and the API.
 
 ### Changed
 
+- `baseevents` registers the FiveM channel names (`enteringVehicle`,
+  `enteringAborted`, `enteredVehicle`, `leftVehicle`, `onPlayerKilled`,
+  `onPlayerWasted`, `onPlayerDied`); `onPlayerEnteredVehicle` and
+  `onPlayerLeftVehicle` are gone.
 - `ServerHost::drop_player` takes the calling resource.
 - Marked `sv_playerEventRateLimit`, `sv_metricsEnabled`, `sv_adminUiEnabled`,
   `sv_masterUrl`, and `sv_heartbeatInterval` as console-only convars.

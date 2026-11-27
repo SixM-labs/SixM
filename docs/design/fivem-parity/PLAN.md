@@ -292,7 +292,7 @@ equivalent / no effect / absent".
 | A4 | done | Claude (Haiku impl, Sonnet review) | `git log --grep "^A4:"` |
 | A5 | done | Claude (Haiku impl, Sonnet review) | `git log --grep "^A5:"` |
 | A6 | done | Claude (Haiku impl), ChatGPT (Luna fixes, Terra review) | `git log --grep "^A6:"` |
-| A7 | todo | | |
+| A7 | done | ChatGPT (Luna impl, Terra review) | `git log --grep "^A7:"` |
 | A8 | todo | | |
 | B1 | todo | | |
 | B2 | todo | | |
@@ -350,3 +350,7 @@ what is next, anything surprising.
   sync. Fixed duplicate membership for repeated category names, documented
   explicit cross-resource client file references and expanded client sync
   coverage. Next: A7.
+- 2026-11-28, ChatGPT, `feat/fivem-parity-a`: `A7: register FiveM baseevents`
+  follows c707449. The example registers seven FiveM channels and the
+  loopback test verifies that the former vehicle channel names are no
+  longer registered. Next: A8 and the Phase A pull request.

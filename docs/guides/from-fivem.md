@@ -292,10 +292,11 @@ following FiveM areas are missing:
 - **Default resources:** The example server includes clean-room
   `[system]` resources `sessionmanager` (session ready handshake via
   `sixm_session:ready`, `Player(src).state.sessionActive`, `isPlayerActive`,
-  `getPlayerSession`, `isSessionReady`) and `baseevents` (registers
-  `baseevents:onPlayerEnteredVehicle`, `baseevents:onPlayerLeftVehicle`, and
-  `baseevents:onPlayerDied` channels for future GameAdapter integrations), plus
-  a console-only `chat` resource with a `say` command. `spawnmanager` and
+  `getPlayerSession`, `isSessionReady`) and `baseevents` (registers the FiveM
+  channels `baseevents:onPlayerDied`, `onPlayerKilled`, `onPlayerWasted`,
+  `enteringVehicle`, `enteringAborted`, `enteredVehicle` and `leftVehicle` for
+  scripts and a future GameAdapter; nothing emits them yet), plus a console-only
+  `chat` resource with a `say` command. `spawnmanager` and
   `mapmanager` are not bundled.
 - **No public server browser UI:** `sets` / `SetConvarServerInfo` marks convars
   as server info (exposed on `/info.json`), and `sv_masterUrl` /

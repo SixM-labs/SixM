@@ -4,8 +4,68 @@
 
 mod common;
 
+use common::net::{Loopback, Resource};
 use common::{Fixture, manifest};
 use sixm_core::{Host, Value};
+
+#[test]
+fn baseevents_registers_the_fivem_channels_and_not_the_old_ones() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/server-data/resources/[system]/baseevents/server.lua"
+    );
+    let mut source = std::fs::read_to_string(path).expect("read baseevents server.lua");
+    source.push_str(
+        "\nLOG = {}\n\
+         for _, n in ipairs(EVENT_CHANNELS) do\n\
+             AddEventHandler(n, function(a) LOG[#LOG + 1] = n .. '=' .. tostring(a) end)\n\
+         end\n\
+         AddEventHandler('baseevents:onPlayerEnteredVehicle', function(a)\n\
+             LOG[#LOG + 1] = 'baseevents:onPlayerEnteredVehicle=' .. tostring(a)\n\
+         end)\n\
+         AddEventHandler('baseevents:onPlayerLeftVehicle', function(a)\n\
+             LOG[#LOG + 1] = 'baseevents:onPlayerLeftVehicle=' .. tostring(a)\n\
+         end)\n\
+         exports('log', function() return table.concat(LOG, ' ') end)\n",
+    );
+    let h = Loopback::new(&[Resource {
+        name: "baseevents",
+        script: &source,
+        exports: &["log"],
+    }]);
+    let client = h.connect("Alice").expect("Alice is admitted");
+    let channels = [
+        "baseevents:onPlayerDied",
+        "baseevents:onPlayerKilled",
+        "baseevents:onPlayerWasted",
+        "baseevents:enteringVehicle",
+        "baseevents:enteringAborted",
+        "baseevents:enteredVehicle",
+        "baseevents:leftVehicle",
+    ];
+
+    for name in [
+        "baseevents:onPlayerEnteredVehicle",
+        "baseevents:onPlayerLeftVehicle",
+    ] {
+        client
+            .send_event(name, &[Value::from("x")])
+            .expect("old event is sent");
+    }
+    for name in channels {
+        client
+            .send_event(name, &[Value::from("x")])
+            .expect("FiveM event is sent");
+    }
+
+    h.wait_for_log("baseevents:leftVehicle=x");
+    let log = h.log();
+    for name in channels {
+        assert!(log.contains(&format!("{name}=x")), "missing {name}: {log}");
+    }
+    assert!(!log.contains("onPlayerEnteredVehicle"), "log: {log}");
+    assert!(!log.contains("onPlayerLeftVehicle"), "log: {log}");
+}
 
 /// `observer` keeps a log that other resources write to with `record`, read
 /// with `log()`, and asks for the state of any resource with `stateOf(name)`.
