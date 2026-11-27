@@ -30,8 +30,8 @@ use crate::files::{
     MAX_RESOURCE_NAME_LEN, ResourceEntry,
 };
 use crate::protocol::{
-    ClientMessage, MAX_COMMAND_LEN, MAX_DECODED_VALUES, MAX_DEFERRAL_MESSAGE_LEN,
-    MAX_EVENT_NAME_LEN, MAX_VALUE_DEPTH, ServerMessage,
+    ClientMessage, MAX_COMMAND_LEN, MAX_CONVAR_NAME_LEN, MAX_CONVAR_VALUE_LEN, MAX_DECODED_VALUES,
+    MAX_DEFERRAL_MESSAGE_LEN, MAX_EVENT_NAME_LEN, MAX_VALUE_DEPTH, ServerMessage,
 };
 
 const FRAME_HEADER_LEN: usize = 4;
@@ -67,6 +67,7 @@ const SERVER_VARIANTS: &[&str] = &[
     "EntityTransforms",
     "EntityDeleted",
     "EntitySnapshot",
+    "Convars",
     "Deferral",
 ];
 /// Most files one snapshot entry carries. Larger resources are split into
@@ -320,6 +321,35 @@ pub(crate) fn encode_entity_snapshot(
     max_frame: usize,
 ) -> Result<Vec<Arc<[u8]>>, NetError> {
     encode_items(ServerMessage::ENTITY_SNAPSHOT_TAG, entities, max_frame)
+}
+
+/// Encodes convars as the fewest frames that carry them in order. A `None`
+/// value removes the convar on the client. Names must be 1 to
+/// [`MAX_CONVAR_NAME_LEN`] bytes and values at most [`MAX_CONVAR_VALUE_LEN`],
+/// and an entry that breaks either fails the whole call. Each entry costs one
+/// unit of the decoding budget.
+pub(crate) fn encode_convars(
+    entries: &[(&str, Option<&str>)],
+    max_frame: usize,
+) -> Result<Vec<Arc<[u8]>>, NetError> {
+    for &(name, value) in entries {
+        validate_length("convar name", name, MAX_CONVAR_NAME_LEN)?;
+        if let Some(value) = value {
+            check_convar_value(value)?;
+        }
+    }
+    encode_items(ServerMessage::CONVARS_TAG, entries, max_frame)
+}
+
+/// Checks that a convar value fits [`MAX_CONVAR_VALUE_LEN`].
+fn check_convar_value(value: &str) -> Result<(), NetError> {
+    if value.len() > MAX_CONVAR_VALUE_LEN {
+        return Err(NetError::InvalidInput(format!(
+            "convar value must be at most {MAX_CONVAR_VALUE_LEN} bytes, got {}",
+            value.len()
+        )));
+    }
+    Ok(())
 }
 
 /// Encodes `items` as the frames of a sequence message whose variant index is
@@ -867,6 +897,11 @@ impl<'de> Visitor<'de> for ServerMessageVisitor<'_> {
                     budget: self.budget,
                 })
                 .map(|entities| ServerMessage::EntitySnapshot { entities }),
+            ServerMessage::CONVARS_TAG => variant
+                .newtype_variant_seed(ConvarsSeed {
+                    budget: self.budget,
+                })
+                .map(|entries| ServerMessage::Convars { entries }),
             ServerMessage::DEFERRAL_TAG => variant
                 .newtype_variant::<String>()
                 .and_then(checked_deferral::<A::Error>)
@@ -1031,6 +1066,58 @@ impl<'de> Visitor<'de> for TransformsVisitor<'_> {
             updates.push(update);
         }
         Ok(updates)
+    }
+}
+
+/// Decodes the entries of a `Convars` message. Each entry costs one unit of the
+/// budget, and its name and value must fit the convar limits.
+#[derive(Clone, Copy)]
+struct ConvarsSeed<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> DeserializeSeed<'de> for ConvarsSeed<'_> {
+    type Value = Vec<(String, Option<String>)>;
+
+    fn deserialize<D: Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Vec<(String, Option<String>)>, D::Error> {
+        deserializer.deserialize_seq(ConvarsVisitor {
+            budget: self.budget,
+        })
+    }
+}
+
+struct ConvarsVisitor<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> Visitor<'de> for ConvarsVisitor<'_> {
+    type Value = Vec<(String, Option<String>)>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a sequence of convars")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(
+        self,
+        mut seq: A,
+    ) -> Result<Vec<(String, Option<String>)>, A::Error> {
+        let mut entries = Vec::new();
+        while let Some((name, value)) = seq.next_element::<(String, Option<String>)>()? {
+            self.budget.spend::<A::Error>()?;
+            let name = checked_name::<A::Error>(name, MAX_CONVAR_NAME_LEN)?;
+            if let Some(value) = &value {
+                if value.len() > MAX_CONVAR_VALUE_LEN {
+                    return Err(de::Error::custom(format!(
+                        "convar value must be at most {MAX_CONVAR_VALUE_LEN} bytes"
+                    )));
+                }
+            }
+            entries.push((name, value));
+        }
+        Ok(entries)
     }
 }
 
@@ -2554,5 +2641,88 @@ mod tests {
             }
             other => panic!("expected a deferral, got {other:?}"),
         }
+    }
+
+    fn convars_of(message: ServerMessage) -> Option<Vec<(String, Option<String>)>> {
+        match message {
+            ServerMessage::Convars { entries } => Some(entries),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn convars_round_trip_including_a_removal() {
+        let entries = vec![
+            ("game_mode".to_owned(), Some("race".to_owned())),
+            ("old".to_owned(), None),
+            ("empty".to_owned(), Some(String::new())),
+        ];
+        let message = ServerMessage::Convars {
+            entries: entries.clone(),
+        };
+        match decode_server_message(&payload_of(&message)) {
+            Ok(ServerMessage::Convars { entries: got }) => assert_eq!(got, entries),
+            other => panic!("the convars message does not round trip: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn convar_limits_are_checked_on_encode_and_decode() {
+        let long_name = "n".repeat(MAX_CONVAR_NAME_LEN + 1);
+        let long_value = "v".repeat(MAX_CONVAR_VALUE_LEN + 1);
+        let exact_value = "v".repeat(MAX_CONVAR_VALUE_LEN);
+        assert!(encode_convars(&[("", None)], MAX_FRAME).is_err());
+        assert!(encode_convars(&[(long_name.as_str(), None)], MAX_FRAME).is_err());
+        assert!(encode_convars(&[("a", Some(long_value.as_str()))], MAX_FRAME).is_err());
+        assert!(encode_convars(&[("a", Some(exact_value.as_str()))], MAX_FRAME).is_ok());
+
+        // Decoding applies the same limits to messages that skip the encoder.
+        let too_long_name = ServerMessage::Convars {
+            entries: vec![(long_name.clone(), None)],
+        };
+        assert!(decode_server_message(&payload_of(&too_long_name)).is_err());
+        let empty_name = ServerMessage::Convars {
+            entries: vec![(String::new(), None)],
+        };
+        assert!(decode_server_message(&payload_of(&empty_name)).is_err());
+        let too_long_value = ServerMessage::Convars {
+            entries: vec![("a".to_owned(), Some(long_value))],
+        };
+        assert!(decode_server_message(&payload_of(&too_long_value)).is_err());
+    }
+
+    #[test]
+    fn convar_snapshot_splits_and_decodes_to_the_same_entries() {
+        const MAX: usize = 512;
+        let entries: Vec<(String, Option<String>)> = (0..300)
+            .map(|index| (format!("convar_{index}"), Some("x".repeat(20))))
+            .collect();
+        let borrowed: Vec<(&str, Option<&str>)> = entries
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_deref()))
+            .collect();
+        let frames = encode_convars(&borrowed, MAX).expect("convars encode");
+        assert!(
+            frames.len() > 1,
+            "300 convars cannot fit one 512-byte frame"
+        );
+        assert_eq!(decode_frames(&frames, MAX, convars_of), entries);
+    }
+
+    #[test]
+    fn convar_entries_count_against_the_decoding_budget() {
+        const LARGE: usize = 16 * 1024 * 1024;
+        let entries: Vec<(&str, Option<&str>)> = vec![("a", None); 70_000];
+        let frames = encode_convars(&entries, LARGE).expect("convars encode");
+        assert_eq!(frames.len(), 2);
+        assert_eq!(decode_frames(&frames, LARGE, convars_of).len(), 70_000);
+
+        let over = ServerMessage::Convars {
+            entries: vec![("a".to_owned(), None); MAX_DECODED_VALUES + 1],
+        };
+        assert!(matches!(
+            decode_server_message(&payload_of(&over)),
+            Err(NetError::Protocol(reason)) if reason.contains("values")
+        ));
     }
 }

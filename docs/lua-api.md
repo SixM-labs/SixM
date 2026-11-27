@@ -289,12 +289,22 @@ library can tell who called it. It is `nil` when no resource caused it.
 
 | Name | Side | Signature and result |
 |---|---|---|
-| `GetConvar` | both | `GetConvar(name, default)`. Returns the convar's text, or `default` when it is not set. |
+| `GetConvar` | both | `GetConvar(name, default)`. Returns the convar's text, or `default` when it is not set. On a client, a replicated value comes first. |
 | `GetConvarInt` | both | `GetConvarInt(name, default)`. Returns the convar parsed as an integer, or `default` when it is not set or does not parse. |
+| `GetConvarBool` | both | `GetConvarBool(name, default)`. Returns `true` for `true`, `1`, `yes` and `on`, and `false` for `false`, `0`, `no` and `off`, in any letter case and ignoring spaces at the ends. Any other text, and an unset convar, give `default`. |
+| `SetConvar` | server | `SetConvar(name, value)`. Stores a plain convar, which only the server keeps. |
+| `SetConvarReplicated` | server | `SetConvarReplicated(name, value)`. Stores a replicated convar. Every connected player gets it at once, and players who join later get it too. Fails, and changes nothing, when the name is longer than 256 bytes or the value longer than 4096 bytes. |
+| `SetConvarServerInfo` | server | `SetConvarServerInfo(name, value)`. Stores a convar marked as server information. Nothing sends it anywhere yet. |
 | `ExecuteCommand` | both | `ExecuteCommand(line)`. Queues a console line. It runs after the current script call returns. |
 | `RegisterCommand` | both | `RegisterCommand(name, fn [, restricted])`. Registers a console command. `fn` is called as `fn(source, args, raw)`, where `source` is the player's id or `0` (the console), `args` is an array of strings and `raw` is the line. |
 
 - Convar names are case-insensitive.
+- The setters take effect at once, not after the current call, and follow the
+  rules of the console commands `set`, `setr` and `sets`. The last store of a
+  convar decides whether it is replicated. See [server.md](server.md#convars).
+- A client cannot set a replicated convar. A local set of one is refused with a
+  warning, and the client's `GetConvar` keeps returning the server's value. See
+  [client.md](client.md#replicated-convars).
 - `restricted` is shown in `help` as "(restricted)". A player may run a
   restricted command only if allowed `command.<name>`. An unrestricted command
   runs for everyone. See [server.md](server.md#permissions).
@@ -372,6 +382,8 @@ Behaviour:
 - A change handler receives `(bagName, key, value, reserved, replicated)`.
   `reserved` is always `0`. Handlers run on the server for every write. On a
   client they run for replicated values it receives and for its own writes.
+  The state a client gets when it joins is already in place when its scripts
+  load, so it runs no handlers.
 - `set` is a method name, so a key called `set` can be written but reads back
   the method. Choose another key name.
 - On a client, a replicated write raises the error "clients cannot write

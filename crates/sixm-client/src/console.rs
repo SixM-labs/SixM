@@ -81,11 +81,21 @@ impl ClientRuntime {
             if args.is_empty() {
                 info!("{name} = \"{value}\"");
             } else {
-                self.convars.borrow_mut().set(name, &args.join(" "));
+                self.store_convar(name, &args.join(" "));
             }
             return;
         }
         self.send_to_server(name, raw);
+    }
+
+    /// Sets a local convar. A convar the server replicates is refused with a
+    /// warning, and keeps the value the server sent.
+    fn store_convar(&self, name: &str, value: &str) {
+        if self.convars.borrow().is_replicated(name) {
+            warn!("{name} is replicated by the server and cannot be set here");
+            return;
+        }
+        self.convars.borrow_mut().set(name, value);
     }
 
     /// Sends a line no client command or convar claims to the server, which
@@ -104,7 +114,7 @@ impl ClientRuntime {
             warn!("usage: set <name> <value>");
             return;
         };
-        self.convars.borrow_mut().set(name, &value.join(" "));
+        self.store_convar(name, &value.join(" "));
     }
 
     /// `help`: lists the built-in and script commands.

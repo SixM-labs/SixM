@@ -84,9 +84,9 @@ same name is never reached.
 | `players` | Lists connected players with their id, name, `license` identifier and endpoint. |
 | `entities` | Lists every entity with its id, kind, model hash, position and heading. |
 | `state [bag]` | Without a name, lists the state bags. With a name, prints the bag's keys and values. Replicated keys are marked. |
-| `set <name> <value>` | Stores a convar. The value is the rest of the line, joined with single spaces. |
-| `sets <name> <value>` | Same as `set`. |
-| `setr <name> <value>` | Same as `set`. |
+| `set <name> <value>` | Stores a plain convar. The value is the rest of the line, joined with single spaces. See [Convars](#convars). |
+| `sets <name> <value>` | Stores a convar marked as server information. The value is read the same way. Nothing sends it anywhere yet. |
+| `setr <name> <value>` | Stores a replicated convar. The value is read the same way. Every connected player gets it, and players who join later get it too. |
 | `exec <file>` | Runs each line of the file. See above. |
 | `help` | Lists the built-in commands and the script commands. Restricted commands are marked. |
 | `quit [reason]` | Asks the server to stop. The reason is written to the log. |
@@ -184,8 +184,39 @@ Convar names are case-insensitive. Scripts read them with `GetConvar` and
 | `sixm_deferralTimeout` | `120` | Seconds a connection that `playerConnecting` deferred may wait for `done`, clamped to 1 to 3600. A deferral that runs longer is refused with `connection timed out`. A value that is not a number gives 120. |
 | `sv_hostname` | `SixM Server` | Server name sent to players when they connect. |
 
-Any other convar can be set with `set` and read by scripts. The server does
-not check them.
+Any other convar can be set with `set`, `sets` or `setr`, or with the Lua
+setters, and read by scripts. The server checks a value only when the convar is
+replicated (see below).
+
+### Kinds of convar
+
+Every convar has a kind. The command or function that stores it decides the
+kind, and the last store wins:
+
+| Console | Lua | Kind |
+|---|---|---|
+| `set` | `SetConvar` | Plain. Kept on the server. |
+| `sets` | `SetConvarServerInfo` | Server information. Marked only. Nothing sends it anywhere yet, since there is no server browser. |
+| `setr` | `SetConvarReplicated` | Replicated. Sent to clients. |
+
+A replicated convar is sent to every connected player as soon as it is stored.
+A player who joins gets all replicated convars before the resource list, so
+its client scripts can read them while they load. When a replicated convar is stored with another
+kind, for example by `set`, every player is told that it has no value, and the
+player forgets it.
+
+A replicated convar's name must be 1 to 256 bytes, and its value at most 4096
+bytes. A `setr` or `SetConvarReplicated` that breaks a limit fails with an
+error, and the convar keeps its previous value.
+
+The console shows the kind of a convar that is not plain, for example:
+
+```text
+sv_hostname = "x" (replicated)
+```
+
+Players cannot read or set convars through the server, as described under
+[Permissions](#permissions).
 
 ## Resource discovery
 

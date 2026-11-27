@@ -2,8 +2,8 @@
 
 mod common;
 
-use common::{call, first, new_host, start, text};
-use sixm_core::{ScriptError, ScriptRuntime, Value};
+use common::{call, first, new_client_host, new_host, new_host_with_convars, start, text};
+use sixm_core::{ConvarKind, ScriptError, ScriptRuntime, Value};
 
 #[test]
 fn unsafe_libraries_and_functions_are_removed() {
@@ -169,6 +169,83 @@ fn convars_commands_and_names_reach_the_host() {
     );
     assert_eq!(first(&rt, "name"), Value::from("natives"));
     assert_eq!(host.commands.borrow().as_slice(), ["status"]);
+}
+
+#[test]
+fn convar_setters_store_with_their_kind_and_only_the_server_has_them() {
+    let host = new_host_with_convars(&[]);
+    let rt = start(
+        &host,
+        "setters",
+        &["probe"],
+        &[(
+            "main.lua",
+            "SetConvar('plain', '1')\n\
+             SetConvarReplicated('shared', 'race')\n\
+             SetConvarServerInfo('info', 'x')\n\
+             exports('probe', function() return type(SetConvar) end)\n",
+        )],
+    );
+    assert_eq!(first(&rt, "probe"), Value::from("function"));
+    assert_eq!(
+        host.convar_sets.borrow().as_slice(),
+        [
+            ("plain".to_owned(), "1".to_owned(), ConvarKind::Plain),
+            (
+                "shared".to_owned(),
+                "race".to_owned(),
+                ConvarKind::Replicated
+            ),
+            ("info".to_owned(), "x".to_owned(), ConvarKind::ServerInfo),
+        ]
+    );
+
+    let client = new_client_host(1);
+    let rt = start(
+        &client,
+        "setters",
+        &["probe"],
+        &[(
+            "main.lua",
+            "exports('probe', function() return type(SetConvarReplicated) end)\n",
+        )],
+    );
+    assert_eq!(first(&rt, "probe"), Value::from("nil"));
+}
+
+#[test]
+fn get_convar_bool_reads_the_usual_spellings_and_falls_back_to_the_default() {
+    let host = new_host_with_convars(&[
+        ("yes_word", " YES "),
+        ("off_word", "off"),
+        ("one", "1"),
+        ("zero", "0"),
+        ("maybe", "maybe"),
+    ]);
+    let rt = start(
+        &host,
+        "bools",
+        &["probe"],
+        &[(
+            "main.lua",
+            "exports('probe', function()\n\
+               return { GetConvarBool('yes_word', false), GetConvarBool('off_word', true),\n\
+                 GetConvarBool('one', false), GetConvarBool('zero', true),\n\
+                 GetConvarBool('maybe', true), GetConvarBool('missing', false) }\n\
+             end)\n",
+        )],
+    );
+    assert_eq!(
+        first(&rt, "probe"),
+        Value::Array(vec![
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(false),
+        ])
+    );
 }
 
 #[test]

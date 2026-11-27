@@ -30,9 +30,9 @@ use crate::protocol::{
 use crate::transfer::Advertised;
 use crate::transport;
 use crate::wire::{
-    encode_deferral, encode_entity_snapshot, encode_entity_transforms, encode_event, encode_frame,
-    encode_resources_snapshot, encode_state, encode_state_removed, encode_state_snapshot,
-    validate_length,
+    encode_convars, encode_deferral, encode_entity_snapshot, encode_entity_transforms,
+    encode_event, encode_frame, encode_resources_snapshot, encode_state, encode_state_removed,
+    encode_state_snapshot, validate_length,
 };
 
 /// Default UDP port, the one FiveM clients expect.
@@ -380,6 +380,34 @@ impl NetServer {
         entities: &[EntityEntry],
     ) -> Result<(), NetError> {
         for frame in encode_entity_snapshot(entities, self.max_frame)? {
+            self.post(Command::Send { player, frame })?;
+        }
+        Ok(())
+    }
+
+    /// Tells every accepted player the new value of each convar, as
+    /// `(name, value)`. A `None` value means the convar is no longer
+    /// replicated, and the client forgets it. Names must be 1 to
+    /// [`MAX_CONVAR_NAME_LEN`](crate::MAX_CONVAR_NAME_LEN) bytes and values at
+    /// most [`MAX_CONVAR_VALUE_LEN`](crate::MAX_CONVAR_VALUE_LEN), checked before
+    /// anything is sent. Nothing is sent for an empty list.
+    pub fn broadcast_convars(&self, entries: &[(&str, Option<&str>)]) -> Result<(), NetError> {
+        for frame in encode_convars(entries, self.max_frame)? {
+            self.post(Command::Broadcast { frame })?;
+        }
+        Ok(())
+    }
+
+    /// Sends the replicated convars to one player, as the fewest frames that
+    /// fit, in the same form as [`broadcast_convars`](Self::broadcast_convars).
+    /// Send it right after the player is accepted. Nothing is sent for an empty
+    /// list.
+    pub fn send_convars(
+        &self,
+        player: u32,
+        entries: &[(&str, Option<&str>)],
+    ) -> Result<(), NetError> {
+        for frame in encode_convars(entries, self.max_frame)? {
             self.post(Command::Send { player, frame })?;
         }
         Ok(())

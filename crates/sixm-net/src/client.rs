@@ -66,6 +66,11 @@ pub enum ClientEvent {
     EntityDeleted { id: u32 },
     /// The entities that existed when the client joined.
     EntitySnapshot { entities: Vec<EntityEntry> },
+    /// Replicated convars, as `(name, value)`. A `None` value means the convar
+    /// is no longer replicated.
+    Convars {
+        entries: Vec<(String, Option<String>)>,
+    },
     /// The server kicked the client, or shut down, and gave a reason.
     Kicked { reason: String },
     /// The connection ended without a kick.
@@ -493,7 +498,8 @@ async fn greet(
             | ServerMessage::EntityCreated { .. }
             | ServerMessage::EntityTransforms { .. }
             | ServerMessage::EntityDeleted { .. }
-            | ServerMessage::EntitySnapshot { .. } => {
+            | ServerMessage::EntitySnapshot { .. }
+            | ServerMessage::Convars { .. } => {
                 return Err(NetError::Protocol(
                     "the server sent a message before the welcome".to_owned(),
                 ));
@@ -669,6 +675,7 @@ async fn pump_events(
                 Ok(ServerMessage::EntitySnapshot { entities }) => {
                     ClientEvent::EntitySnapshot { entities }
                 }
+                Ok(ServerMessage::Convars { entries }) => ClientEvent::Convars { entries },
                 Ok(ServerMessage::Kicked { reason }) => {
                     let _ = events.send(ClientEvent::Kicked { reason });
                     return;
