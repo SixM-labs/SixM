@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use sixm_net::{NetError, NetEvent};
 use tracing::{error, info, warn};
 
-use crate::commands::{self, CommandContext};
+use crate::commands::{self, CommandContext, CommandSource};
 use crate::manager::ResourceManager;
 
 /// Most queued commands that run in one drain. Beyond this, scripts are
@@ -54,7 +54,11 @@ impl Server {
 
     /// Runs one console line, then every command it or the scripts queued.
     pub fn execute(&self, line: &str) {
-        commands::run_line(&self.manager, line, CommandContext::console());
+        commands::run_line(
+            &self.manager,
+            line,
+            &CommandContext::new(CommandSource::Console),
+        );
         self.drain_commands();
     }
 
@@ -65,7 +69,7 @@ impl Server {
             &self.manager,
             words,
             &words.join(" "),
-            CommandContext::console(),
+            &CommandContext::new(CommandSource::Console),
         );
         self.drain_commands();
     }
@@ -182,7 +186,7 @@ impl Server {
         loop {
             self.manager.apply_deferral_calls();
             self.manager.apply_drops();
-            let Some(line) = self.manager.pop_command() else {
+            let Some((line, source)) = self.manager.pop_command() else {
                 return;
             };
             if ran == MAX_QUEUED_COMMANDS {
@@ -191,7 +195,7 @@ impl Server {
                 return;
             }
             ran += 1;
-            commands::run_line(&self.manager, &line, CommandContext::console());
+            commands::run_line(&self.manager, &line, &CommandContext::new(source));
         }
     }
 }
