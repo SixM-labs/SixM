@@ -144,9 +144,11 @@ Each player gets a server id, counting up from 1 and never reused while the
 server runs. Players can send console commands that the server runs with their
 permissions; see [Permissions](docs/server.md#permissions). Scripts see the connection lifecycle as events:
 
-- `playerConnecting(name, setKickReason)` runs before a player is admitted.
+- `playerConnecting(name, setKickReason, deferrals)` runs before a player is admitted.
   Call `setKickReason(text)` or `CancelEvent()` to refuse the connection. The
-  function is valid only during this event.
+  function is valid only during this event. A handler can also hold the
+  connection with `deferrals`, to show progress and decide later; see
+  [Deferrals](docs/lua-api.md#deferrals).
 - `playerJoining` runs once the player is admitted.
 - `playerDropped(reason)` runs when the player leaves, whether they
   disconnected or were kicked.

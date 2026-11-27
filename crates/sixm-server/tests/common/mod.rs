@@ -9,6 +9,8 @@ use sixm_core::Host;
 use sixm_server::{ResourceManager, Server};
 use tempfile::TempDir;
 
+pub mod net;
+
 /// A server whose resource folder is a fresh temporary directory.
 pub struct Fixture {
     dir: TempDir,

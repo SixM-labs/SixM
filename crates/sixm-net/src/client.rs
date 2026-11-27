@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::mpsc::{self as std_mpsc, Receiver, Sender, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -16,7 +17,7 @@ use quinn::{Connection, Endpoint, RecvStream, SendStream, VarInt};
 use ring::digest::{self, SHA256};
 use sixm_core::Value;
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::entities::EntityEntry;
 use crate::error::NetError;
@@ -31,6 +32,8 @@ use crate::wire::{decode_server_message, encode_command, encode_event, encode_fr
 
 /// Time allowed for the connection to close after the client disconnects.
 const DISCONNECT_GRACE: Duration = Duration::from_secs(1);
+/// Application close code of a connection that failed during the handshake.
+const CLOSE_HANDSHAKE_FAILED: u32 = 1;
 
 /// Something the server sent to this client.
 #[derive(Debug, Clone, PartialEq)]
@@ -109,15 +112,30 @@ impl NetClient {
     ///
     /// A [`Identity::Persistent`] identity is read from its file, or created
     /// there when the file is missing. Returns [`NetError::Rejected`] if the
-    /// server refuses, and [`NetError::Timeout`] if the whole handshake takes
-    /// longer than `timeout`.
+    /// server refuses, and [`NetError::Timeout`] if the handshake takes longer
+    /// than `timeout`. Each progress message of the server while it defers the
+    /// connection restarts that wait, and is logged at info level.
     pub fn connect(
         addr: SocketAddr,
         name: &str,
         identity: &Identity,
         timeout: Duration,
     ) -> Result<Self, NetError> {
-        Self::connect_with(addr, name, identity, timeout, Trust::Any)
+        Self::connect_with(addr, name, identity, timeout, Trust::Any, |_| {})
+    }
+
+    /// Like [`connect`](Self::connect), and also calls `on_deferral` with the
+    /// text of every progress message the server sends while the connection
+    /// waits for its decision. The callback runs on the client's network
+    /// thread, so it must not block.
+    pub fn connect_observed(
+        addr: SocketAddr,
+        name: &str,
+        identity: &Identity,
+        timeout: Duration,
+        on_deferral: impl FnMut(&str) + Send + 'static,
+    ) -> Result<Self, NetError> {
+        Self::connect_with(addr, name, identity, timeout, Trust::Any, on_deferral)
     }
 
     /// Like [`connect`](Self::connect), but accepts only a server whose
@@ -130,7 +148,14 @@ impl NetClient {
         identity: &Identity,
         timeout: Duration,
     ) -> Result<Self, NetError> {
-        Self::connect_with(addr, name, identity, timeout, Trust::Pinned(*fingerprint))
+        Self::connect_with(
+            addr,
+            name,
+            identity,
+            timeout,
+            Trust::Pinned(*fingerprint),
+            |_| {},
+        )
     }
 
     fn connect_with(
@@ -139,6 +164,7 @@ impl NetClient {
         identity: &Identity,
         timeout: Duration,
         trust: Trust,
+        on_deferral: impl FnMut(&str) + Send + 'static,
     ) -> Result<Self, NetError> {
         let name = name.trim().to_owned();
         if name.is_empty() || name.chars().count() > MAX_PLAYER_NAME_LEN {
@@ -161,6 +187,7 @@ impl NetClient {
                     commands: command_rx,
                     events: events_tx,
                     pending: thread_pending,
+                    on_deferral: Box::new(on_deferral),
                 };
                 run_thread(addr, name, timeout, trust, credentials, link);
             })
@@ -311,6 +338,8 @@ struct Link {
     commands: mpsc::UnboundedReceiver<Arc<[u8]>>,
     events: Sender<ClientEvent>,
     pending: Pending,
+    /// Called with every progress message received during the handshake.
+    on_deferral: Box<dyn FnMut(&str) + Send>,
 }
 
 fn run_thread(
@@ -326,6 +355,7 @@ fn run_thread(
         commands,
         events,
         pending,
+        mut on_deferral,
     } = link;
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -339,20 +369,16 @@ fn run_thread(
     };
     runtime.block_on(async move {
         let handshake =
-            tokio::time::timeout(timeout, establish(addr, &name, trust, credentials)).await;
+            establish(addr, &name, trust, credentials, timeout, &mut *on_deferral).await;
         let established = match handshake {
-            Ok(Ok((established, welcome))) => {
+            Ok((established, welcome)) => {
                 if ready.send(Ok(welcome)).is_err() {
                     return;
                 }
                 established
             }
-            Ok(Err(err)) => {
+            Err(err) => {
                 let _ = ready.send(Err(err));
-                return;
-            }
-            Err(_) => {
-                let _ = ready.send(Err(NetError::Timeout));
                 return;
             }
         };
@@ -360,14 +386,28 @@ fn run_thread(
     });
 }
 
-/// Connects with the client certificate, sends the `Hello` and reads the
-/// server's first message.
+/// Waits for `future` until `deadline`. A deadline that passes is a timeout.
+async fn until<F: Future>(
+    deadline: tokio::time::Instant,
+    future: F,
+) -> Result<F::Output, NetError> {
+    tokio::time::timeout_at(deadline, future)
+        .await
+        .map_err(|_| NetError::Timeout)
+}
+
+/// Connects with the client certificate, then greets the server. The handshake
+/// must finish within `timeout`, and every progress message from the server
+/// starts that wait again.
 async fn establish(
     addr: SocketAddr,
     name: &str,
     trust: Trust,
     credentials: Credentials,
+    timeout: Duration,
+    on_deferral: &mut dyn FnMut(&str),
 ) -> Result<(Established, Welcome), NetError> {
+    let mut deadline = tokio::time::Instant::now() + timeout;
     let bind = if addr.is_ipv4() {
         SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
     } else {
@@ -380,12 +420,40 @@ async fn establish(
     let connecting = endpoint
         .connect(addr, SERVER_NAME)
         .map_err(|err| NetError::Connect(err.to_string()))?;
-    let connection = connecting
-        .await
+    let connection = until(deadline, connecting)
+        .await?
         .map_err(|err| verifier.handshake_error(&err))?;
-    let (mut send, mut recv) = connection
-        .open_bi()
-        .await
+    match greet(&connection, name, timeout, &mut deadline, on_deferral).await {
+        Ok((send, recv, welcome)) => Ok((
+            Established {
+                endpoint,
+                connection,
+                send,
+                recv,
+            },
+            welcome,
+        )),
+        Err(err) => {
+            // Closing now tells the server that the player is gone, so a
+            // connection held by deferrals ends at once and not at idle timeout.
+            close_connection(&connection, CLOSE_HANDSHAKE_FAILED, &err.to_string());
+            let _ = tokio::time::timeout(DISCONNECT_GRACE, endpoint.wait_idle()).await;
+            Err(err)
+        }
+    }
+}
+
+/// Opens the stream, sends the `Hello` and reads messages until the `Welcome`.
+/// `deadline` moves on every progress message of the server.
+async fn greet(
+    connection: &Connection,
+    name: &str,
+    timeout: Duration,
+    deadline: &mut tokio::time::Instant,
+    on_deferral: &mut dyn FnMut(&str),
+) -> Result<(SendStream, RecvStream, Welcome), NetError> {
+    let (mut send, mut recv) = until(*deadline, connection.open_bi())
+        .await?
         .map_err(|err| NetError::Connect(err.to_string()))?;
     let hello = encode_frame(
         &ClientMessage::Hello {
@@ -394,50 +462,51 @@ async fn establish(
         },
         MAX_FRAME,
     )?;
-    send.write_all(&hello)
-        .await
-        .map_err(|err| NetError::Connect(err.to_string()))?;
-    let payload = read_frame(&mut recv, MAX_FRAME)
+    until(*deadline, send.write_all(&hello))
         .await?
-        .ok_or(NetError::Closed)?;
-    let welcome = match decode_server_message(&payload)? {
-        ServerMessage::Welcome {
-            player,
-            server_name,
-        } => Welcome {
-            player,
-            server_name,
-        },
-        ServerMessage::Rejected { reason } | ServerMessage::Kicked { reason } => {
-            return Err(NetError::Rejected(reason));
-        }
-        ServerMessage::Event { .. }
-        | ServerMessage::StateBag { .. }
-        | ServerMessage::StateBagRemoved { .. }
-        | ServerMessage::StateSnapshot { .. }
-        | ServerMessage::Resources { .. }
-        | ServerMessage::ResourceStarted { .. }
-        | ServerMessage::ResourceStopped { .. }
-        | ServerMessage::FileUnavailable { .. }
-        | ServerMessage::EntityCreated { .. }
-        | ServerMessage::EntityTransforms { .. }
-        | ServerMessage::EntityDeleted { .. }
-        | ServerMessage::EntitySnapshot { .. }
-        | ServerMessage::Convars { .. } => {
-            return Err(NetError::Protocol(
-                "the server sent a message before the welcome".to_owned(),
-            ));
+        .map_err(|err| NetError::Connect(err.to_string()))?;
+    let welcome = loop {
+        let payload = until(*deadline, read_frame(&mut recv, MAX_FRAME))
+            .await??
+            .ok_or(NetError::Closed)?;
+        match decode_server_message(&payload)? {
+            ServerMessage::Deferral { message } => {
+                info!("the server defers the connection: {message}");
+                on_deferral(&message);
+                *deadline = tokio::time::Instant::now() + timeout;
+            }
+            ServerMessage::Welcome {
+                player,
+                server_name,
+            } => {
+                break Welcome {
+                    player,
+                    server_name,
+                };
+            }
+            ServerMessage::Rejected { reason } | ServerMessage::Kicked { reason } => {
+                return Err(NetError::Rejected(reason));
+            }
+            ServerMessage::Event { .. }
+            | ServerMessage::StateBag { .. }
+            | ServerMessage::StateBagRemoved { .. }
+            | ServerMessage::StateSnapshot { .. }
+            | ServerMessage::Resources { .. }
+            | ServerMessage::ResourceStarted { .. }
+            | ServerMessage::ResourceStopped { .. }
+            | ServerMessage::FileUnavailable { .. }
+            | ServerMessage::EntityCreated { .. }
+            | ServerMessage::EntityTransforms { .. }
+            | ServerMessage::EntityDeleted { .. }
+            | ServerMessage::EntitySnapshot { .. }
+            | ServerMessage::Convars { .. } => {
+                return Err(NetError::Protocol(
+                    "the server sent a message before the welcome".to_owned(),
+                ));
+            }
         }
     };
-    Ok((
-        Established {
-            endpoint,
-            connection,
-            send,
-            recv,
-        },
-        welcome,
-    ))
+    Ok((send, recv, welcome))
 }
 
 /// Forwards outgoing frames and incoming events until either side ends. Files
@@ -611,7 +680,11 @@ async fn pump_events(
                     let _ = events.send(ClientEvent::Kicked { reason });
                     return;
                 }
-                Ok(ServerMessage::Welcome { .. } | ServerMessage::Rejected { .. }) => {
+                Ok(
+                    ServerMessage::Welcome { .. }
+                    | ServerMessage::Rejected { .. }
+                    | ServerMessage::Deferral { .. },
+                ) => {
                     protocol_violation(&connection, &events, "unexpected handshake message");
                     return;
                 }

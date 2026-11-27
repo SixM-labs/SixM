@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use quinn::{Connection, Incoming, RecvStream, SendStream, VarInt};
 use rustls::pki_types::CertificateDer;
 use sixm_core::Value;
-use tokio::sync::{Semaphore, mpsc, oneshot, watch};
+use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
 use tracing::{debug, warn};
 
@@ -50,10 +50,20 @@ pub(crate) enum Decision {
     Reject(String),
 }
 
+/// What the server tells a connection that is still waiting for its decision.
+pub(crate) enum Instruction {
+    /// An encoded frame to send to the client, which keeps waiting.
+    Update(Arc<[u8]>),
+    /// The final answer. Nothing else is sent before it.
+    Decide(Decision),
+}
+
 /// Channels that connect a connection task to the supervisor.
 pub(crate) struct Ticket {
     pub(crate) id: ConnectionId,
-    pub(crate) decision: oneshot::Receiver<Decision>,
+    /// Updates and the decision. The task ends with the decision, or when the
+    /// channel closes, which refuses the connection as shutting down.
+    pub(crate) instructions: mpsc::UnboundedReceiver<Instruction>,
     pub(crate) outbound: mpsc::Receiver<Arc<[u8]>>,
     /// Another sender of the outbound queue, for replies the reader sends.
     pub(crate) reply: mpsc::Sender<Arc<[u8]>>,
@@ -64,7 +74,7 @@ pub(crate) struct Ticket {
 pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket) {
     let Ticket {
         id,
-        decision,
+        mut instructions,
         outbound,
         reply,
         kick,
@@ -106,7 +116,7 @@ pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket)
             }
         };
     let Hello {
-        send,
+        mut send,
         recv,
         protocol,
         name,
@@ -127,12 +137,8 @@ pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket)
         fingerprint,
     });
 
-    let decided = tokio::select! {
-        decided = decision => decided.unwrap_or_else(|_| Decision::Reject(SHUTTING_DOWN.to_owned())),
-        _ = connection.closed() => {
-            (shared.on_event)(NetEvent::Abandoned { connection: id });
-            return;
-        }
+    let Some(decided) = decide(&shared, id, &connection, &mut send, &mut instructions).await else {
+        return;
     };
     match decided {
         Decision::Reject(reason) => refuse(&connection, send, &reason, shared.max_frame).await,
@@ -147,6 +153,41 @@ pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket)
                 kick,
             };
             serve(&shared, accepted).await;
+        }
+    }
+}
+
+/// Waits for the server's decision on a connection that sent its `Hello`, and
+/// writes every progress update to the client meanwhile. Returns `None` when
+/// the connection ends first, after reporting it as abandoned.
+async fn decide(
+    shared: &Shared,
+    id: ConnectionId,
+    connection: &Connection,
+    send: &mut SendStream,
+    instructions: &mut mpsc::UnboundedReceiver<Instruction>,
+) -> Option<Decision> {
+    loop {
+        tokio::select! {
+            instruction = instructions.recv() => match instruction {
+                Some(Instruction::Decide(decision)) => return Some(decision),
+                Some(Instruction::Update(frame)) => {
+                    if let Err(err) = send.write_all(&frame).await {
+                        close_connection(
+                            connection,
+                            CLOSE_NORMAL,
+                            &format!("deferral update failed: {err}"),
+                        );
+                        (shared.on_event)(NetEvent::Abandoned { connection: id });
+                        return None;
+                    }
+                }
+                None => return Some(Decision::Reject(SHUTTING_DOWN.to_owned())),
+            },
+            _ = connection.closed() => {
+                (shared.on_event)(NetEvent::Abandoned { connection: id });
+                return None;
+            }
         }
     }
 }

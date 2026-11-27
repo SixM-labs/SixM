@@ -9,7 +9,7 @@ use crate::files::{FileHash, ResourceEntry};
 use crate::wire::{Args, StateValue};
 
 /// Version of the wire protocol. A client must send it in its `Hello`.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Application protocol identifier negotiated during the TLS handshake.
 pub(crate) const ALPN: &[u8] = b"sixm/1";
@@ -40,6 +40,9 @@ pub(crate) const MAX_PLAYER_NAME_LEN: usize = 64;
 pub const MAX_CONVAR_NAME_LEN: usize = 256;
 /// Longest convar value in bytes that travels to clients.
 pub const MAX_CONVAR_VALUE_LEN: usize = 4096;
+/// Longest progress message of a deferral, in bytes. Longer messages are cut
+/// on a character boundary when they are sent.
+pub(crate) const MAX_DEFERRAL_MESSAGE_LEN: usize = 4096;
 
 /// Time a connection may stay silent before QUIC closes it.
 pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -182,6 +185,11 @@ pub(crate) enum ServerMessage {
     Convars {
         entries: Vec<(String, Option<String>)>,
     },
+    /// Progress text for a connection that is held by deferrals. The client
+    /// keeps waiting for `Welcome` and treats the text as a log line.
+    Deferral {
+        message: String,
+    },
 }
 
 impl ServerMessage {
@@ -217,4 +225,6 @@ impl ServerMessage {
     pub(crate) const ENTITY_SNAPSHOT_TAG: u32 = 14;
     /// Variant index of [`ServerMessage::Convars`] on the wire.
     pub(crate) const CONVARS_TAG: u32 = 15;
+    /// Variant index of [`ServerMessage::Deferral`] on the wire.
+    pub(crate) const DEFERRAL_TAG: u32 = 16;
 }
