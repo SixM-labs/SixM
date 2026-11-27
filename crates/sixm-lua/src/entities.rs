@@ -79,11 +79,14 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
     for (name, function) in functions {
         globals.raw_set(name, function)?;
     }
+    for (name, function) in owner_functions(lua, weak)? {
+        globals.raw_set(name, function)?;
+    }
     Ok(())
 }
 
 /// Installs the functions only a server can use: creation, movement, deletion,
-/// the owner of an entity and the lists of entities of each kind.
+/// the owners of entities and the lists of entities of each kind.
 pub(crate) fn install_server(
     lua: &Lua,
     weak: &Weak<LuaRuntime>,
@@ -92,7 +95,7 @@ pub(crate) fn install_server(
     for (name, function) in spawn_functions(lua, weak)?
         .into_iter()
         .chain(change_functions(lua, weak)?)
-        .chain(owner_functions(lua, weak)?)
+        .chain(server_owner_functions(lua, weak)?)
         .chain(list_functions(lua, weak)?)
         .chain(bucket_functions(lua, weak)?)
     {
@@ -262,7 +265,7 @@ fn movement_functions(
     ])
 }
 
-/// The functions that tell who moves an entity on the server.
+/// The function that tells who moves an entity. Both sides have it.
 fn owner_functions(
     lua: &Lua,
     weak: &Weak<LuaRuntime>,
@@ -274,6 +277,39 @@ fn owner_functions(
             .map_or(-1, i64::from))
     })?;
     Ok(vec![("NetworkGetEntityOwner", owner)])
+}
+
+/// The functions that give an entity to a player, and that choose what happens
+/// to it when its creator leaves. Only the server decides owners.
+fn server_owner_functions(
+    lua: &Lua,
+    weak: &Weak<LuaRuntime>,
+) -> mlua::Result<Vec<(&'static str, Function)>> {
+    let set_owner = bind_fn(lua, weak, |rt, (entity, owner): (LuaValue, LuaValue)| {
+        // Player 0, or a value that is not a player, is the server.
+        let owner = match whole_number(&owner) {
+            Some(0) | None => 0,
+            Some(player) => u32::try_from(player).map_err(|_| {
+                mlua::Error::runtime("SetEntityOwner: the player must be a player id or 0")
+            })?,
+        };
+        let Some(id) = entity_id(&entity) else {
+            return Ok(false);
+        };
+        Ok(server(&*rt.host()?)?.set_entity_owner(id, owner))
+    })?;
+    let orphan_mode = bind_fn(lua, weak, |rt, (entity, mode): (LuaValue, String)| {
+        let Some(id) = entity_id(&entity) else {
+            return Ok(());
+        };
+        server(&*rt.host()?)?
+            .set_entity_orphan_mode(id, &mode)
+            .map_err(lua_err)
+    })?;
+    Ok(vec![
+        ("SetEntityOwner", set_owner),
+        ("SetEntityOrphanMode", orphan_mode),
+    ])
 }
 
 /// The routing bucket functions. The server decides the buckets, so these
@@ -382,9 +418,21 @@ pub(crate) fn install_client(
     weak: &Weak<LuaRuntime>,
     globals: &Table,
 ) -> mlua::Result<()> {
-    for (name, function) in movement_functions(lua, weak, client_move)? {
+    for (name, function) in movement_functions(lua, weak, client_move)?
+        .into_iter()
+        .chain(client_create_functions(lua, weak)?)
+    {
         globals.raw_set(name, function)?;
     }
+    let request_control = bind_fn(lua, weak, |rt, (entity,): (LuaValue,)| {
+        let Some(id) = entity_id(&entity) else {
+            return Ok(false);
+        };
+        client(&*rt.host()?)?
+            .request_entity_control(id)
+            .map_err(lua_err)
+    })?;
+    globals.raw_set("NetworkRequestControlOfEntity", request_control)?;
     let game_pool = bind_fn(lua, weak, |rt, (name,): (String,)| {
         let kind = match name.as_str() {
             "CVehicle" => Some(EntityKind::Vehicle),
@@ -400,6 +448,100 @@ pub(crate) fn install_client(
     })?;
     globals.raw_set("GetGamePool", game_pool)?;
     Ok(())
+}
+
+/// The functions that create an entity on a client. A client creates only
+/// networked entities, so `isNetwork` must be `true`, and the entity is owned by
+/// this client and reaches the server to be confirmed. The other arguments are
+/// those of the server functions.
+fn client_create_functions(
+    lua: &Lua,
+    weak: &Weak<LuaRuntime>,
+) -> mlua::Result<Vec<(&'static str, Function)>> {
+    let create_vehicle = bind_fn(
+        lua,
+        weak,
+        |rt,
+         (model, x, y, z, heading, network): (
+            LuaValue,
+            LuaValue,
+            LuaValue,
+            LuaValue,
+            LuaValue,
+            LuaValue,
+        )| {
+            let position = coordinates(&x, &y, &z)?;
+            let heading = real(&heading, "heading")?;
+            client_spawn(
+                rt,
+                EntityKind::Vehicle,
+                &model,
+                position,
+                [0.0, 0.0, heading],
+                &network,
+            )
+        },
+    )?;
+    let create_ped = bind_fn(
+        lua,
+        weak,
+        |rt,
+         (_ped_type, model, x, y, z, heading, network): (
+            LuaValue,
+            LuaValue,
+            LuaValue,
+            LuaValue,
+            LuaValue,
+            LuaValue,
+            LuaValue,
+        )| {
+            let position = coordinates(&x, &y, &z)?;
+            let heading = real(&heading, "heading")?;
+            client_spawn(
+                rt,
+                EntityKind::Ped,
+                &model,
+                position,
+                [0.0, 0.0, heading],
+                &network,
+            )
+        },
+    )?;
+    let create_object = bind_fn(
+        lua,
+        weak,
+        |rt, (model, x, y, z, network): (LuaValue, LuaValue, LuaValue, LuaValue, LuaValue)| {
+            let position = coordinates(&x, &y, &z)?;
+            client_spawn(rt, EntityKind::Object, &model, position, [0.0; 3], &network)
+        },
+    )?;
+    Ok(vec![
+        ("CreateVehicle", create_vehicle),
+        ("CreatePed", create_ped),
+        ("CreateObject", create_object),
+    ])
+}
+
+/// Asks the server for an entity this client owns, and returns its id. Fails
+/// unless `network` is `true`, since a client has no entities of its own.
+fn client_spawn(
+    rt: &LuaRuntime,
+    kind: EntityKind,
+    model: &LuaValue,
+    position: [f32; 3],
+    rotation: [f32; 3],
+    network: &LuaValue,
+) -> mlua::Result<i64> {
+    if !matches!(network, LuaValue::Boolean(true)) {
+        return Err(mlua::Error::runtime(
+            "a client creates only networked entities: pass isNetwork = true",
+        ));
+    }
+    let model = model_of(model)?;
+    let id = client(&*rt.host()?)?
+        .create_network_entity(kind, model, position, rotation)
+        .map_err(lua_err)?;
+    Ok(i64::from(id))
 }
 
 /// A function that returns the ids of every entity of `kind`, in ascending order.

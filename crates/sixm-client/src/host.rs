@@ -11,8 +11,15 @@ use sixm_core::{
 };
 use tracing::warn;
 
-use crate::runtime::{ClientRuntime, ScriptCommand};
+use crate::runtime::{ClientEntity, ClientRuntime, ScriptCommand};
 use crate::state::validate_key;
+
+/// The convar that limits how many entities this client may create at once.
+/// The server replicates it, and the built-in default is used until then.
+const MAX_CLIENT_ENTITIES: &str = "sixm_maxClientEntities";
+
+/// The limit of [`MAX_CLIENT_ENTITIES`] before the server replicates it.
+const DEFAULT_MAX_CLIENT_ENTITIES: i64 = 64;
 
 impl Host for ClientRuntime {
     fn server(&self) -> Option<&dyn ServerHost> {
@@ -242,6 +249,18 @@ impl Host for ClientRuntime {
 }
 
 impl ClientRuntime {
+    /// The most entities this client may create at once: the replicated
+    /// `sixm_maxClientEntities`, or the default. Never negative.
+    fn max_client_entities(&self) -> usize {
+        let value = self
+            .convars
+            .borrow()
+            .get(MAX_CLIENT_ENTITIES)
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(DEFAULT_MAX_CLIENT_ENTITIES);
+        usize::try_from(value.max(0)).unwrap_or(0)
+    }
+
     /// Whether a local write to `bag` makes sense: the global bag, this
     /// client's own bag, the bag of a mirrored entity, and any bag the server
     /// has replicated keys into.
@@ -289,6 +308,73 @@ impl ClientHost for ClientRuntime {
 
     fn local_ped(&self) -> Option<u32> {
         self.local_ped.get()
+    }
+
+    fn create_network_entity(
+        &self,
+        kind: EntityKind,
+        model: u32,
+        position: [f32; 3],
+        rotation: [f32; 3],
+    ) -> Result<u32, ScriptError> {
+        if !is_finite(position) || !is_finite(rotation) {
+            return Err(ScriptError::Runtime(
+                "entity transforms must be finite".to_owned(),
+            ));
+        }
+        let limit = self.max_client_entities();
+        if self.own_created.borrow().len() >= limit {
+            let reason = format!("this client already has its maximum of {limit} entities");
+            warn!("entity not created: {reason}");
+            return Err(ScriptError::Runtime(reason));
+        }
+        let id = self.take_leased_id().ok_or_else(|| {
+            ScriptError::Runtime("no entity id is leased to this client yet".to_owned())
+        })?;
+        let info = EntityInfo {
+            kind,
+            model,
+            position,
+            rotation,
+            owner: Some(self.local_player),
+        };
+        self.entities.borrow_mut().insert(
+            id,
+            ClientEntity {
+                info,
+                epoch: 0,
+                position_dirty: false,
+                rotation_dirty: false,
+                pending: true,
+            },
+        );
+        self.own_created.borrow_mut().insert(id);
+        let sent =
+            self.client
+                .borrow()
+                .send_create_entity(id, kind.code(), model, position, rotation);
+        if let Err(err) = sent {
+            self.own_created.borrow_mut().remove(&id);
+            self.entities.borrow_mut().remove(&id);
+            return Err(ScriptError::Runtime(err.to_string()));
+        }
+        Ok(id)
+    }
+
+    fn request_entity_control(&self, entity: u32) -> Result<bool, ScriptError> {
+        let unowned = self
+            .entities
+            .borrow()
+            .get(&entity)
+            .is_some_and(|slot| slot.info.owner.is_none() && !slot.pending);
+        if !unowned {
+            return Ok(false);
+        }
+        self.client
+            .borrow()
+            .send_request_entity_control(entity)
+            .map_err(|err| ScriptError::Runtime(err.to_string()))?;
+        Ok(true)
     }
 
     fn move_owned_entity(

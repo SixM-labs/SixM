@@ -484,6 +484,17 @@ pub trait ServerHost {
 
     /// The entity lockdown mode of `bucket`, `inactive` unless set.
     fn routing_bucket_entity_lockdown_mode(&self, bucket: u32) -> String;
+
+    /// Gives the entity `entity` to player `owner`, or to the server when
+    /// `owner` is 0. The entity keeps its teleport epoch: the new owner starts
+    /// from the current one. Returns `false` for an unknown entity, or for a
+    /// player that is not connected.
+    fn set_entity_owner(&self, entity: u32, owner: u32) -> bool;
+
+    /// Sets what happens to an entity whose creator leaves: `delete`, the
+    /// default, or `migrate`, which hands it to a player that holds it.
+    /// Fails for any other mode.
+    fn set_entity_orphan_mode(&self, entity: u32, mode: &str) -> Result<(), ScriptError>;
 }
 
 /// Services only a client provides: the connection to the server.
@@ -515,6 +526,25 @@ pub trait ClientHost {
         position: Option<[f32; 3]>,
         rotation: Option<[f32; 3]>,
     ) -> Result<(), ScriptError>;
+
+    /// Asks the server for an entity this client will own. The entity exists
+    /// at once, under an id the server leased to this client, and is removed
+    /// again when the server refuses it. Fails when this client already has
+    /// `sixm_maxClientEntities` entities of its own, or when no leased id is
+    /// available yet.
+    fn create_network_entity(
+        &self,
+        kind: EntityKind,
+        model: u32,
+        position: [f32; 3],
+        rotation: [f32; 3],
+    ) -> Result<u32, ScriptError>;
+
+    /// Asks the server to give this client the entity `entity`. Returns `false`
+    /// when the entity is unknown or already owned, and `true` when the request
+    /// is sent. The server may still refuse it, and then the ownership does not
+    /// change.
+    fn request_entity_control(&self, entity: u32) -> Result<bool, ScriptError>;
 }
 
 /// One running resource inside one scripting language.

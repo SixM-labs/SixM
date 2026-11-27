@@ -351,7 +351,7 @@ fn the_pool_of_a_client_lists_the_entities_it_mirrors() {
                assert(#peds == 1 and peds[1] == 8)\n\
                assert(#GetGamePool('CObject') == 0)\n\
                assert(#GetGamePool('CNothing') == 0)\n\
-               assert(CreateVehicle == nil and DeleteEntity == nil)\n\
+               assert(CreateVehicleServerSetter == nil and DeleteEntity == nil)\n\
              end)\n",
         )],
     );
@@ -406,7 +406,8 @@ fn client_moves_only_the_entities_it_owns_and_keeps_pitch_and_roll() {
                assert(PlayerPedId() == 7)\n\
                assert(GetPlayerPed(-1) == 7 and GetPlayerPed(PlayerId()) == 7)\n\
                assert(GetPlayerPed(4) == 0, 'only the local player is known')\n\
-               assert(NetworkGetEntityOwner == nil, 'the owner is server only')\n\
+               assert(NetworkGetEntityOwner(7) == 3 and NetworkGetEntityOwner(8) == 4)\n\
+               assert(SetEntityOwner == nil, 'ownership assignment is server only')\n\
                SetEntityCoords(PlayerPedId(), 5.0, 6.0, 7.0)\n\
                SetEntityCoords(8, 1.0, 1.0, 1.0)\n\
                SetEntityHeading(8, 90.0)\n\

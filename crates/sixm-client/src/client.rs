@@ -95,6 +95,18 @@ pub enum ClientNotice {
     EntityTransforms { updates: Vec<EntityTransform> },
     /// An entity was deleted.
     EntityDeleted { id: u32 },
+    /// A block of entity ids this client may create entities with.
+    EntityIdLease { first: u32, count: u32 },
+    /// The server refused the entity `id` this client asked for.
+    EntityCreateRefused { id: u32, reason: String },
+    /// An entity has a new owner, `0` for the server.
+    EntityOwner {
+        id: u32,
+        owner: u32,
+        epoch: u32,
+        position: [f32; 3],
+        rotation: [f32; 3],
+    },
     /// Replicated convars, as `(name, value)`. A `None` value means the server
     /// no longer replicates the convar.
     Convars {
@@ -189,6 +201,25 @@ impl Client {
     /// few messages as possible.
     pub fn send_entity_transforms(&self, updates: &[EntityTransform]) -> Result<(), NetError> {
         self.net.send_entity_transforms(updates)
+    }
+
+    /// Asks the server to create an entity owned by this client, under the
+    /// leased id `id`.
+    pub fn send_create_entity(
+        &self,
+        id: u32,
+        kind: u8,
+        model: u32,
+        position: [f32; 3],
+        rotation: [f32; 3],
+    ) -> Result<(), NetError> {
+        self.net
+            .send_create_entity(id, kind, model, position, rotation)
+    }
+
+    /// Asks the server for control of the entity `id`, which no player owns.
+    pub fn send_request_entity_control(&self, id: u32) -> Result<(), NetError> {
+        self.net.send_request_entity_control(id)
     }
 
     /// The running resources, in start order, with their files in the cache.
@@ -308,6 +339,25 @@ impl Client {
             }
             ClientEvent::EntityTransforms { updates } => ClientNotice::EntityTransforms { updates },
             ClientEvent::EntityDeleted { id } => ClientNotice::EntityDeleted { id },
+            ClientEvent::EntityIdLease { first, count } => {
+                ClientNotice::EntityIdLease { first, count }
+            }
+            ClientEvent::EntityCreateRefused { id, reason } => {
+                ClientNotice::EntityCreateRefused { id, reason }
+            }
+            ClientEvent::EntityOwner {
+                id,
+                owner,
+                epoch,
+                position,
+                rotation,
+            } => ClientNotice::EntityOwner {
+                id,
+                owner,
+                epoch,
+                position,
+                rotation,
+            },
             ClientEvent::EntitySnapshot { entities } => {
                 self.backlog.extend(
                     entities

@@ -109,6 +109,18 @@ pub enum NetEvent {
         player: u32,
         updates: Vec<EntityTransform>,
     },
+    /// A player asked for an entity it will own, with the id it took from its
+    /// lease. The network does not check it; the server does.
+    CreateEntity {
+        player: u32,
+        id: u32,
+        kind: u8,
+        model: u32,
+        position: [f32; 3],
+        rotation: [f32; 3],
+    },
+    /// A player asked for control of the entity `id`, which no player owns.
+    RequestEntityControl { player: u32, id: u32 },
     /// An accepted player disconnected, was kicked, or broke the protocol.
     Disconnected { player: u32, reason: String },
     /// A connection left before it was accepted or rejected.
@@ -461,6 +473,62 @@ impl NetServer {
             self.post(Command::Send { player, frame })?;
         }
         Ok(())
+    }
+
+    /// Gives one player a block of entity ids to create entities with: the ids
+    /// `first` up to `first + count`, not included.
+    pub fn send_entity_id_lease(
+        &self,
+        player: u32,
+        first: u32,
+        count: u32,
+    ) -> Result<(), NetError> {
+        let frame = encode_frame(
+            &ServerMessage::EntityIdLease { first, count },
+            self.max_frame,
+        )?;
+        self.post(Command::Send { player, frame })
+    }
+
+    /// Tells one player that the entity it asked for, `id`, was refused, and why.
+    pub fn send_entity_create_refused(
+        &self,
+        player: u32,
+        id: u32,
+        reason: &str,
+    ) -> Result<(), NetError> {
+        let frame = encode_frame(
+            &ServerMessage::EntityCreateRefused {
+                id,
+                reason: reason.to_owned(),
+            },
+            self.max_frame,
+        )?;
+        self.post(Command::Send { player, frame })
+    }
+
+    /// Tells one player that the entity `id` has a new owner, `owner` being 0
+    /// for the server, together with its epoch and transform.
+    pub fn send_entity_owner(
+        &self,
+        player: u32,
+        id: u32,
+        owner: u32,
+        epoch: u32,
+        position: [f32; 3],
+        rotation: [f32; 3],
+    ) -> Result<(), NetError> {
+        let frame = encode_frame(
+            &ServerMessage::EntityOwner {
+                id,
+                owner,
+                epoch,
+                position,
+                rotation,
+            },
+            self.max_frame,
+        )?;
+        self.post(Command::Send { player, frame })
     }
 
     /// Tells one player that the entity `id` was deleted, or left its scope.

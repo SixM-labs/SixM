@@ -79,6 +79,12 @@ pub struct TestHost {
     /// Population switches and lockdown modes of buckets, by bucket.
     pub population: RefCell<BTreeMap<u32, bool>>,
     pub lockdown: RefCell<BTreeMap<u32, String>>,
+    /// Orphan modes set on entities by a server host, by entity.
+    pub orphan_modes: RefCell<BTreeMap<u32, String>>,
+    /// Entity ids a client host asked the server to create, in order.
+    pub created_requests: RefCell<Vec<u32>>,
+    /// Entity ids a client host asked the server to give it, in order.
+    pub control_requests: RefCell<Vec<u32>>,
     /// The ped a client host reports as the local player's, once set.
     pub local_ped: Cell<Option<u32>>,
     /// Moves a client host accepted, as `(entity, position, rotation)`, in order.
@@ -431,6 +437,27 @@ impl ServerHost for TestHost {
         Ok(id)
     }
 
+    fn set_entity_owner(&self, entity: u32, owner: u32) -> bool {
+        let mut entities = self.entities.borrow_mut();
+        let Some(info) = entities.get_mut(&entity) else {
+            return false;
+        };
+        info.owner = (owner != 0).then_some(owner);
+        true
+    }
+
+    fn set_entity_orphan_mode(&self, entity: u32, mode: &str) -> Result<(), ScriptError> {
+        if !matches!(mode, "delete" | "migrate") {
+            return Err(ScriptError::Runtime(format!(
+                "unknown orphan mode `{mode}`"
+            )));
+        }
+        self.orphan_modes
+            .borrow_mut()
+            .insert(entity, mode.to_owned());
+        Ok(())
+    }
+
     fn delete_entity(&self, entity: u32) -> bool {
         let existed = self.entities.borrow_mut().remove(&entity).is_some();
         let bag = entity_bag(entity);
@@ -558,6 +585,24 @@ impl ServerHost for TestHost {
 }
 
 impl TestHost {
+    /// Stores an entity of `kind` with the given owner, as the server would
+    /// have it, and returns its id. Ids continue those of the other entities.
+    pub fn create_entity_for_test(&self, kind: EntityKind, owner: Option<u32>) -> u32 {
+        let id = self.last_entity.get() + 1;
+        self.last_entity.set(id);
+        let info = EntityInfo {
+            kind,
+            model: 1,
+            position: [0.0; 3],
+            rotation: [0.0; 3],
+            owner,
+        };
+        self.entities.borrow_mut().insert(id, info);
+        id
+    }
+}
+
+impl TestHost {
     /// Keeps the key-value store in `dir`, so that a later host with the same
     /// folder reads what this one wrote.
     pub fn set_kvp_dir(&self, dir: PathBuf) {
@@ -641,6 +686,40 @@ impl ClientHost for TestHost {
 
     fn local_ped(&self) -> Option<u32> {
         self.local_ped.get()
+    }
+
+    fn create_network_entity(
+        &self,
+        kind: EntityKind,
+        model: u32,
+        position: [f32; 3],
+        rotation: [f32; 3],
+    ) -> Result<u32, ScriptError> {
+        check_transform(position, rotation)?;
+        let id = self.last_entity.get() + 1;
+        self.last_entity.set(id);
+        let info = EntityInfo {
+            kind,
+            model,
+            position,
+            rotation,
+            owner: Some(self.local_player),
+        };
+        self.entities.borrow_mut().insert(id, info);
+        self.created_requests.borrow_mut().push(id);
+        Ok(id)
+    }
+
+    fn request_entity_control(&self, entity: u32) -> Result<bool, ScriptError> {
+        let unowned = self
+            .entities
+            .borrow()
+            .get(&entity)
+            .is_some_and(|info| info.owner.is_none());
+        if unowned {
+            self.control_requests.borrow_mut().push(entity);
+        }
+        Ok(unowned)
     }
 
     /// Applies the move to the entity like the client does, and records it.

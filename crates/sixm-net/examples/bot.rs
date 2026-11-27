@@ -86,6 +86,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             Some(ClientEvent::EntitySnapshot { entities }) => {
                 println!("{} entities exist", entities.len());
             }
+            Some(ClientEvent::EntityIdLease { first, count }) => {
+                println!("leased {count} entity ids from {first}");
+            }
+            Some(ClientEvent::EntityCreateRefused { id, reason }) => {
+                println!("entity {id} refused: {reason}");
+            }
+            Some(ClientEvent::EntityOwner { id, owner, .. }) => {
+                println!("entity {id} owned by {owner}");
+            }
             Some(ClientEvent::Convars { entries }) => {
                 println!("{} replicated convars", entries.len());
             }

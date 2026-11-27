@@ -31,8 +31,8 @@ use crate::files::{
 };
 use crate::protocol::{
     ClientMessage, MAX_COMMAND_LEN, MAX_CONVAR_NAME_LEN, MAX_CONVAR_VALUE_LEN, MAX_DECODED_VALUES,
-    MAX_DEFERRAL_MESSAGE_LEN, MAX_EVENT_NAME_LEN, MAX_LATENT_EVENT_LEN, MAX_TRANSFORMS_PER_MESSAGE,
-    MAX_VALUE_DEPTH, ServerMessage,
+    MAX_DEFERRAL_MESSAGE_LEN, MAX_EVENT_NAME_LEN, MAX_LATENT_EVENT_LEN, MAX_REFUSAL_REASON_LEN,
+    MAX_TRANSFORMS_PER_MESSAGE, MAX_VALUE_DEPTH, ServerMessage,
 };
 
 pub(crate) const FRAME_HEADER_LEN: usize = 4;
@@ -57,6 +57,8 @@ const CLIENT_VARIANTS: &[&str] = &[
     "RequestFile",
     "Command",
     "EntityTransforms",
+    "CreateEntity",
+    "RequestEntityControl",
 ];
 const SERVER_VARIANTS: &[&str] = &[
     "Welcome",
@@ -76,6 +78,9 @@ const SERVER_VARIANTS: &[&str] = &[
     "EntitySnapshot",
     "Convars",
     "Deferral",
+    "EntityIdLease",
+    "EntityCreateRefused",
+    "EntityOwner",
 ];
 /// Most files one snapshot entry carries. Larger resources are split into
 /// several entries of the same name, so one entry always fits a frame.
@@ -992,6 +997,20 @@ impl<'de> Visitor<'de> for ClientMessageVisitor<'_> {
             ClientMessage::ENTITY_TRANSFORMS_TAG => variant
                 .newtype_variant_seed(TransformsSeed::new(self.budget, MAX_TRANSFORMS_PER_MESSAGE))
                 .map(|updates| ClientMessage::EntityTransforms { updates }),
+            ClientMessage::CREATE_ENTITY_TAG => variant
+                .newtype_variant::<(u32, u8, u32, [f32; 3], [f32; 3])>()
+                .map(
+                    |(id, kind, model, position, rotation)| ClientMessage::CreateEntity {
+                        id,
+                        kind,
+                        model,
+                        position,
+                        rotation,
+                    },
+                ),
+            ClientMessage::REQUEST_ENTITY_CONTROL_TAG => variant
+                .newtype_variant::<u32>()
+                .map(|id| ClientMessage::RequestEntityControl { id }),
             other => Err(de::Error::unknown_variant(
                 &other.to_string(),
                 CLIENT_VARIANTS,
@@ -1034,6 +1053,41 @@ impl<'de> Visitor<'de> for ServerMessageVisitor<'_> {
     fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<ServerMessage, A::Error> {
         let (tag, variant): (u32, A::Variant) = data.variant()?;
         match tag {
+            ServerMessage::WELCOME_TAG
+            | ServerMessage::REJECTED_TAG
+            | ServerMessage::EVENT_TAG
+            | ServerMessage::KICKED_TAG
+            | ServerMessage::CONVARS_TAG
+            | ServerMessage::DEFERRAL_TAG => self.visit_session_variant(tag, variant),
+            ServerMessage::STATE_BAG_TAG
+            | ServerMessage::STATE_BAG_REMOVED_TAG
+            | ServerMessage::STATE_SNAPSHOT_TAG
+            | ServerMessage::RESOURCES_TAG
+            | ServerMessage::RESOURCE_STARTED_TAG
+            | ServerMessage::RESOURCE_STOPPED_TAG
+            | ServerMessage::FILE_UNAVAILABLE_TAG => self.visit_resource_variant(tag, variant),
+            ServerMessage::ENTITY_CREATED_TAG
+            | ServerMessage::ENTITY_TRANSFORMS_TAG
+            | ServerMessage::ENTITY_DELETED_TAG
+            | ServerMessage::ENTITY_SNAPSHOT_TAG
+            | ServerMessage::ENTITY_ID_LEASE_TAG
+            | ServerMessage::ENTITY_CREATE_REFUSED_TAG
+            | ServerMessage::ENTITY_OWNER_TAG => self.visit_entity_variant(tag, variant),
+            other => Err(de::Error::unknown_variant(
+                &other.to_string(),
+                SERVER_VARIANTS,
+            )),
+        }
+    }
+}
+
+impl<'de> ServerMessageVisitor<'_> {
+    fn visit_session_variant<V: VariantAccess<'de>>(
+        self,
+        tag: u32,
+        variant: V,
+    ) -> Result<ServerMessage, V::Error> {
+        match tag {
             ServerMessage::WELCOME_TAG => {
                 variant
                     .newtype_variant::<(u32, String)>()
@@ -1053,6 +1107,25 @@ impl<'de> Visitor<'de> for ServerMessageVisitor<'_> {
             ServerMessage::KICKED_TAG => variant
                 .newtype_variant::<String>()
                 .map(|reason| ServerMessage::Kicked { reason }),
+            ServerMessage::CONVARS_TAG => variant
+                .newtype_variant_seed(ConvarsSeed {
+                    budget: self.budget,
+                })
+                .map(|entries| ServerMessage::Convars { entries }),
+            ServerMessage::DEFERRAL_TAG => variant
+                .newtype_variant::<String>()
+                .and_then(checked_deferral::<V::Error>)
+                .map(|message| ServerMessage::Deferral { message }),
+            _ => unreachable!(),
+        }
+    }
+
+    fn visit_resource_variant<V: VariantAccess<'de>>(
+        self,
+        tag: u32,
+        variant: V,
+    ) -> Result<ServerMessage, V::Error> {
+        match tag {
             ServerMessage::STATE_BAG_TAG => variant
                 .newtype_variant_seed(StateSeed {
                     budget: self.budget,
@@ -1082,11 +1155,21 @@ impl<'de> Visitor<'de> for ServerMessageVisitor<'_> {
                 .map(|entry| ServerMessage::ResourceStarted { entry }),
             ServerMessage::RESOURCE_STOPPED_TAG => variant
                 .newtype_variant::<String>()
-                .and_then(|name| checked_name::<A::Error>(name, MAX_RESOURCE_NAME_LEN))
+                .and_then(|name| checked_name::<V::Error>(name, MAX_RESOURCE_NAME_LEN))
                 .map(|name| ServerMessage::ResourceStopped { name }),
             ServerMessage::FILE_UNAVAILABLE_TAG => variant
                 .newtype_variant::<FileHash>()
                 .map(|hash| ServerMessage::FileUnavailable { hash }),
+            _ => unreachable!(),
+        }
+    }
+
+    fn visit_entity_variant<V: VariantAccess<'de>>(
+        self,
+        tag: u32,
+        variant: V,
+    ) -> Result<ServerMessage, V::Error> {
+        match tag {
             ServerMessage::ENTITY_CREATED_TAG => variant
                 .newtype_variant_seed(EntitySeed {
                     budget: self.budget,
@@ -1103,19 +1186,27 @@ impl<'de> Visitor<'de> for ServerMessageVisitor<'_> {
                     budget: self.budget,
                 })
                 .map(|entities| ServerMessage::EntitySnapshot { entities }),
-            ServerMessage::CONVARS_TAG => variant
-                .newtype_variant_seed(ConvarsSeed {
-                    budget: self.budget,
-                })
-                .map(|entries| ServerMessage::Convars { entries }),
-            ServerMessage::DEFERRAL_TAG => variant
-                .newtype_variant::<String>()
-                .and_then(checked_deferral::<A::Error>)
-                .map(|message| ServerMessage::Deferral { message }),
-            other => Err(de::Error::unknown_variant(
-                &other.to_string(),
-                SERVER_VARIANTS,
-            )),
+            ServerMessage::ENTITY_ID_LEASE_TAG => variant
+                .newtype_variant::<(u32, u32)>()
+                .map(|(first, count)| ServerMessage::EntityIdLease { first, count }),
+            ServerMessage::ENTITY_CREATE_REFUSED_TAG => variant
+                .newtype_variant::<(u32, String)>()
+                .and_then(|(id, reason)| {
+                    checked_reason::<V::Error>(reason)
+                        .map(|reason| ServerMessage::EntityCreateRefused { id, reason })
+                }),
+            ServerMessage::ENTITY_OWNER_TAG => variant
+                .newtype_variant::<(u32, u32, u32, [f32; 3], [f32; 3])>()
+                .map(
+                    |(id, owner, epoch, position, rotation)| ServerMessage::EntityOwner {
+                        id,
+                        owner,
+                        epoch,
+                        position,
+                        rotation,
+                    },
+                ),
+            _ => unreachable!(),
         }
     }
 }
@@ -1813,6 +1904,17 @@ fn checked_deferral<E: de::Error>(message: String) -> Result<String, E> {
         )))
     } else {
         Ok(message)
+    }
+}
+
+/// Checks a decoded refusal reason against its limit.
+fn checked_reason<E: de::Error>(reason: String) -> Result<String, E> {
+    if reason.len() > MAX_REFUSAL_REASON_LEN {
+        Err(E::custom(format!(
+            "refusal reason is over {MAX_REFUSAL_REASON_LEN} bytes"
+        )))
+    } else {
+        Ok(reason)
     }
 }
 
@@ -2898,6 +3000,86 @@ mod tests {
             decode_frames(&frames, MAX_FRAME, transforms_of),
             vec![(4, Some([1.0; 3]), Some([45.0; 3]), 3)]
         );
+    }
+
+    #[test]
+    fn entity_creation_and_ownership_messages_round_trip() {
+        let create = ClientMessage::CreateEntity {
+            id: 9,
+            kind: 2,
+            model: 77,
+            position: [1.0, 2.0, 3.0],
+            rotation: [0.0, 0.0, 90.0],
+        };
+        let frame = encode_frame(&create, MAX_FRAME).expect("encodes");
+        match decode_client_message(&frame[FRAME_HEADER_LEN..]) {
+            Ok(ClientMessage::CreateEntity {
+                id: 9,
+                kind: 2,
+                model: 77,
+                position,
+                rotation,
+            }) => assert_eq!((position, rotation), ([1.0, 2.0, 3.0], [0.0, 0.0, 90.0])),
+            other => panic!("unexpected decode: {other:?}"),
+        }
+
+        let control = ClientMessage::RequestEntityControl { id: 4 };
+        let frame = encode_frame(&control, MAX_FRAME).expect("encodes");
+        assert!(matches!(
+            decode_client_message(&frame[FRAME_HEADER_LEN..]),
+            Ok(ClientMessage::RequestEntityControl { id: 4 })
+        ));
+
+        let lease = ServerMessage::EntityIdLease {
+            first: 100,
+            count: 32,
+        };
+        let frame = encode_frame(&lease, MAX_FRAME).expect("encodes");
+        assert!(matches!(
+            decode_server_message(&frame[FRAME_HEADER_LEN..]),
+            Ok(ServerMessage::EntityIdLease {
+                first: 100,
+                count: 32
+            })
+        ));
+
+        let refused = ServerMessage::EntityCreateRefused {
+            id: 101,
+            reason: "locked".to_owned(),
+        };
+        let frame = encode_frame(&refused, MAX_FRAME).expect("encodes");
+        assert!(matches!(
+            decode_server_message(&frame[FRAME_HEADER_LEN..]),
+            Ok(ServerMessage::EntityCreateRefused { id: 101, reason }) if reason == "locked"
+        ));
+
+        let owner = ServerMessage::EntityOwner {
+            id: 5,
+            owner: 3,
+            epoch: 7,
+            position: [4.0, 5.0, 6.0],
+            rotation: [0.0; 3],
+        };
+        let frame = encode_frame(&owner, MAX_FRAME).expect("encodes");
+        assert!(matches!(
+            decode_server_message(&frame[FRAME_HEADER_LEN..]),
+            Ok(ServerMessage::EntityOwner {
+                id: 5,
+                owner: 3,
+                epoch: 7,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn an_overlong_refusal_reason_is_rejected_when_decoded() {
+        let refused = ServerMessage::EntityCreateRefused {
+            id: 1,
+            reason: "x".repeat(MAX_REFUSAL_REASON_LEN + 1),
+        };
+        let frame = encode_frame(&refused, MAX_FRAME).expect("encodes");
+        assert!(decode_server_message(&frame[FRAME_HEADER_LEN..]).is_err());
     }
 
     #[test]

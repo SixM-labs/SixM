@@ -7,7 +7,7 @@
 //! sent once per frame with its latest transform. The owner of an entity may
 //! move it too, and then the other clients receive the owner's transform.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use sixm_core::{
     EntityInfo, EntityKind, EventSource, MAX_ENTITIES, ScriptError, Value, entity_bag, is_finite,
@@ -36,6 +36,11 @@ struct Slot {
     position_dirty: bool,
     /// The rotation changed since the last frame.
     rotation_dirty: bool,
+    /// The client that asked for the entity, or `None` for one a script made.
+    creator: Option<u32>,
+    /// Whether the entity is handed to another player when its creator leaves,
+    /// rather than deleted.
+    migrate_on_orphan: bool,
 }
 
 impl Slot {
@@ -72,6 +77,12 @@ pub(crate) struct EntityStore {
     /// The routing bucket of each entity outside bucket 0. Empty while every
     /// entity is in bucket 0, so the bucket checks cost nothing then.
     buckets: BTreeMap<u32, u32>,
+    /// The ids of the entities each client created, in creation order.
+    created: BTreeMap<u32, Vec<u32>>,
+    /// The id blocks each client may still create entities with, in the order
+    /// it uses them. A block is `(next, end)`: the ids from `next` up to `end`,
+    /// `end` not included, are not yet used.
+    leases: BTreeMap<u32, VecDeque<(u32, u32)>>,
 }
 
 impl Default for EntityStore {
@@ -83,6 +94,8 @@ impl Default for EntityStore {
             owned: BTreeMap::new(),
             grid: None,
             buckets: BTreeMap::new(),
+            created: BTreeMap::new(),
+            leases: BTreeMap::new(),
         }
     }
 }
@@ -180,9 +193,40 @@ impl EntityStore {
         out.dedup();
     }
 
-    /// Stores `info` as a new entity and returns its id. Fails for a transform
-    /// that is not finite, when [`MAX_ENTITIES`] entities exist, or when no ids are left.
+    /// Stores `info` as a new entity made by a script and returns its id. Fails
+    /// for a transform that is not finite, when [`MAX_ENTITIES`] entities exist,
+    /// or when no ids are left.
     pub(crate) fn insert(&mut self, info: EntityInfo) -> Result<u32, ScriptError> {
+        self.check_room(&info)?;
+        let id = self.next_id;
+        if id == 0 {
+            return Err(ScriptError::Runtime("no entity ids are left".to_owned()));
+        }
+        self.next_id = id.checked_add(1).unwrap_or(0);
+        self.place(id, info, None, false);
+        Ok(id)
+    }
+
+    /// Stores `info` as the entity `id`, which a client created with an id
+    /// leased to it. The client is its creator, and `migrate_on_orphan` says
+    /// whether it is handed on when the creator leaves. Fails like
+    /// [`insert`](Self::insert), and when `id` is already an entity.
+    pub(crate) fn insert_created(
+        &mut self,
+        id: u32,
+        info: EntityInfo,
+        creator: u32,
+    ) -> Result<(), ScriptError> {
+        self.check_room(&info)?;
+        if self.by_id.contains_key(&id) {
+            return Err(ScriptError::Runtime(format!("entity {id} already exists")));
+        }
+        self.place(id, info, Some(creator), false);
+        Ok(())
+    }
+
+    /// Checks a new entity's transform and the room left for it.
+    fn check_room(&self, info: &EntityInfo) -> Result<(), ScriptError> {
         check_finite(info.position)?;
         check_finite(info.rotation)?;
         if self.by_id.len() >= MAX_ENTITIES {
@@ -190,11 +234,11 @@ impl EntityStore {
                 "at most {MAX_ENTITIES} entities can exist"
             )));
         }
-        let id = self.next_id;
-        if id == 0 {
-            return Err(ScriptError::Runtime("no entity ids are left".to_owned()));
-        }
-        self.next_id = id.checked_add(1).unwrap_or(0);
+        Ok(())
+    }
+
+    /// Stores a checked entity under `id` and indexes it.
+    fn place(&mut self, id: u32, info: EntityInfo, creator: Option<u32>, migrate_on_orphan: bool) {
         self.by_id.insert(
             id,
             Slot {
@@ -202,6 +246,8 @@ impl EntityStore {
                 epoch: 0,
                 position_dirty: false,
                 rotation_dirty: false,
+                creator,
+                migrate_on_orphan,
             },
         );
         if let Some(grid) = self.grid.as_mut() {
@@ -210,12 +256,15 @@ impl EntityStore {
         if let Some(owner) = info.owner {
             self.owned.entry(owner).or_default().push(id);
         }
-        Ok(id)
+        if let Some(creator) = creator {
+            self.created.entry(creator).or_default().push(id);
+        }
     }
 
     /// Removes the entity `id`, and returns it when it existed.
     pub(crate) fn remove(&mut self, id: u32) -> Option<EntityInfo> {
-        let info = self.by_id.remove(&id)?.info;
+        let slot = self.by_id.remove(&id)?;
+        let info = slot.info;
         self.buckets.remove(&id);
         if let Some(grid) = self.grid.as_mut() {
             grid.remove(id);
@@ -223,7 +272,123 @@ impl EntityStore {
         if let Some(owner) = info.owner {
             self.disown(owner, id);
         }
+        if let Some(creator) = slot.creator {
+            self.uncreate(creator, id);
+        }
         Some(info)
+    }
+
+    /// Drops `id` from the entities `creator` created.
+    fn uncreate(&mut self, creator: u32, id: u32) {
+        if let Some(ids) = self.created.get_mut(&creator) {
+            ids.retain(|&made| made != id);
+            if ids.is_empty() {
+                self.created.remove(&creator);
+            }
+        }
+    }
+
+    /// The ids of the entities `creator` created, in creation order.
+    pub(crate) fn created_by(&self, creator: u32) -> &[u32] {
+        self.created.get(&creator).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether the entity `id` is handed on when its creator leaves.
+    pub(crate) fn migrates_on_orphan(&self, id: u32) -> bool {
+        self.by_id
+            .get(&id)
+            .is_some_and(|slot| slot.migrate_on_orphan)
+    }
+
+    /// Sets whether the entity `id` is handed on when its creator leaves.
+    /// Does nothing for an unknown entity.
+    pub(crate) fn set_migrates_on_orphan(&mut self, id: u32, migrate: bool) {
+        if let Some(slot) = self.by_id.get_mut(&id) {
+            slot.migrate_on_orphan = migrate;
+        }
+    }
+
+    /// Forgets the creator of the entity `id`, once that client has left. The
+    /// entity stays. Does nothing for an unknown entity.
+    pub(crate) fn release_creator(&mut self, id: u32) {
+        let Some(slot) = self.by_id.get_mut(&id) else {
+            return;
+        };
+        if let Some(creator) = slot.creator.take() {
+            self.uncreate(creator, id);
+        }
+    }
+
+    /// Gives the entity `id` to `owner`, or to the server with `None`. The
+    /// entity keeps its teleport epoch, so the new owner starts from the
+    /// current one. Returns `false` when the entity is unknown or already has
+    /// that owner.
+    pub(crate) fn set_owner(&mut self, id: u32, owner: Option<u32>) -> bool {
+        let Some(slot) = self.by_id.get_mut(&id) else {
+            return false;
+        };
+        let previous = std::mem::replace(&mut slot.info.owner, owner);
+        if previous == owner {
+            return false;
+        }
+        if let Some(previous) = previous {
+            self.disown(previous, id);
+        }
+        if let Some(owner) = owner {
+            self.owned.entry(owner).or_default().push(id);
+        }
+        true
+    }
+
+    /// Leases `count` ids to `player`: the ids from the next unused one on, and
+    /// they are never handed to anything else. Returns the first id and the
+    /// count, or `None` when the ids would run out.
+    pub(crate) fn lease_ids(&mut self, player: u32, count: u32) -> Option<(u32, u32)> {
+        let first = self.next_id;
+        let end = first.checked_add(count).filter(|_| first != 0)?;
+        self.next_id = end;
+        self.leases
+            .entry(player)
+            .or_default()
+            .push_back((first, end));
+        Some((first, count))
+    }
+
+    /// The number of ids `player` may still create entities with.
+    pub(crate) fn leased_remaining(&self, player: u32) -> u32 {
+        self.leases.get(&player).map_or(0, |blocks| {
+            blocks
+                .iter()
+                .fold(0, |sum, &(next, end)| sum + (end - next))
+        })
+    }
+
+    /// Uses the leased id `id` of `player`. It must be the next id of the
+    /// player's first block, which is the order the client takes them in.
+    /// Returns `false` and changes nothing otherwise.
+    pub(crate) fn use_leased_id(&mut self, player: u32, id: u32) -> bool {
+        let Some(blocks) = self.leases.get_mut(&player) else {
+            return false;
+        };
+        let Some(front) = blocks.front_mut() else {
+            return false;
+        };
+        if front.0 != id {
+            return false;
+        }
+        front.0 += 1;
+        if front.0 == front.1 {
+            blocks.pop_front();
+        }
+        if blocks.is_empty() {
+            self.leases.remove(&player);
+        }
+        true
+    }
+
+    /// Forgets every id block of `player`, once it has left.
+    pub(crate) fn drop_leases(&mut self, player: u32) {
+        self.leases.remove(&player);
     }
 
     /// Drops `id` from the entities `owner` owns.
@@ -877,5 +1042,132 @@ mod tests {
         assert!(!store.any_bucket(), "a removed entity drops its bucket");
         store.set_bucket(id, 9);
         assert!(!store.any_bucket(), "an unknown entity cannot be moved");
+    }
+}
+
+#[cfg(test)]
+mod client_store_tests {
+    use super::*;
+
+    fn at(kind: EntityKind) -> EntityInfo {
+        EntityInfo {
+            kind,
+            model: 1,
+            position: [1.0, 2.0, 3.0],
+            rotation: [0.0; 3],
+            owner: None,
+        }
+    }
+
+    #[test]
+    fn leases_hand_out_blocks_that_no_script_entity_takes() {
+        let mut store = EntityStore::default();
+        assert_eq!(store.lease_ids(4, 3), Some((1, 3)));
+        assert_eq!(store.leased_remaining(4), 3);
+        let script = store.insert(at(EntityKind::Object)).expect("script entity");
+        assert_eq!(script, 4, "the leased block is skipped");
+        assert_eq!(store.lease_ids(5, 2), Some((5, 2)));
+        assert_eq!(store.leased_remaining(5), 2);
+        assert_eq!(store.leased_remaining(9), 0, "an unknown player has none");
+    }
+
+    #[test]
+    fn leased_ids_are_used_in_order_and_only_once() {
+        let mut store = EntityStore::default();
+        store.lease_ids(4, 2).expect("block");
+        assert!(!store.use_leased_id(4, 2), "the first id is 1, not 2");
+        assert!(store.use_leased_id(4, 1));
+        assert!(!store.use_leased_id(4, 1), "an id is used once");
+        assert!(store.use_leased_id(4, 2));
+        assert_eq!(store.leased_remaining(4), 0);
+        assert!(!store.use_leased_id(4, 3), "the block is used up");
+        assert!(!store.use_leased_id(7, 1), "no block for another player");
+    }
+
+    #[test]
+    fn leased_ids_run_out_before_the_last_id() {
+        let mut store = EntityStore {
+            next_id: u32::MAX - 1,
+            ..EntityStore::default()
+        };
+        assert_eq!(store.lease_ids(4, 1), Some((u32::MAX - 1, 1)));
+        assert_eq!(store.lease_ids(4, 5), None, "the ids would overflow");
+    }
+
+    #[test]
+    fn client_entities_count_against_their_creator() {
+        let mut store = EntityStore::default();
+        store.lease_ids(4, 2).expect("block");
+        assert!(store.use_leased_id(4, 1));
+        let owned_by_creator = EntityInfo {
+            owner: Some(4),
+            ..at(EntityKind::Vehicle)
+        };
+        store
+            .insert_created(1, owned_by_creator, 4)
+            .expect("created");
+        assert_eq!(store.created_by(4), &[1]);
+        assert_eq!(store.owned(4), &[1], "the creator owns its entity");
+        assert!(store.insert_created(1, owned_by_creator, 4).is_err());
+
+        store.remove(1);
+        assert_eq!(store.created_by(4), &[] as &[u32]);
+    }
+
+    #[test]
+    fn a_created_entity_must_be_finite_and_within_the_limit() {
+        let mut store = EntityStore::default();
+        let mut bad = at(EntityKind::Ped);
+        bad.rotation = [f32::NAN, 0.0, 0.0];
+        assert!(store.insert_created(1, bad, 4).is_err());
+        assert!(store.get(1).is_none());
+    }
+
+    #[test]
+    fn a_handover_keeps_the_epoch_and_moves_the_owner_index() {
+        let mut store = EntityStore::default();
+        let ped = store.insert(at(EntityKind::Ped)).expect("entity");
+        store
+            .set_position(ped, [9.0, 9.0, 9.0])
+            .expect("server move");
+        assert_eq!(store.info_and_epoch(ped).map(|(_, epoch)| epoch), Some(1));
+
+        assert!(store.set_owner(ped, Some(4)));
+        assert_eq!(store.owned(4), &[ped]);
+        assert_eq!(store.info_and_epoch(ped).map(|(_, epoch)| epoch), Some(1));
+        assert!(
+            store.owner_move(4, ped, Some([1.0; 3]), None, 1),
+            "the new owner starts at the current epoch"
+        );
+
+        assert!(
+            !store.set_owner(ped, Some(4)),
+            "the same owner changes nothing"
+        );
+        assert!(store.set_owner(ped, Some(5)));
+        assert_eq!(store.owned(4), &[] as &[u32]);
+        assert_eq!(store.owned(5), &[ped]);
+        assert!(store.set_owner(ped, None));
+        assert_eq!(store.owned(5), &[] as &[u32]);
+        assert!(!store.set_owner(99, Some(4)), "an unknown entity");
+    }
+
+    #[test]
+    fn an_orphaned_creation_can_be_kept_by_releasing_its_creator() {
+        let mut store = EntityStore::default();
+        store.lease_ids(4, 2).expect("block");
+        assert!(store.use_leased_id(4, 1));
+        store
+            .insert_created(1, at(EntityKind::Object), 4)
+            .expect("created");
+        assert!(!store.migrates_on_orphan(1));
+        store.set_migrates_on_orphan(1, true);
+        assert!(store.migrates_on_orphan(1));
+
+        store.release_creator(1);
+        assert_eq!(store.created_by(4), &[] as &[u32]);
+        assert!(store.get(1).is_some(), "the entity stays");
+        store.drop_leases(4);
+        assert_eq!(store.leased_remaining(4), 0);
     }
 }

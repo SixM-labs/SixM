@@ -240,9 +240,13 @@ fn joining_client_with_thousands_of_replicated_keys_is_not_kicked() {
     h.wait_for("the whole snapshot", || {
         while let Some(event) = alice.recv_timeout(Duration::ZERO) {
             match event {
-                // The resource list comes first on join, and the player's own ped
-                // is in the entity snapshot. Neither is under test here.
-                ClientEvent::Resources { .. } | ClientEvent::EntitySnapshot { .. } => {}
+                // The join snapshot also sends the entity id lease, replicated
+                // convars, the player's own ped and the resource list. None is
+                // under test here.
+                ClientEvent::Resources { .. }
+                | ClientEvent::EntitySnapshot { .. }
+                | ClientEvent::Convars { .. }
+                | ClientEvent::EntityIdLease { .. } => {}
                 ClientEvent::StateBag { bag, key, value } => {
                     assert_eq!(bag, "global");
                     received.insert(key, value);

@@ -22,6 +22,15 @@ may change the protocol and the API.
   memory; a background thread appends CRC-checked records to one log per
   resource and compacts it, so the frame never waits for the disk. The server
   folder is `sixm_kvpPath`.
+- Client-created networked entities and ownership migration: clients can call
+  `CreateVehicle`, `CreatePed` and `CreateObject` (`isNetwork = true`) using
+  leased id blocks so the returned id is usable immediately, plus
+  `NetworkRequestControlOfEntity` and `NetworkGetEntityOwner`. The server
+  enforces `sixm_maxClientEntities` (default 64, replicated),
+  `sv_entityLockdown` and per-bucket lockdown modes, and fires the cancellable
+  `entityCreating` event; `SetEntityOwner` and `SetEntityOrphanMode` control
+  ownership and orphan handling, migrating ownership to the nearest in-scope
+  player or the server while preserving teleport epochs.
 - Routing buckets on the server: `SetPlayerRoutingBucket`,
   `GetPlayerRoutingBucket`, `SetEntityRoutingBucket`, `GetEntityRoutingBucket`,
   `GetPlayersInRoutingBucket`, and the stored population and entity lockdown
