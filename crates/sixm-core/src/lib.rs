@@ -31,3 +31,13 @@ pub use runtime::{
 };
 pub use state::{GLOBAL_BAG, MAX_STATE_NAME_LEN, player_bag, player_of_bag};
 pub use value::{FuncRef, ResourceName, Value};
+
+static GAME_TIMER_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Milliseconds since the process first asked for the game timer.
+pub fn game_timer_ms() -> i64 {
+    let elapsed = GAME_TIMER_START
+        .get_or_init(std::time::Instant::now)
+        .elapsed();
+    i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+}

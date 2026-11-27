@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::fmt;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -551,7 +552,7 @@ pub trait ClientHost {
 ///
 /// All methods are re-entrant: a call may arrive while the same runtime is
 /// already executing script code further up the stack.
-pub trait ScriptRuntime {
+pub trait ScriptRuntime: fmt::Debug {
     fn resource(&self) -> &ResourceName;
 
     /// Unique per start of the resource; see [`FuncRef::instance`].
