@@ -1293,7 +1293,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sixm-client"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ctrlc",
  "sixm-core",
@@ -1310,7 +1310,7 @@ dependencies = [
 
 [[package]]
 name = "sixm-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
@@ -1320,7 +1320,7 @@ dependencies = [
 
 [[package]]
 name = "sixm-js"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "rquickjs",
  "sixm-core",
@@ -1331,7 +1331,7 @@ dependencies = [
 
 [[package]]
 name = "sixm-kvp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "tempfile",
  "tracing",
@@ -1339,7 +1339,7 @@ dependencies = [
 
 [[package]]
 name = "sixm-lua"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "mlua",
  "serde_json",
@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "sixm-net"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "http-body-util",
@@ -1372,7 +1372,7 @@ dependencies = [
 
 [[package]]
 name = "sixm-resources"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "globset",
  "mlua",
@@ -1385,7 +1385,7 @@ dependencies = [
 
 [[package]]
 name = "sixm-server"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ctrlc",
  "ring",

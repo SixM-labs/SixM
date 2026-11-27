@@ -7,6 +7,8 @@ may change the protocol and the API.
 
 ## [Unreleased]
 
+## [0.2.1]
+
 ### Changed
 
 - Resource file APIs reject symbolic links, device names, and paths that
@@ -174,6 +176,7 @@ client (`SimAdapter`) are complete.
   or with the built-in simulated adapter (`--sim`).
 - `LoadResourceFile` on the client only sees the resource's own data folder.
 
-[Unreleased]: https://github.com/SixM-labs/SixM/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/SixM-labs/SixM/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/SixM-labs/SixM/releases/tag/v0.2.1
 [0.2.0]: https://github.com/SixM-labs/SixM/releases/tag/v0.2.0
 [0.1.0]: https://github.com/SixM-labs/SixM/releases/tag/v0.1.0
