@@ -13,9 +13,10 @@
 //! are sent.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
-use sixm_core::{EntityInfo, ScriptError, Value, entity_bag};
+use sixm_core::{EntityInfo, ScriptError, entity_bag};
 use sixm_net::{EntityEntry, EntityStateUpdate, NetServer};
 use tracing::warn;
 
@@ -33,6 +34,22 @@ struct Location {
     index: usize,
 }
 
+/// Whether two positions have identical bit patterns.
+fn same_position(a: [f32; 3], b: [f32; 3]) -> bool {
+    a[0].to_bits() == b[0].to_bits()
+        && a[1].to_bits() == b[1].to_bits()
+        && a[2].to_bits() == b[2].to_bits()
+}
+
+/// Whether two optional ped positions have identical bit patterns.
+fn same_center(a: Option<[f32; 3]>, b: Option<[f32; 3]>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => same_position(a, b),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 /// Entities bucketed by the cell of their x and y, for finding the entities
 /// near a point.
 ///
@@ -45,6 +62,9 @@ pub(crate) struct Grid {
     size: f64,
     cells: HashMap<Cell, Vec<(u32, [f32; 3])>>,
     locations: HashMap<u32, Location>,
+    /// Cells where an entity entered, left, moved, or changed bucket since
+    /// the last scope refresh.
+    dirty_cells: HashSet<Cell>,
 }
 
 impl Grid {
@@ -54,6 +74,7 @@ impl Grid {
             size: f64::from(size),
             cells: HashMap::new(),
             locations: HashMap::new(),
+            dirty_cells: HashSet::new(),
         }
     }
 
@@ -73,12 +94,14 @@ impl Grid {
     pub(crate) fn insert(&mut self, id: u32, position: [f32; 3]) {
         let cell = self.cell_of(position);
         self.place(id, cell, position);
+        self.dirty_cells.insert(cell);
     }
 
     /// Removes entity `id`, when it is in the grid.
     pub(crate) fn remove(&mut self, id: u32) {
         if let Some(location) = self.locations.remove(&id) {
             self.detach(location);
+            self.dirty_cells.insert(location.cell);
         }
     }
 
@@ -92,9 +115,46 @@ impl Grid {
         if location.cell != cell {
             self.detach(location);
             self.place(id, cell, position);
-        } else if let Some(bucket) = self.cells.get_mut(&cell) {
+            self.dirty_cells.insert(location.cell);
+            self.dirty_cells.insert(cell);
+        } else if let Some(bucket) = self.cells.get_mut(&cell)
+            && !same_position(bucket[location.index].1, position)
+        {
             bucket[location.index].1 = position;
+            self.dirty_cells.insert(cell);
         }
+    }
+
+    /// The cell that holds `id`, if it is in the grid.
+    pub(crate) fn cell_of_entity(&self, id: u32) -> Option<Cell> {
+        self.locations.get(&id).map(|location| location.cell)
+    }
+
+    /// Marks `cell` as needing a scope check on the next refresh.
+    pub(crate) fn mark_dirty(&mut self, cell: Cell) {
+        self.dirty_cells.insert(cell);
+    }
+
+    /// Whether any of the nine cells around `position` changed since the last
+    /// scope refresh.
+    pub(crate) fn any_dirty_near(&self, position: [f32; 3]) -> bool {
+        if self.dirty_cells.is_empty() {
+            return false;
+        }
+        let (x, y) = self.cell_of(position);
+        for cx in x.saturating_sub(1)..=x.saturating_add(1) {
+            for cy in y.saturating_sub(1)..=y.saturating_add(1) {
+                if self.dirty_cells.contains(&(cx, cy)) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Clears the dirty cells after a scope refresh.
+    pub(crate) fn clear_dirty(&mut self) {
+        self.dirty_cells.clear();
     }
 
     /// Appends entity `id` to `cell`.
@@ -180,6 +240,19 @@ fn bucket_in(buckets: &BTreeMap<u32, u32>, player: u32) -> u32 {
     buckets.get(&player).copied().unwrap_or(0)
 }
 
+/// Per-player scope state and the inputs from its last refresh.
+#[derive(Debug, Default)]
+pub(crate) struct PlayerScope {
+    /// Sorted list of entity ids currently held by the player.
+    pub(crate) entities: Vec<u32>,
+    /// Ped position used on the last refresh or join.
+    last_center: Option<[f32; 3]>,
+    /// Routing bucket used on the last refresh or join.
+    last_bucket: u32,
+    /// Forces a recompute on the next refresh even if no nearby cells changed.
+    dirty: bool,
+}
+
 /// The scope state of the server.
 ///
 /// Each admitted player has a sorted list of the entity ids it was sent and
@@ -191,10 +264,12 @@ pub(crate) struct Scopes {
     /// The radius in metres in use. Zero while scoping is off.
     radius: f32,
     /// Every admitted player, with the ids of the entities it holds.
-    pub(crate) players: BTreeMap<u32, Vec<u32>>,
+    pub(crate) players: BTreeMap<u32, PlayerScope>,
     /// The routing bucket of each player outside bucket 0. A player without
     /// an entry is in bucket 0.
     pub(crate) buckets: BTreeMap<u32, u32>,
+    /// Whether every player's scope must be recomputed on the next refresh.
+    all_dirty: bool,
     /// Scratch lists reused between frames: the scope being computed, the
     /// entities that entered and left, and the per-player update batches.
     next: Vec<u32>,
@@ -234,7 +309,7 @@ impl ResourceManager {
         scopes
             .players
             .get(&player)
-            .is_some_and(|scope| scope.binary_search(&entity).is_ok())
+            .is_some_and(|scope| scope.entities.binary_search(&entity).is_ok())
     }
 
     /// Adds `player` to the scopes and returns the entities it is sent when it
@@ -244,7 +319,15 @@ impl ResourceManager {
         let scopes = &mut *guard;
         let bucket = bucket_in(&scopes.buckets, player);
         if scopes.radius <= 0.0 {
-            scopes.players.insert(player, Vec::new());
+            scopes.players.insert(
+                player,
+                PlayerScope {
+                    entities: Vec::new(),
+                    last_center: None,
+                    last_bucket: bucket,
+                    dirty: true,
+                },
+            );
             let entities = self.entities.borrow();
             return entities
                 .all()
@@ -267,7 +350,15 @@ impl ResourceManager {
                     .map(|(info, state, epoch)| EntityEntry::from((id, info, state, epoch)))
             })
             .collect();
-        scopes.players.insert(player, scopes.next.clone());
+        scopes.players.insert(
+            player,
+            PlayerScope {
+                entities: scopes.next.clone(),
+                last_center: center,
+                last_bucket: bucket,
+                dirty: false,
+            },
+        );
         entries
     }
 
@@ -324,8 +415,8 @@ impl ResourceManager {
             if !visible {
                 continue;
             }
-            if let Err(at) = scope.binary_search(&id) {
-                scope.insert(at, id);
+            if let Err(at) = scope.entities.binary_search(&id) {
+                scope.entities.insert(at, id);
             }
             self.with_server(|server| {
                 if let Err(err) = server.send_entity_created(player, entry) {
@@ -362,49 +453,45 @@ impl ResourceManager {
             return;
         }
         for (&player, scope) in &mut scopes.players {
-            if let Ok(at) = scope.binary_search(&id) {
-                scope.remove(at);
+            if let Ok(at) = scope.entities.binary_search(&id) {
+                scope.entities.remove(at);
                 self.send_removed_to(player, id);
             }
         }
     }
 
-    /// Sends a replicated write to an entity bag to the players that hold the
-    /// entity. Every other bag is broadcast.
+    /// Sends a pre-encoded replicated write for `entity`'s state bag to the
+    /// players that hold the entity.
     pub(crate) fn send_entity_state(
         &self,
         server: &NetServer,
         entity: u32,
-        bag: &str,
-        key: &str,
-        value: &Value,
+        frame: &Arc<[u8]>,
     ) -> Result<(), ScriptError> {
         let scopes = self.scopes.borrow();
         for (&player, scope) in &scopes.players {
-            if scope.binary_search(&entity).is_ok() {
+            if scope.entities.binary_search(&entity).is_ok() {
                 server
-                    .send_state(player, bag, key, value)
+                    .send_encoded(player, Arc::clone(frame))
                     .map_err(|err| ScriptError::Runtime(err.to_string()))?;
             }
         }
         Ok(())
     }
 
-    /// Sends a replicated write to an entity bag to the players of `bucket`,
-    /// for scoping off while buckets are in use.
+    /// Sends a pre-encoded replicated write for an entity bag to the players
+    /// of `bucket`, for scoping off while buckets are in use.
     pub(crate) fn send_state_in_bucket(
         &self,
         server: &NetServer,
         bucket: u32,
-        bag: &str,
-        key: &str,
-        value: &Value,
+        frame: &Arc<[u8]>,
     ) -> Result<(), ScriptError> {
         let scopes = self.scopes.borrow();
         for &player in scopes.players.keys() {
             if bucket_in(&scopes.buckets, player) == bucket {
                 server
-                    .send_state(player, bag, key, value)
+                    .send_encoded(player, Arc::clone(frame))
                     .map_err(|err| ScriptError::Runtime(err.to_string()))?;
             }
         }
@@ -430,8 +517,8 @@ impl ResourceManager {
                 let all: Vec<u32> = entities.ids_ascending().collect();
                 for (&player, scope) in &mut scopes.players {
                     let bucket = bucket_in(&scopes.buckets, player);
-                    scope.clear();
-                    scope.extend(
+                    scope.entities.clear();
+                    scope.entities.extend(
                         all.iter()
                             .copied()
                             .filter(|&id| entities.in_bucket(id, bucket)),
@@ -439,10 +526,11 @@ impl ResourceManager {
                 }
             }
             entities.set_grid(Some(radius));
+            scopes.all_dirty = true;
         } else {
             for (&player, scope) in &mut scopes.players {
                 let bucket = bucket_in(&scopes.buckets, player);
-                let mut held = scope.iter().copied().peekable();
+                let mut held = scope.entities.iter().copied().peekable();
                 for id in entities.ids_ascending() {
                     while held.peek().is_some_and(|&known| known < id) {
                         held.next();
@@ -451,34 +539,59 @@ impl ResourceManager {
                         self.send_entity_to(player, id, &entities);
                     }
                 }
-                scope.clear();
+                scope.entities.clear();
+                scope.last_center = None;
+                scope.dirty = true;
             }
             entities.set_grid(None);
+            scopes.all_dirty = false;
         }
         scopes.radius = radius;
     }
 
-    /// Recomputes the scope of every player, and sends the entities that
-    /// entered or left each one.
+    /// Recomputes the scope of every player whose ped moved or whose nearby
+    /// cells or owned entities changed since the last refresh, and sends the
+    /// entities that entered or left each one.
     pub(crate) fn refresh_scopes(&self) {
         let mut guard = self.scopes.borrow_mut();
         let scopes = &mut *guard;
-        let entities = self.entities.borrow();
+        let mut entities = self.entities.borrow_mut();
+        let all_dirty = scopes.all_dirty;
+        scopes.all_dirty = false;
+        let has_dirty_owners = entities.has_dirty_owners();
         for (&player, scope) in &mut scopes.players {
             let center = self
                 .ped_of_player(player)
                 .and_then(|ped| entities.position(ped));
             let bucket = bucket_in(&scopes.buckets, player);
+            let needs_refresh = all_dirty
+                || scope.dirty
+                || !same_center(scope.last_center, center)
+                || scope.last_bucket != bucket
+                || (has_dirty_owners && entities.is_owner_dirty(player))
+                || center.is_some_and(|at| entities.any_dirty_near(at));
+            if !needs_refresh {
+                continue;
+            }
+            scope.dirty = false;
+            scope.last_center = center;
+            scope.last_bucket = bucket;
             entities.scope_into(player, center, scopes.radius, bucket, &mut scopes.next);
-            diff(scope, &scopes.next, &mut scopes.entered, &mut scopes.left);
+            diff(
+                &scope.entities,
+                &scopes.next,
+                &mut scopes.entered,
+                &mut scopes.left,
+            );
             for &id in &scopes.entered {
                 self.send_entity_to(player, id, &entities);
             }
             for &id in &scopes.left {
                 self.send_removed_to(player, id);
             }
-            std::mem::swap(scope, &mut scopes.next);
+            std::mem::swap(&mut scope.entities, &mut scopes.next);
         }
+        entities.clear_scope_dirty();
     }
 
     /// Sends each player the transforms, from `updates`, of the entities it
@@ -494,7 +607,7 @@ impl ResourceManager {
             scopes.batch.extend(
                 updates
                     .iter()
-                    .filter(|update| scope.binary_search(&update.0).is_ok())
+                    .filter(|update| scope.entities.binary_search(&update.0).is_ok())
                     .copied(),
             );
             if scopes.batch.is_empty() {
@@ -521,7 +634,7 @@ impl ResourceManager {
             scopes.state_batch.extend(
                 updates
                     .iter()
-                    .filter(|update| scope.binary_search(&update.id).is_ok())
+                    .filter(|update| scope.entities.binary_search(&update.id).is_ok())
                     .copied(),
             );
             if scopes.state_batch.is_empty() {
@@ -602,6 +715,7 @@ impl ResourceManager {
                 let mut entities = self.entities.borrow_mut();
                 let mut scopes = self.scopes.borrow_mut();
                 change(&mut entities, &mut scopes);
+                scopes.all_dirty = true;
             }
             self.refresh_scopes();
             return;
@@ -834,5 +948,281 @@ mod tests {
         assert_eq!(scope, Vec::<u32>::new());
         store.scope_into(1, Some([500.0, 0.0, 0.0]), 50.0, 0, &mut scope);
         assert_eq!(scope, vec![id]);
+    }
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn range(&mut self, bound: usize) -> usize {
+            usize::try_from(self.next() % u64::try_from(bound).unwrap()).unwrap()
+        }
+
+        fn coord(&mut self, span: f32) -> f32 {
+            let step = u16::try_from(self.next() % 10_000).unwrap();
+            let unit = f32::from(step) / 10_000.0;
+            (unit * 2.0 - 1.0) * span
+        }
+    }
+
+    fn apply_random_mutation(
+        manager: &ResourceManager,
+        rng: &mut Rng,
+        active_players: &mut Vec<(u32, Option<u32>)>,
+        next_player: &mut u32,
+        entity_ids: &mut Vec<u32>,
+    ) {
+        match rng.range(8) {
+            0..=2 if !entity_ids.is_empty() => {
+                let id = entity_ids[rng.range(entity_ids.len())];
+                let pos = manager.entities.borrow().position(id);
+                if let Some(pos) = pos {
+                    let new_pos = if rng.range(2) == 0 {
+                        // Small move likely inside the same cell.
+                        [pos[0] + rng.coord(15.0), pos[1] + rng.coord(15.0), 0.0]
+                    } else {
+                        // Large jump across cells.
+                        [rng.coord(180.0), rng.coord(180.0), 0.0]
+                    };
+                    let _ = manager.entities.borrow_mut().set_position(id, new_pos);
+                }
+            }
+            3 => {
+                let owner = if rng.range(3) == 0 && !active_players.is_empty() {
+                    Some(active_players[rng.range(active_players.len())].0)
+                } else {
+                    None
+                };
+                let pos = [rng.coord(180.0), rng.coord(180.0), 0.0];
+                if let Ok(id) = manager.spawn_entity(info(owner, pos)) {
+                    entity_ids.push(id);
+                }
+            }
+            4 if entity_ids.len() > 15 => {
+                let idx = rng.range(entity_ids.len());
+                let id = entity_ids[idx];
+                let is_ped = active_players.iter().any(|(_, ped)| *ped == Some(id));
+                if !is_ped {
+                    entity_ids.swap_remove(idx);
+                    manager.remove_entity(id);
+                }
+            }
+            5 if !entity_ids.is_empty() && !active_players.is_empty() => {
+                let id = entity_ids[rng.range(entity_ids.len())];
+                let new_owner = if rng.range(2) == 0 {
+                    Some(active_players[rng.range(active_players.len())].0)
+                } else {
+                    None
+                };
+                manager.change_owner(id, new_owner);
+            }
+            6 if !active_players.is_empty() => {
+                if rng.range(2) == 0 {
+                    let pid = active_players[rng.range(active_players.len())].0;
+                    let bucket = u32::try_from(rng.range(3)).unwrap();
+                    manager.route_player(pid, bucket);
+                } else if !entity_ids.is_empty() {
+                    let id = entity_ids[rng.range(entity_ids.len())];
+                    let bucket = u32::try_from(rng.range(3)).unwrap();
+                    manager.route_entity(id, bucket);
+                }
+            }
+            _ => {
+                if rng.range(2) == 0 && active_players.len() < 12 {
+                    let pid = *next_player;
+                    *next_player += 1;
+                    let ped = if rng.range(4) == 0 {
+                        None
+                    } else {
+                        let ped = manager
+                            .spawn_entity(info(
+                                Some(pid),
+                                [rng.coord(150.0), rng.coord(150.0), 0.0],
+                            ))
+                            .unwrap();
+                        entity_ids.push(ped);
+                        Some(ped)
+                    };
+                    manager
+                        .network
+                        .players
+                        .borrow_mut()
+                        .insert_test_player(pid, ped);
+                    manager.join_scope(pid);
+                    active_players.push((pid, ped));
+                } else if active_players.len() > 3 {
+                    let idx = rng.range(active_players.len());
+                    let (pid, ped) = active_players.swap_remove(idx);
+                    if let Some(ped) = ped {
+                        entity_ids.retain(|&id| id != ped);
+                        manager.remove_entity(ped);
+                    }
+                    manager.leave_scope(pid);
+                    manager.network.players.borrow_mut().remove_test_player(pid);
+                }
+            }
+        }
+    }
+
+    fn brute_force_scope(manager: &ResourceManager, player: u32, radius: f32) -> Vec<u32> {
+        let entities = manager.entities.borrow();
+        let scopes = manager.scopes.borrow();
+        let bucket = bucket_in(&scopes.buckets, player);
+        let center = manager
+            .ped_of_player(player)
+            .and_then(|ped| entities.position(ped));
+        let limit = radius * radius;
+        entities
+            .all()
+            .into_iter()
+            .filter_map(|(id, info, _, _)| {
+                if !entities.in_bucket(id, bucket) {
+                    return None;
+                }
+                let owned = info.owner == Some(player);
+                let near = center.is_some_and(|at| squared_distance(at, info.position) <= limit);
+                (owned || near).then_some(id)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn stationary_players_with_no_nearby_changes_skip_recompute() {
+        let manager = ResourceManager::new();
+        manager.apply_cull_radius(50.0);
+
+        let ped1 = manager
+            .spawn_entity(info(Some(1), [0.0, 0.0, 0.0]))
+            .unwrap();
+        let ped2 = manager
+            .spawn_entity(info(Some(2), [500.0, 500.0, 0.0]))
+            .unwrap();
+        manager
+            .network
+            .players
+            .borrow_mut()
+            .insert_test_player(1, Some(ped1));
+        manager
+            .network
+            .players
+            .borrow_mut()
+            .insert_test_player(2, Some(ped2));
+        manager.join_scope(1);
+        manager.join_scope(2);
+
+        let same_cell_outside = manager.spawn_entity(info(None, [49.0, 15.0, 0.0])).unwrap();
+        let far_entity = manager
+            .spawn_entity(info(None, [505.0, 500.0, 0.0]))
+            .unwrap();
+
+        manager.refresh_scopes();
+        assert!(!manager.in_scope(1, same_cell_outside));
+        assert!(manager.in_scope(2, far_entity));
+
+        // Move far_entity near player 2 only; player 1's 3x3 cells are clean.
+        manager
+            .entities
+            .borrow_mut()
+            .set_position(far_entity, [510.0, 500.0, 0.0])
+            .unwrap();
+        assert!(
+            !manager.entities.borrow().any_dirty_near([0.0, 0.0, 0.0]),
+            "distant move does not dirty player 1's neighborhood"
+        );
+        assert!(
+            manager
+                .entities
+                .borrow()
+                .any_dirty_near([500.0, 500.0, 0.0]),
+            "nearby move dirties player 2's neighborhood"
+        );
+        manager.refresh_scopes();
+
+        // Moving an entity within the same cell across the exact radius edge
+        // must still update player 1's scope.
+        manager
+            .entities
+            .borrow_mut()
+            .set_position(same_cell_outside, [49.0, 5.0, 0.0])
+            .unwrap();
+        assert!(manager.entities.borrow().any_dirty_near([0.0, 0.0, 0.0]));
+        manager.refresh_scopes();
+        assert!(manager.in_scope(1, same_cell_outside));
+    }
+
+    #[test]
+    fn optimized_refresh_matches_brute_force_across_mutations() {
+        let manager = ResourceManager::new();
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        let mut radius = 50.0_f32;
+        manager.apply_cull_radius(radius);
+
+        let mut active_players: Vec<(u32, Option<u32>)> = Vec::new();
+        let mut next_player = 1_u32;
+        let mut entity_ids: Vec<u32> = Vec::new();
+
+        for _ in 0..8 {
+            let pid = next_player;
+            next_player += 1;
+            let ped = manager
+                .spawn_entity(info(Some(pid), [rng.coord(150.0), rng.coord(150.0), 0.0]))
+                .unwrap();
+            manager
+                .network
+                .players
+                .borrow_mut()
+                .insert_test_player(pid, Some(ped));
+            manager.join_scope(pid);
+            active_players.push((pid, Some(ped)));
+            entity_ids.push(ped);
+        }
+
+        for _ in 0..40 {
+            let id = manager
+                .spawn_entity(info(None, [rng.coord(150.0), rng.coord(150.0), 0.0]))
+                .unwrap();
+            entity_ids.push(id);
+        }
+
+        for frame in 0..400 {
+            // Every 50 frames, vary cull radius (including disabling and re-enabling).
+            if frame % 50 == 25 {
+                let choices = [25.0, 50.0, 120.0, 0.0, 50.0];
+                radius = choices[rng.range(choices.len())];
+                manager.apply_cull_radius(radius);
+            }
+
+            // Apply random mutations each frame.
+            let ops = 1 + rng.range(12);
+            for _ in 0..ops {
+                apply_random_mutation(
+                    &manager,
+                    &mut rng,
+                    &mut active_players,
+                    &mut next_player,
+                    &mut entity_ids,
+                );
+            }
+
+            if radius > 0.0 {
+                manager.refresh_scopes();
+                for &(pid, _) in &active_players {
+                    let expected = brute_force_scope(&manager, pid, radius);
+                    let actual = manager.scopes.borrow().players[&pid].entities.clone();
+                    assert_eq!(
+                        actual, expected,
+                        "scope mismatch for player {pid} on frame {frame} (radius {radius})"
+                    );
+                }
+            }
+        }
     }
 }
