@@ -144,6 +144,28 @@ Client (`EventSource::Local`):
 
 The client has no `onResourceStarting`. Clients do not cancel starts.
 
+### Events provided by the `chat` resource
+
+These resource events are available only while the example `[system]/chat`
+resource is running. The event names follow the stock chat contract; SixM's
+headless client renders them as console text and has no chat UI.
+
+| Event | Side and arguments | Behavior |
+|---|---|---|
+| `_chat:messageEntered` | Client to server: `text` | The headless `say` command sends only the text. The server takes the player ID from the connection's `source`, checks `command.say`, and derives the author with `GetPlayerName`; client-supplied identity fields are ignored. |
+| `chat:init` | Client to server: none | Requests command suggestions for this client. The server responds with `chat:addSuggestions` built from `GetRegisteredCommands()`. |
+| `chatMessage` | Server local: `playerId`, `author`, `text` | Cancelable legacy message hook. Here `source` is `""`; the first explicit argument is the sender ID (`0` for console). If any synchronous handler calls `CancelEvent()`, the chat resource does not broadcast the message. |
+| `chat:addMessage` | Client: `message` object | The default broadcast is `{ args = { author, text } }`. `args` is required; optional `color`, `multiline`, `template` and `templateId` are accepted. The headless client prints scalar args as `author: text`; it strips HTML tags and substitutes `{0}`, `{1}`, … when a template is used. Color and multiline formatting are ignored, and template HTML is never executed. |
+| `chat:addTemplate` | Client: `templateID`, `htmlString` | Stores a template for later plain-text rendering. Markup is stripped; no HTML runs. |
+| `chat:addSuggestion` | Client: `commandName`, `commandDescription`, `commandParameters` | Stores or replaces one slash-prefixed command suggestion. |
+| `chat:addSuggestions` | Client: `suggestions` array | Stores or replaces the listed suggestions. The automatic response contains `{ name = '/command', help = '', params = {} }` for each server command. Use the headless `chat_suggestions` command to list them. |
+| `chat:removeSuggestion` | Client: `commandName` | Removes that suggestion. |
+| `chat:clear` | Client: no arguments | Prints a marker; the append-only console log cannot erase prior output. |
+
+Client chat events are network-safe so the server can send them with
+`TriggerClientEvent`; they can also be triggered locally. Malformed display,
+template or suggestion payloads are warned about and ignored.
+
 ### Deferrals
 
 `playerConnecting` receives a third argument, `deferrals`, a table of three

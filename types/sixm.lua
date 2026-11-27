@@ -242,7 +242,31 @@ function Citizen.InvokeNative(hash, ...) end
 ---@type string | integer
 source = ""
 
+--- A message received from the running `chat` resource.
+---@class SixMChatMessage
+---@field args (string | number | boolean)[]
+---@field color? number[] RGB channels in order.
+---@field multiline? boolean
+---@field template? string
+---@field templateId? string
+
+---@class SixMChatParameter
+---@field name string
+---@field help? string
+
+---@class SixMChatSuggestion
+---@field name string Slash-prefixed command name.
+---@field help? string
+---@field params? SixMChatParameter[]
+
 --- Registers a local event handler for `name`.
+---@overload fun(name: 'chatMessage', fn: fun(playerId: integer, author: string, text: string)): EventHandlerHandle
+---@overload fun(name: 'chat:addMessage', fn: fun(message: SixMChatMessage)): EventHandlerHandle
+---@overload fun(name: 'chat:addTemplate', fn: fun(templateId: string, html: string)): EventHandlerHandle
+---@overload fun(name: 'chat:addSuggestion', fn: fun(name: string, help?: string, params?: SixMChatParameter[])): EventHandlerHandle
+---@overload fun(name: 'chat:addSuggestions', fn: fun(suggestions: SixMChatSuggestion[])): EventHandlerHandle
+---@overload fun(name: 'chat:removeSuggestion', fn: fun(name: string)): EventHandlerHandle
+---@overload fun(name: 'chat:clear', fn: fun()): EventHandlerHandle
 ---@param name string
 ---@param fn fun(...: any)
 ---@return EventHandlerHandle
@@ -253,6 +277,13 @@ function AddEventHandler(name, fn) end
 function RemoveEventHandler(handle) end
 
 --- Allows `name` to be triggered over the network and optionally attaches `fn`.
+---@overload fun(name: '_chat:messageEntered', fn?: fun(text: string)): EventHandlerHandle?
+---@overload fun(name: 'chat:init' | 'chat:clear', fn?: fun()): EventHandlerHandle?
+---@overload fun(name: 'chat:addMessage', fn?: fun(message: SixMChatMessage)): EventHandlerHandle?
+---@overload fun(name: 'chat:addTemplate', fn?: fun(templateId: string, html: string)): EventHandlerHandle?
+---@overload fun(name: 'chat:addSuggestion', fn?: fun(name: string, help?: string, params?: SixMChatParameter[])): EventHandlerHandle?
+---@overload fun(name: 'chat:addSuggestions', fn?: fun(suggestions: SixMChatSuggestion[])): EventHandlerHandle?
+---@overload fun(name: 'chat:removeSuggestion', fn?: fun(name: string)): EventHandlerHandle?
 ---@param name string
 ---@param fn? fun(...: any)
 ---@return EventHandlerHandle?
@@ -265,6 +296,13 @@ function RegisterNetEvent(name, fn) end
 function RegisterServerEvent(name, fn) end
 
 --- Synchronously triggers all local handlers of `name` on this host.
+---@overload fun(name: 'chatMessage', playerId: integer, author: string, text: string)
+---@overload fun(name: 'chat:addMessage', message: SixMChatMessage)
+---@overload fun(name: 'chat:addTemplate', templateId: string, html: string)
+---@overload fun(name: 'chat:addSuggestion', command: string, help?: string, params?: SixMChatParameter[])
+---@overload fun(name: 'chat:addSuggestions', suggestions: SixMChatSuggestion[])
+---@overload fun(name: 'chat:removeSuggestion', command: string)
+---@overload fun(name: 'chat:clear')
 ---@param name string
 ---@param ... any
 function TriggerEvent(name, ...) end
@@ -277,11 +315,19 @@ function CancelEvent() end
 function WasEventCanceled() end
 
 --- Sends a network event to the server. Functions cannot be sent. (Client only)
+---@overload fun(name: '_chat:messageEntered', text: string)
+---@overload fun(name: 'chat:init')
 ---@param name string
 ---@param ... any
 function TriggerServerEvent(name, ...) end
 
 --- Sends a network event to `target` player id or `-1` for all players. Functions cannot be sent. (Server only)
+---@overload fun(name: 'chat:addMessage', target: integer | string, message: SixMChatMessage)
+---@overload fun(name: 'chat:addTemplate', target: integer | string, templateId: string, html: string)
+---@overload fun(name: 'chat:addSuggestion', target: integer | string, command: string, help?: string, params?: SixMChatParameter[])
+---@overload fun(name: 'chat:addSuggestions', target: integer | string, suggestions: SixMChatSuggestion[])
+---@overload fun(name: 'chat:removeSuggestion', target: integer | string, command: string)
+---@overload fun(name: 'chat:clear', target: integer | string)
 ---@param name string
 ---@param target integer | string
 ---@param ... any

@@ -27,6 +27,14 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 const STEP: Duration = Duration::from_millis(5);
 /// The resource the tests start. Its name matches the example server.
 const RESOURCE: &str = "hello";
+const CHAT_SERVER_SCRIPT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../examples/server-data/resources/[system]/chat/server.lua"
+));
+const CHAT_CLIENT_SCRIPT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../examples/server-data/resources/[system]/chat/client.lua"
+));
 
 /// Server side: records what the client reports, and sends the client events.
 const SERVER_SCRIPT: &str = r"
@@ -608,6 +616,129 @@ fn server_only_resources_are_not_offered_to_clients() {
         has_line(log, "1: count 1 hello")
     });
     assert!(!has_line(&log, "1: secret ran"), "{log}");
+}
+
+fn wait_for_chat_report(
+    h: &Harness,
+    runtime: &ClientRuntime,
+    what: &str,
+    done: impl Fn(&str) -> bool,
+) -> String {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let now = Instant::now();
+        h.pump_server();
+        h.fx.server.tick(now);
+        runtime.pump(STEP);
+        runtime.tick(Instant::now());
+        let log = h.fx.text(RESOURCE, "report");
+        if done(&log) {
+            return log;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {what}; the server has:\n{log}"
+        );
+    }
+}
+
+#[test]
+fn headless_chat_client_initializes_suggestions_and_sends_say_text() {
+    let h = Harness::bare(RESOURCE);
+    h.add(
+        RESOURCE,
+        &manifest(&["server.lua"], &["report"], &[]),
+        &[(
+            "server.lua",
+            "local lines = {}\n\
+             RegisterNetEvent('hello:report', function(text)\n\
+                 lines[#lines + 1] = text\n\
+             end)\n\
+             function report() return table.concat(lines, '\\n') end\n",
+        )],
+    );
+    let chat_client = format!(
+        "{CHAT_CLIENT_SCRIPT}\n{}",
+        r"
+TriggerEvent('chat:addTemplate', 'plain', '<b>{0}</b>: {1}')
+local rendered = message_text({ templateId = 'plain', args = { 'Local', 'template' } })
+TriggerEvent('chat:addSuggestion', '/local', 'old help', {})
+TriggerEvent('chat:addSuggestion', '/local', 'new help', {})
+TriggerEvent('chat:addSuggestions', { { name = '/bulk', help = 'bulk help', params = {} } })
+TriggerEvent('chat:removeSuggestion', '/local')
+local local_state_ok = templates.plain == '<b>{0}</b>: {1}'
+    and rendered == 'Local: template'
+    and suggestions['/local'] == nil
+    and suggestions['/bulk'].help == 'bulk help'
+TriggerServerEvent('hello:report', 'chat local state ' .. tostring(local_state_ok))
+TriggerEvent('chat:addMessage', { templateId = 'plain', args = { 'Local', 'template' } })
+TriggerEvent('chat:addMessage', {})
+TriggerEvent('chat:addTemplate', 1, {})
+TriggerEvent('chat:addSuggestions', 'malformed')
+TriggerEvent('chat:clear')
+TriggerEvent('chat:clear', 'malformed')
+ExecuteCommand('chat_suggestions')
+",
+    );
+    h.add(
+        "chat",
+        &(manifest(&["server.lua"], &[], &[]) + "client_script 'client.lua'\n"),
+        &[
+            ("server.lua", CHAT_SERVER_SCRIPT),
+            ("client.lua", chat_client.as_str()),
+        ],
+    );
+    h.add(
+        "chat_probe",
+        "fx_version 'cerulean'\ngame 'common'\nclient_script 'client.lua'\n",
+        &[(
+            "client.lua",
+            "RegisterNetEvent('chat:addSuggestions', function(items)\n\
+                 for _, item in ipairs(items) do\n\
+                     if item.name == '/say' then\n\
+                         TriggerServerEvent('hello:report', 'suggestion ' .. item.name)\n\
+                         break\n\
+                     end\n\
+                 end\n\
+             end)\n\
+             RegisterNetEvent('chat:addMessage', function(message)\n\
+                 TriggerServerEvent('hello:report', 'message ' .. table.concat(message.args, ': ') .. ' source ' .. tostring(source))\n\
+             end)\n\
+             local has_say = false\n\
+             for _, command in ipairs(GetRegisteredCommands()) do\n\
+                 if command.name == 'say' then has_say = true end\n\
+             end\n\
+             TriggerServerEvent('hello:report', 'local say ' .. tostring(has_say))\n\
+             TriggerServerEvent('hello:report', 'probe started')\n",
+        )],
+    );
+
+    h.start(RESOURCE);
+    h.start("chat");
+    h.start("chat_probe");
+    h.fx.server
+        .execute("add_ace builtin.everyone command.say allow");
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let runtime = h.connect(&dir.path().join("cache"), &dir.path().join("data"));
+    let log = h.wait_for_report(&runtime, "chat init", |log| {
+        has_line(log, "probe started")
+            && has_line(log, "suggestion /say")
+            && has_line(log, "local say true")
+            && has_line(log, "chat local state true")
+    });
+    assert!(has_line(&log, "suggestion /say"), "{log}");
+    assert!(has_line(&log, "local say true"), "{log}");
+    assert!(has_line(&log, "chat local state true"), "{log}");
+
+    runtime.execute("say hello");
+    let log = wait_for_chat_report(&h, &runtime, "headless chat message", |log| {
+        has_line(log, "message tester: hello source 65535")
+    });
+    assert!(
+        has_line(&log, "message tester: hello source 65535"),
+        "{log}"
+    );
 }
 
 /// Server side of the command tests: a restricted and an unrestricted command,

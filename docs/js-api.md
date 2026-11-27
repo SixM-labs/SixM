@@ -89,6 +89,28 @@ The host events (`playerJoining`, `playerDropped`, `onPlayerBucketChange`,
 `onEntityBucketChange`, `onResourceListRefresh` and the others) take the same
 names and arguments as in the lifecycle table of [`lua-api.md`](lua-api.md#lifecycle-events-fired-by-the-host).
 
+### Events provided by the `chat` resource
+
+The example `[system]/chat` resource provides the same event contract to Lua
+and JavaScript resources while it is running. Use `emit` for local
+`chatMessage`/chat display events, `emitNet` (`TriggerClientEvent`) to send a
+client chat event, and `emitNet` (`TriggerServerEvent`) for `_chat:messageEntered`
+or `chat:init`. The server-local `chatMessage(playerId, author, text)` hook is
+cancelable; synchronous `CancelEvent()` prevents the default broadcast. Its
+`source` is empty and the sender ID is the first explicit argument. The server
+derives player identity from the connection and checks `command.say` for client
+message submissions.
+
+Client events are `chat:addMessage(message)`, `chat:addTemplate(templateID,
+htmlString)`, `chat:addSuggestion(commandName, commandDescription,
+commandParameters)`, `chat:addSuggestions(suggestions)`,
+`chat:removeSuggestion(commandName)`, and `chat:clear()`. The default message
+is `{ args: [author, text] }`; headless output prints scalar args as `author:
+text`, strips tags from plain-text template rendering, ignores visual color and
+multiline styling, and never executes HTML. Suggestions are stored and can be
+listed with the client `chat_suggestions` command. See the complete payload
+table in [`lua-api.md`](lua-api.md#events-provided-by-the-chat-resource).
+
 ## Exports
 
 ```js

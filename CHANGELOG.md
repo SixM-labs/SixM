@@ -9,6 +9,8 @@ may change the protocol and the API.
 
 ### Added
 
+- Stock `[system]/chat` resource with the FiveM chat event names, a cancelable
+  server message pipeline, command suggestions, and headless client `say`.
 - `start`, `stop`, `restart` and `ensure` accept a `[category]`; manifest
   `server_only 'yes'`; new `Catalog::category_members`, `category_start_order`, `Manifest::server_only`.
 - ACE and info natives: `IsAceAllowed`, `GetGameName`, `GetGameBuildNumber`,

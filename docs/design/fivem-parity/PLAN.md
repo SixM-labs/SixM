@@ -293,8 +293,8 @@ equivalent / no effect / absent".
 | A5 | done | Claude (Haiku impl, Sonnet review) | `git log --grep "^A5:"` |
 | A6 | done | Claude (Haiku impl), ChatGPT (Luna fixes, Terra review) | `git log --grep "^A6:"` |
 | A7 | done | ChatGPT (Luna impl, Terra review) | `git log --grep "^A7:"` |
-| A8 | done on merge | ChatGPT (Luna docs, Terra review) | `git log --grep "^A8:"` |
-| B1 | todo | | |
+| A8 | done | ChatGPT (Luna docs, Terra review) | `git log --grep "^A8:"` |
+| B1 | done | ChatGPT (Luna impl, Terra review) | `git log --grep "^B1:"` |
 | B2 | todo | | |
 | B3 | todo | | |
 | B4 | todo | | |
@@ -320,8 +320,6 @@ equivalent / no effect / absent".
 | G2 | todo | | |
 
 Status values: `todo`, `in progress`, `wip (see log)`, `done`, `blocked (see log)`.
-A8 stays `in progress` until the Phase A pull request merges after both CI
-jobs pass. The merge makes the status `done`.
 
 ## 5. Handoff log
 
@@ -360,3 +358,15 @@ what is next, anything surprising.
   notes` follows 50df184. Changelog and migration guide cover all Phase A
   checkpoints. Both CI matrix jobs are required for the Phase A merge.
   Next after merge: draft B1–B4 on `feat/fivem-parity-b` from updated `main`.
+- 2026-11-28, ChatGPT, `feat/fivem-parity-b`: Phase A merged as 2b337d2
+  ([PR #25](https://github.com/SixM-labs/SixM/pull/25)) after the Ubuntu and
+  Windows CI jobs passed. The Phase B branch starts at that merge commit.
+  Specs B1–B4 were drafted before implementation. The independent resource
+  implementations use separate worktrees. Next: verify and land B1–B3 in
+  checkpoint order, then complete B4.
+- 2026-11-28, ChatGPT, `feat/fivem-parity-b`: `B1: ship stock chat`
+  follows 2b337d2 and records the B1–B4 specs. The stock chat uses the
+  native event bridge, the existing chat ACE and the headless console. The
+  server resolves the author from the connection. The loopback tests cover
+  broadcast, cancellation, command suggestions and headless `say`.
+  B2 is next.

@@ -335,9 +335,12 @@ following FiveM areas are missing:
   `getPlayerSession`, `isSessionReady`) and `baseevents` (registers the FiveM
   channels `baseevents:onPlayerDied`, `onPlayerKilled`, `onPlayerWasted`,
   `enteringVehicle`, `enteringAborted`, `enteredVehicle` and `leftVehicle` for
-  scripts and a future GameAdapter; nothing emits them yet), plus a console-only
-  `chat` resource with a `say` command. `spawnmanager` and
-  `mapmanager` are not bundled.
+  scripts and a future GameAdapter; nothing emits them yet), plus `chat` with
+  the `chatMessage`, `chat:addMessage`, suggestion and clear event contract.
+  The headless client sends `say` through `_chat:messageEntered`, and the server
+  derives the author from the connection and checks `command.say`. Messages are
+  printed to the client log; templates render as plain text and there is no
+  NUI. `spawnmanager` and `mapmanager` are not bundled.
 - **No public server browser UI:** `sets` / `SetConvarServerInfo` marks convars
   as server info (exposed on `/info.json`), and `sv_masterUrl` /
   `sv_heartbeatInterval` optionally send periodic JSON heartbeats to a
