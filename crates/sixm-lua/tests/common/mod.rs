@@ -12,8 +12,8 @@ use std::time::Instant;
 
 use sixm_core::{
     ClientHost, ClientTarget, EntityInfo, EntityKind, EventContext, EventSource, FuncRef,
-    GLOBAL_BAG, Host, PlayerInfo, ResourceName, ScriptError, ScriptRuntime, ServerHost, Value,
-    entity_bag, entity_of_bag, is_finite, player_of_bag,
+    GLOBAL_BAG, Host, PlayerInfo, ResourceName, ResourceState, ScriptError, ScriptRuntime,
+    ServerHost, Value, entity_bag, entity_of_bag, is_finite, player_of_bag,
 };
 use sixm_lua::LuaRuntime;
 use tempfile::TempDir;
@@ -61,6 +61,11 @@ pub struct TestHost {
     pub entities: RefCell<BTreeMap<u32, EntityInfo>>,
     /// The last entity id handed out. Ids start at 1.
     pub last_entity: Cell<u32>,
+    /// Lifecycle states set by a test. A resource without one is `Started` when
+    /// it was started with [`start`] and `Missing` otherwise.
+    pub states: RefCell<HashMap<String, ResourceState>>,
+    /// Manifest metadata pairs by resource name, in declaration order.
+    pub metadata: RefCell<HashMap<String, Vec<(String, String)>>>,
 }
 
 impl TestHost {
@@ -116,8 +121,11 @@ impl Host for TestHost {
         event: &str,
         source: EventSource,
         args: &[Value],
+        invoker: Option<&ResourceName>,
     ) -> Result<bool, ScriptError> {
-        let ctx = EventContext::new();
+        let ctx = invoker.map_or_else(EventContext::new, |name| {
+            EventContext::invoked_by(name.clone())
+        });
         for runtime in self.snapshot() {
             if runtime.handles_event(event) {
                 runtime.deliver_event(event, source, args, &ctx)?;
@@ -131,11 +139,48 @@ impl Host for TestHost {
         resource: &str,
         export: &str,
         args: &[Value],
+        invoker: Option<&ResourceName>,
     ) -> Result<Vec<Value>, ScriptError> {
         let runtime = self
             .find(resource)
             .ok_or_else(|| ScriptError::ResourceNotRunning(resource.to_owned()))?;
-        runtime.call_export(export, args)
+        runtime.call_export(export, args, invoker)
+    }
+
+    fn resource_state(&self, resource: &str) -> ResourceState {
+        if let Some(state) = self.states.borrow().get(resource) {
+            return *state;
+        }
+        if self.roots.borrow().contains_key(resource) {
+            ResourceState::Started
+        } else {
+            ResourceState::Missing
+        }
+    }
+
+    fn resource_names(&self) -> Vec<ResourceName> {
+        let mut names: Vec<ResourceName> = self
+            .roots
+            .borrow()
+            .keys()
+            .map(|name| Arc::from(name.as_str()))
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn resource_metadata(&self, resource: &str, key: &str) -> Vec<String> {
+        self.metadata
+            .borrow()
+            .get(resource)
+            .map(|pairs| {
+                pairs
+                    .iter()
+                    .filter(|(name, _)| name == key)
+                    .map(|(_, value)| value.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn call_ref(&self, func: &FuncRef, args: &[Value]) -> Result<Vec<Value>, ScriptError> {
@@ -433,7 +478,7 @@ pub fn tick(host: &TestHost, now: Instant) {
 /// Calls an export with no arguments and returns its results.
 pub fn call(runtime: &LuaRuntime, export: &str, args: &[Value]) -> Vec<Value> {
     runtime
-        .call_export(export, args)
+        .call_export(export, args, None)
         .unwrap_or_else(|err| panic!("export `{export}` failed: {err}"))
 }
 

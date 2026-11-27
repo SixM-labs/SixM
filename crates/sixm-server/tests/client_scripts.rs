@@ -154,6 +154,22 @@ AddEventHandler('onClientResourceStart', function(name)
 end)
 ";
 
+/// Client side of the resource natives test: reports its own state and
+/// metadata while it loads and once it has started, and the resources it knows.
+const RESOURCE_INFO_CLIENT_SCRIPT: &str = r"
+local name = GetCurrentResourceName()
+
+TriggerServerEvent('hello:report', 'state ' .. GetResourceState(name))
+TriggerServerEvent('hello:report', 'version ' .. tostring(GetResourceMetadata(name, 'version', 0)))
+TriggerServerEvent('hello:report', 'count ' .. GetNumResources() .. ' ' .. tostring(GetResourceByFindIndex(0)))
+
+AddEventHandler('onClientResourceStart', function(started)
+    if started == name then
+        TriggerServerEvent('hello:report', 'state ' .. GetResourceState(name))
+    end
+end)
+";
+
 /// A server listening on loopback, whose inputs are handled by the test thread.
 struct Harness {
     fx: Fixture,
@@ -329,7 +345,7 @@ fn replicated_global_state_is_readable_and_reaches_client_change_handlers() {
 
     s.h.fx
         .manager()
-        .call_export(RESOURCE, "poke", &[])
+        .call_export(RESOURCE, "poke", &[], None)
         .expect("poke is exported");
     s.h.wait_for_report(&s.runtime, "the state change", |log| {
         has_line(
@@ -446,4 +462,28 @@ fn client_reads_declared_files_and_writes_only_its_own_data_folder() {
     assert!(has_line(&log, "1: save declared false"), "{log}");
     assert!(has_line(&log, "1: save own true"), "{log}");
     assert!(has_line(&log, "1: load own mine"), "{log}");
+}
+
+#[test]
+fn client_resource_natives_report_state_metadata_and_resources() {
+    let h = Harness::bare("hello");
+    let text = manifest(&["server.lua"], &["report", "poke"], &[])
+        + "version '1.2.0'\nclient_scripts { 'client.lua' }\n";
+    h.add(
+        "hello",
+        &text,
+        &[
+            ("server.lua", SERVER_SCRIPT),
+            ("client.lua", RESOURCE_INFO_CLIENT_SCRIPT),
+        ],
+    );
+    h.start("hello");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let runtime = h.connect(&dir.path().join("cache"), &dir.path().join("data"));
+    let log = h.wait_for_report(&runtime, "the resource natives", |log| {
+        has_line(log, "1: state started")
+    });
+    assert!(has_line(&log, "1: state starting"), "{log}");
+    assert!(has_line(&log, "1: version 1.2.0"), "{log}");
+    assert!(has_line(&log, "1: count 1 hello"), "{log}");
 }

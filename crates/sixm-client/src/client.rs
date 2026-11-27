@@ -40,6 +40,8 @@ pub struct SyncedResource {
     /// Names of the client exports the manifest declares with `export`. A global
     /// function with one of these names is callable as an export.
     pub exports: Vec<String>,
+    /// The manifest's metadata pairs, in declaration order, as the server sent them.
+    pub metadata: Vec<(String, String)>,
 }
 
 /// How many files a sync needed.
@@ -311,6 +313,7 @@ impl Client {
                 name: entry.name.clone(),
                 files,
                 exports: entry.exports.clone(),
+                metadata: entry.metadata.clone(),
             },
             stats,
         ))
@@ -341,6 +344,7 @@ fn merge_frame(listed: &mut Vec<ResourceEntry>, frame: Vec<ResourceEntry>) {
             Some(last) if last.name == entry.name => {
                 last.files.extend(entry.files);
                 last.exports.extend(entry.exports);
+                last.metadata.extend(entry.metadata);
             }
             _ => listed.push(entry),
         }

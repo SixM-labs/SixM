@@ -298,7 +298,7 @@ fn function_references_of_a_stopped_resource_are_stale() {
 
     let values = fx
         .manager()
-        .call_export("maker", "make", &[])
+        .call_export("maker", "make", &[], None)
         .expect("make");
     let Some(Value::FuncRef(func)) = values.into_iter().next() else {
         panic!("export did not return a function reference");

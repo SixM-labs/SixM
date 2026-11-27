@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use mlua::{Function, MultiValue, Table, Value as LuaValue};
-use sixm_core::{ScriptError, Value};
+use sixm_core::{ResourceName, ScriptError, Value};
 
 use crate::runtime::{IntoScriptResult, LuaRuntime, bind_fn, lua_err};
 
@@ -101,7 +101,7 @@ impl LuaRuntime {
             let values = runtime.to_values(&args).map_err(lua_err)?;
             let host = runtime.host()?;
             let results = host
-                .call_export(&resource, &method, &values)
+                .call_export(&resource, &method, &values, Some(&runtime.resource))
                 .map_err(lua_err)?;
             runtime.to_lua_multi(&results)
         })
@@ -126,15 +126,20 @@ impl LuaRuntime {
         })
     }
 
-    /// Calls an export synchronously, outside any task.
+    /// Calls an export synchronously, outside any task. `invoker` is what
+    /// `GetInvokingResource()` returns during the call. The previous invoker is
+    /// restored even when the export fails.
     pub(crate) fn invoke_export(
         &self,
         export: &str,
         args: &[Value],
+        invoker: Option<&ResourceName>,
     ) -> Result<Vec<Value>, ScriptError> {
         let function = self.find_export(export)?;
         let lua_args = self.to_lua_multi(args).into_script()?;
-        let results: MultiValue = function.call(lua_args).into_script()?;
-        self.multi_to_values(results)
+        let outer = self.current_invoker.replace(invoker.cloned());
+        let outcome: mlua::Result<MultiValue> = function.call(lua_args);
+        *self.current_invoker.borrow_mut() = outer;
+        self.multi_to_values(outcome.into_script()?)
     }
 }

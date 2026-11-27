@@ -29,7 +29,8 @@ pub use entities::EntityEntry;
 pub use error::NetError;
 pub use files::{
     FILE_KIND_CLIENT, FILE_KIND_FILE, FILE_KIND_SHARED, FileEntry, FileHash, MAX_EXPORT_NAME_LEN,
-    MAX_EXPORTS, MAX_FILE_SIZE, PublishedFile, PublishedResource, ResourceEntry, hash_hex,
+    MAX_EXPORTS, MAX_FILE_SIZE, MAX_METADATA, MAX_METADATA_KEY_LEN, MAX_METADATA_VALUE_LEN,
+    PublishedFile, PublishedResource, ResourceEntry, hash_hex,
 };
 pub use identity::{Fingerprint, Identity, ParseFingerprintError};
 pub use protocol::PROTOCOL_VERSION;

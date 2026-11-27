@@ -143,7 +143,7 @@ impl Harness {
     fn value_of(&self, export: &str, args: &[Value]) -> Value {
         self.fx
             .manager()
-            .call_export("state", export, args)
+            .call_export("state", export, args, None)
             .unwrap_or_else(|err| panic!("export `{export}`: {err}"))
             .into_iter()
             .next()

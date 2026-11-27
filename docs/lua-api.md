@@ -29,6 +29,49 @@ Frames run at `sixm_tickRate` (see [server.md](server.md) and
 deadline has passed. It does not wait for the next frame. A wait of zero, or of
 no delay, resumes on the next frame.
 
+## Promises
+
+A promise is a value that settles once, later. Promises belong to the resource
+that made them. They cannot be passed through exports, events or state bags:
+the call fails with "cannot pass a userdata value".
+
+| Name | Side | Signature and result |
+|---|---|---|
+| `promise.new` | both | `promise.new()`. Returns a pending promise. |
+| `promise.all` | both | `promise.all(list)`. Returns a promise that fulfils with an array of the values, in order, once every entry is fulfilled. It rejects with the first rejection. An empty list fulfils at once with an empty table. An entry that is not a promise counts as fulfilled. |
+| `promise.first` | both | `promise.first(list)`. Settles like the first entry to settle. An empty list stays pending. |
+| `Await` / `Citizen.Await` | both | `Await(p)`. Returns the value of `p`, or raises its reason as an error. In a thread, a pending `p` parks the thread until it settles. Outside a thread it raises an error. |
+
+Methods of a promise:
+
+| Method | Result |
+|---|---|
+| `p:resolve(value)` | Fulfils `p` with `value`. If `value` is a promise, `p` adopts its eventual state. |
+| `p:reject(reason)` | Rejects `p` with `reason`. |
+| `p:next(onFulfilled, onRejected)` | Returns a new promise. Either callback may be `nil`. |
+
+- Only the first `resolve` or `reject` counts. Later calls do nothing.
+- Resolving a promise with itself rejects it.
+- A callback given to `next` runs as its own thread on the next frame. It never
+  runs inside `resolve`. Its return value fulfils the new promise, and a
+  returned promise is adopted. An error it raises rejects the new promise with
+  that error. A missing callback passes the value or the reason through.
+- A callback may call `Await` or `Wait`.
+- A thread parked in `Await` does not run on any frame until its promise
+  settles. It then resumes on the next frame with the outcome.
+- A rejection that no `next` or `Await` handles by the end of the frame after
+  the rejection is logged once as a warning, with the resource name and the
+  reason.
+
+A function that returns its result through a callback can be wrapped in a
+promise:
+
+```lua
+local p = promise.new()
+exports.other:get(function(v) p:resolve(v) end)
+local v = Citizen.Await(p)
+```
+
 ## Events
 
 | Name | Side | Signature and result |
@@ -119,6 +162,12 @@ The client has no `onResourceStarting`. Clients do not cancel starts.
 | `GetResourcePath` | both | `GetResourcePath(name)`. Server: the folder of any installed resource, running or not. Client: only the resource's own data folder. For any other name it returns `nil`. Returns a string or `nil`. |
 | `LoadResourceFile` | both | `LoadResourceFile(resource, path)`. Returns the file's contents as a string, or `nil`. See below. |
 | `SaveResourceFile` | both | `SaveResourceFile(resource, path, data)`. Writes `data` and returns a boolean. See below. |
+| `GetInvokingResource` | both | `GetInvokingResource()`. Returns the name of the resource whose script started the running code, or `nil`. See below. |
+| `GetResourceState` | both | `GetResourceState(name)`. Returns `missing`, `stopped`, `starting`, `started` or `stopping`. See below. |
+| `GetNumResources` | both | `GetNumResources()`. Returns the number of resources listed by `GetResourceByFindIndex`. |
+| `GetResourceByFindIndex` | both | `GetResourceByFindIndex(index)`. Returns the name at the 0-based `index` of the resource list, or `nil`. |
+| `GetResourceMetadata` | both | `GetResourceMetadata(resource, key, index)`. Returns the value at the 0-based `index` of the metadata `key` of `resource`, or `nil`. |
+| `GetNumResourceMetadata` | both | `GetNumResourceMetadata(resource, key)`. Returns how many values the metadata `key` of `resource` has. |
 
 `path` is normalised first. It must be relative, must not contain `..`, and
 must not contain a colon. Backslashes are accepted as separators.
@@ -139,6 +188,46 @@ must not contain a colon. Backslashes are accepted as separators.
   that the server sent is refused, so a saved file never replaces a synced one.
 
 The client keeps its data folders under the cache. See [client.md](client.md).
+
+### `GetInvokingResource`
+
+Returns the name of the resource that caused the running code to run, so a
+library can tell who called it. It is `nil` when no resource caused it.
+
+- Inside an event handler started by `TriggerEvent`, it is the resource whose
+  script called `TriggerEvent`.
+- Inside an export called as `exports[res]:name(...)`, it is the resource whose
+  script made the call. After the call returns, the caller sees its own value
+  again, also when the export raised an error.
+- A thread started with `CreateThread` or `SetTimeout` inside such a handler
+  keeps the same value, and so does a handler after a `Wait`.
+- It is `nil` for events the host fires: lifecycle events (`onResourceStarting`,
+  `onResourceStart`, `onServerResourceStart`, `onResourceStop`,
+  `onServerResourceStop`, `onClientResourceStart`, `onClientResourceStop`),
+  player events (`playerConnecting`, `playerJoining`, `playerDropped`), entity
+  events (`entityCreated`, `entityRemoved`), events from the network
+  (`TriggerServerEvent` and `TriggerClientEvent`), console commands and state
+  bag change handlers.
+
+### Resource state and list
+
+`GetResourceState` reports the state of a resource:
+
+| State | Server | Client |
+|---|---|---|
+| `missing` | The resource is not installed. | The resource is not running. |
+| `stopped` | Installed, and not running. | Not used. |
+| `starting` | Its scripts are loading. | Its scripts are loading. |
+| `started` | Running. | Running. |
+| `stopping` | Its stop events are running. | Its stop events are running. |
+
+- On the server, `GetNumResources` and `GetResourceByFindIndex` list every
+  installed resource, sorted by name, whether it runs or not.
+- On the client, they list the running resources in start order.
+- The metadata functions read the `version 'x'` style pairs of the manifest.
+  Values come in declaration order. On the server, any installed resource can
+  be read. On the client, only running resources are known, and the metadata
+  is what the server sent with them.
 
 ## Convars and commands
 
@@ -315,7 +404,7 @@ receives every entity: there is no distance scoping yet.
 | `IsDuplicityVersion` | both | `IsDuplicityVersion()`. Returns `true` on the server and `false` on the client. |
 | `print` | both | Writes a line to the log, prefixed with the resource name. Arguments are joined with tabs. |
 | `source` | both | Global. See the events section. |
-| `Citizen` | both | A table with `Wait`, `CreateThread`, `CreateThreadNow`, `SetTimeout` and `ClearTimeout`. |
+| `Citizen` | both | A table with `Wait`, `CreateThread`, `CreateThreadNow`, `SetTimeout`, `ClearTimeout` and `Await`. The `promise` table is a global, see [Promises](#promises). |
 
 ## Sandbox differences
 

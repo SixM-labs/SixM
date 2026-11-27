@@ -14,7 +14,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use sixm_core::{
-    EntityInfo, EventContext, EventSource, FuncRef, Host, ResourceName, ScriptRuntime, Value,
+    EntityInfo, EventContext, EventSource, FuncRef, Host, ResourceName, ResourceState,
+    ScriptRuntime, Value,
 };
 use sixm_lua::LuaRuntime;
 use sixm_resources::ClientFileKind;
@@ -79,6 +80,11 @@ pub struct ClientRuntime {
     /// The synced files of each running resource: file name (as the manifest
     /// names it) to its path in the cache.
     pub(crate) files: RefCell<HashMap<String, HashMap<String, PathBuf>>>,
+    /// The metadata pairs of each running resource, as the server sent them.
+    metadata: RefCell<HashMap<String, Vec<(String, String)>>>,
+    /// Lifecycle states that override the running state while a resource
+    /// starts or stops, oldest first.
+    transitions: RefCell<Vec<(ResourceName, ResourceState)>>,
     pub(crate) quit: Cell<bool>,
 }
 
@@ -102,6 +108,8 @@ impl ClientRuntime {
             state: RefCell::default(),
             entities: RefCell::default(),
             files: RefCell::default(),
+            metadata: RefCell::default(),
+            transitions: RefCell::default(),
             quit: Cell::new(false),
         })
     }
@@ -327,6 +335,10 @@ impl ClientRuntime {
         self.files
             .borrow_mut()
             .insert(resource.name.clone(), synced);
+        self.metadata
+            .borrow_mut()
+            .insert(resource.name.clone(), resource.metadata.clone());
+        self.set_transition(&name, ResourceState::Starting);
         for file in resource
             .files
             .iter()
@@ -336,6 +348,7 @@ impl ClientRuntime {
                 error!("[{name}] cannot load {}: {err}", file.name);
             }
         }
+        self.clear_transition(&name);
 
         self.dispatch_local("onClientResourceStart", &name);
         self.dispatch_local("onResourceStart", &name);
@@ -363,14 +376,17 @@ impl ClientRuntime {
     /// Fires the stop events, removes the runtime and its commands, and shuts it down.
     fn stop_runtime(&self, runtime: &Rc<LuaRuntime>) {
         let name = runtime.resource().clone();
+        self.set_transition(&name, ResourceState::Stopping);
         self.dispatch_local("onClientResourceStop", &name);
         self.dispatch_local("onResourceStop", &name);
         self.release_commands_of(&name);
         self.files.borrow_mut().remove(&*name);
+        self.metadata.borrow_mut().remove(&*name);
         self.running
             .borrow_mut()
             .retain(|candidate| !Rc::ptr_eq(candidate, runtime));
         self.rebuild_snapshot();
+        self.clear_transition(&name);
         runtime.shutdown();
         info!("Stopping resource {name}");
     }
@@ -454,8 +470,22 @@ impl ClientRuntime {
     /// Delivers `event` to every running runtime that handles it, in start
     /// order. Returns whether a handler canceled it.
     pub(crate) fn dispatch(&self, event: &str, source: EventSource, args: &[Value]) -> bool {
+        self.dispatch_from(event, source, args, None)
+    }
+
+    /// Like [`dispatch`](Self::dispatch), for an event that a resource started.
+    /// `invoker` is what the handlers see as `GetInvokingResource()`.
+    pub(crate) fn dispatch_from(
+        &self,
+        event: &str,
+        source: EventSource,
+        args: &[Value],
+        invoker: Option<&ResourceName>,
+    ) -> bool {
         let snapshot = self.snapshot();
-        let ctx = EventContext::new();
+        let ctx = invoker.map_or_else(EventContext::new, |name| {
+            EventContext::invoked_by(name.clone())
+        });
         for runtime in snapshot.iter() {
             if runtime.handles_event(event) {
                 if let Err(err) = runtime.deliver_event(event, source, args, &ctx) {
@@ -469,6 +499,64 @@ impl ClientRuntime {
     /// Fires a local event whose only argument is a resource name.
     fn dispatch_local(&self, event: &str, resource: &str) {
         self.dispatch(event, EventSource::Local, &[Value::from(resource)]);
+    }
+
+    /// Records that `name` is in `state` until [`clear_transition`](Self::clear_transition).
+    fn set_transition(&self, name: &ResourceName, state: ResourceState) {
+        self.transitions.borrow_mut().push((name.clone(), state));
+    }
+
+    /// Removes the newest transition of `name`, if it has one.
+    fn clear_transition(&self, name: &str) {
+        let mut transitions = self.transitions.borrow_mut();
+        if let Some(index) = transitions
+            .iter()
+            .rposition(|(owner, _)| owner.as_ref() == name)
+        {
+            transitions.remove(index);
+        }
+    }
+
+    /// The lifecycle state of `resource`: a transition in progress, else
+    /// `Started` for a running resource and `Missing` for any other.
+    pub(crate) fn state_of(&self, resource: &str) -> ResourceState {
+        let transitional = self
+            .transitions
+            .borrow()
+            .iter()
+            .rev()
+            .find(|(owner, _)| owner.as_ref() == resource)
+            .map(|(_, state)| *state);
+        match transitional {
+            Some(state) => state,
+            None if self.is_running(resource) => ResourceState::Started,
+            None => ResourceState::Missing,
+        }
+    }
+
+    /// Names of the running resources, in start order.
+    pub(crate) fn running_names(&self) -> Vec<ResourceName> {
+        self.running
+            .borrow()
+            .iter()
+            .map(|runtime| runtime.resource().clone())
+            .collect()
+    }
+
+    /// The values of metadata key `key` of the running resource `resource`, in
+    /// declaration order. Empty when it is not running or has no such key.
+    pub(crate) fn metadata_of(&self, resource: &str, key: &str) -> Vec<String> {
+        self.metadata
+            .borrow()
+            .get(resource)
+            .map(|pairs| {
+                pairs
+                    .iter()
+                    .filter(|(name, _)| name == key)
+                    .map(|(_, value)| value.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Runs the state change handlers of every runtime for one write.

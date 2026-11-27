@@ -170,7 +170,7 @@ impl Harness {
     fn call(&self, export: &str, args: &[Value]) {
         self.fx
             .manager()
-            .call_export("net", export, args)
+            .call_export("net", export, args, None)
             .unwrap_or_else(|err| panic!("export `{export}`: {err}"));
     }
 

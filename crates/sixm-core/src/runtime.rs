@@ -24,6 +24,35 @@ pub enum EventSource {
     Server,
 }
 
+/// Lifecycle state of a resource, as `GetResourceState` names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceState {
+    /// The host does not know the resource.
+    Missing,
+    /// Known, and not running.
+    Stopped,
+    /// Its scripts are loading. `onResourceStart` has not run yet.
+    Starting,
+    /// Running.
+    Started,
+    /// Its stop events are running, and it is about to stop.
+    Stopping,
+}
+
+impl ResourceState {
+    /// The name `GetResourceState` returns: `missing`, `stopped`, `starting`,
+    /// `started` or `stopping`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Stopped => "stopped",
+            Self::Starting => "starting",
+            Self::Started => "started",
+            Self::Stopping => "stopping",
+        }
+    }
+}
+
 /// Receiver of a client event. Scripts pass `-1` for [`ClientTarget::All`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientTarget {
@@ -46,11 +75,28 @@ pub struct PlayerInfo {
 #[derive(Debug, Default)]
 pub struct EventContext {
     canceled: Cell<bool>,
+    invoker: Option<ResourceName>,
 }
 
 impl EventContext {
+    /// A dispatch that no resource started: the console, the network, or the
+    /// host itself. `GetInvokingResource()` is nil in its handlers.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A dispatch started by a script of resource `invoker`, which handlers see
+    /// through `GetInvokingResource()`.
+    pub fn invoked_by(invoker: ResourceName) -> Self {
+        Self {
+            canceled: Cell::new(false),
+            invoker: Some(invoker),
+        }
+    }
+
+    /// The resource whose script started this dispatch, if one did.
+    pub fn invoker(&self) -> Option<&ResourceName> {
+        self.invoker.as_ref()
     }
 
     pub fn cancel(&self) {
@@ -90,20 +136,40 @@ pub trait Host {
 
     /// Dispatches a local event to every running resource that handles it,
     /// in resource start order. Returns whether a handler canceled it.
+    /// `invoker` is the resource whose script triggered it, which handlers see
+    /// as `GetInvokingResource()`.
     fn trigger_event(
         &self,
         event: &str,
         source: EventSource,
         args: &[Value],
+        invoker: Option<&ResourceName>,
     ) -> Result<bool, ScriptError>;
 
-    /// Calls `export` on running resource `resource` synchronously.
+    /// Calls `export` on running resource `resource` synchronously. `invoker`
+    /// is the resource whose script called it, which the export sees as
+    /// `GetInvokingResource()`.
     fn call_export(
         &self,
         resource: &str,
         export: &str,
         args: &[Value],
+        invoker: Option<&ResourceName>,
     ) -> Result<Vec<Value>, ScriptError>;
+
+    /// The lifecycle state of `resource`.
+    fn resource_state(&self, resource: &str) -> ResourceState;
+
+    /// Names of the resources this host knows: on a server every resource it
+    /// has scanned, sorted by name; on a client the running resources, in start
+    /// order.
+    fn resource_names(&self) -> Vec<ResourceName>;
+
+    /// The values of metadata key `key` in the manifest of `resource`, in
+    /// declaration order, such as `["1.2.0"]` for `version '1.2.0'`. Empty when
+    /// the resource or the key is unknown. Clients know the metadata of running
+    /// resources only.
+    fn resource_metadata(&self, resource: &str, key: &str) -> Vec<String>;
 
     /// Calls a function reference in whichever runtime owns it.
     fn call_ref(&self, func: &FuncRef, args: &[Value]) -> Result<Vec<Value>, ScriptError>;
@@ -262,7 +328,14 @@ pub trait ScriptRuntime {
         ctx: &EventContext,
     ) -> Result<(), ScriptError>;
 
-    fn call_export(&self, export: &str, args: &[Value]) -> Result<Vec<Value>, ScriptError>;
+    /// Calls `export` synchronously. `invoker` is what the export sees as
+    /// `GetInvokingResource()` while it runs.
+    fn call_export(
+        &self,
+        export: &str,
+        args: &[Value],
+        invoker: Option<&ResourceName>,
+    ) -> Result<Vec<Value>, ScriptError>;
 
     fn call_ref(&self, id: u32, args: &[Value]) -> Result<Vec<Value>, ScriptError>;
 

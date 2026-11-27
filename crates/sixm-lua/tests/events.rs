@@ -31,10 +31,10 @@ fn event_arguments_round_trip_through_a_handler() {
         Value::Map(vec![(Value::from("k"), Value::Float(1.5))]),
     ];
 
-    let echoed = rt.call_export("echo", &args).expect("echo");
+    let echoed = rt.call_export("echo", &args, None).expect("echo");
     assert_eq!(echoed, args);
 
-    host.trigger_event("evt", EventSource::Local, &args[..2])
+    host.trigger_event("evt", EventSource::Local, &args[..2], None)
         .expect("trigger");
     assert_eq!(
         first(&rt, "got"),
@@ -67,7 +67,7 @@ fn cancel_event_is_visible_to_later_handlers_in_other_resources() {
     );
 
     let canceled = host
-        .trigger_event("ping", EventSource::Local, &[])
+        .trigger_event("ping", EventSource::Local, &[], None)
         .expect("trigger");
     assert!(canceled);
     assert_eq!(first(&watcher, "seen"), Value::Bool(true));
