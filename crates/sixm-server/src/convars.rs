@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use sixm_core::ConvarKind;
 use sixm_net::Identity;
 
 /// Convar naming the folder that is scanned for resources.
@@ -31,24 +32,35 @@ const MAX_CLIENTS_LIMIT: i64 = 1024;
 /// Server name when `sv_hostname` is not set.
 const DEFAULT_SERVER_NAME: &str = "SixM Server";
 
+/// A stored convar: its value and the kind the last store gave it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Entry {
+    value: String,
+    kind: ConvarKind,
+}
+
 /// The convar store. Names are case-insensitive and kept in lower case.
 #[derive(Debug)]
 pub(crate) struct Convars {
-    values: BTreeMap<String, String>,
+    values: BTreeMap<String, Entry>,
 }
 
 impl Convars {
-    /// A store holding the built-in defaults.
+    /// A store holding the built-in defaults, all plain.
     pub(crate) fn new() -> Self {
         let mut convars = Self {
             values: BTreeMap::new(),
         };
-        convars.set(RESOURCES_PATH, "resources");
-        convars.set(IDENTITY_FILE, DEFAULT_IDENTITY_FILE);
-        convars.set(TICK_RATE, "20");
-        convars.set(ENDPOINT, DEFAULT_ENDPOINT);
-        convars.set(MAX_CLIENTS, &DEFAULT_MAX_CLIENTS.to_string());
-        convars.set(SERVER_NAME, DEFAULT_SERVER_NAME);
+        convars.set(RESOURCES_PATH, "resources", ConvarKind::Plain);
+        convars.set(IDENTITY_FILE, DEFAULT_IDENTITY_FILE, ConvarKind::Plain);
+        convars.set(TICK_RATE, "20", ConvarKind::Plain);
+        convars.set(ENDPOINT, DEFAULT_ENDPOINT, ConvarKind::Plain);
+        convars.set(
+            MAX_CLIENTS,
+            &DEFAULT_MAX_CLIENTS.to_string(),
+            ConvarKind::Plain,
+        );
+        convars.set(SERVER_NAME, DEFAULT_SERVER_NAME, ConvarKind::Plain);
         convars
     }
 
@@ -56,13 +68,37 @@ impl Convars {
     pub(crate) fn get(&self, name: &str) -> Option<&str> {
         self.values
             .get(&name.to_ascii_lowercase())
-            .map(String::as_str)
+            .map(|entry| entry.value.as_str())
     }
 
-    /// Sets `name` to `value`, replacing any previous value.
-    pub(crate) fn set(&mut self, name: &str, value: &str) {
+    /// The kind of `name`, if it is set.
+    pub(crate) fn kind(&self, name: &str) -> Option<ConvarKind> {
         self.values
-            .insert(name.to_ascii_lowercase(), value.to_owned());
+            .get(&name.to_ascii_lowercase())
+            .map(|entry| entry.kind)
+    }
+
+    /// Stores `value` under `name` with `kind`, replacing any previous entry.
+    /// Returns the kind the convar had before, or `None` when it was not set.
+    pub(crate) fn set(&mut self, name: &str, value: &str, kind: ConvarKind) -> Option<ConvarKind> {
+        self.values
+            .insert(
+                name.to_ascii_lowercase(),
+                Entry {
+                    value: value.to_owned(),
+                    kind,
+                },
+            )
+            .map(|previous| previous.kind)
+    }
+
+    /// Every replicated convar as `(name, value)`, in name order.
+    pub(crate) fn replicated(&self) -> Vec<(String, String)> {
+        self.values
+            .iter()
+            .filter(|(_, entry)| entry.kind == ConvarKind::Replicated)
+            .map(|(name, entry)| (name.clone(), entry.value.clone()))
+            .collect()
     }
 
     /// The folder to scan for resources. Relative paths are relative to the working directory.
@@ -110,5 +146,56 @@ impl Convars {
             .and_then(|value| value.trim().parse::<i64>().ok())
             .unwrap_or(DEFAULT_MAX_CLIENTS);
         usize::try_from(value.clamp(MIN_CLIENTS, MAX_CLIENTS_LIMIT)).unwrap_or(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn built_in_convars_are_plain() {
+        let convars = Convars::new();
+        assert_eq!(convars.kind(SERVER_NAME), Some(ConvarKind::Plain));
+        assert_eq!(convars.replicated(), Vec::new());
+    }
+
+    #[test]
+    fn the_last_store_decides_the_kind() {
+        let mut convars = Convars::new();
+        assert_eq!(convars.kind("game_mode"), None);
+
+        let before = convars.set("Game_Mode", "race", ConvarKind::Replicated);
+        assert_eq!(before, None);
+        assert_eq!(convars.kind("game_mode"), Some(ConvarKind::Replicated));
+
+        let before = convars.set("game_mode", "info", ConvarKind::ServerInfo);
+        assert_eq!(before, Some(ConvarKind::Replicated));
+        assert_eq!(convars.kind("GAME_MODE"), Some(ConvarKind::ServerInfo));
+
+        let before = convars.set("game_mode", "plain", ConvarKind::Plain);
+        assert_eq!(before, Some(ConvarKind::ServerInfo));
+        assert_eq!(convars.get("GAME_MODE"), Some("plain"));
+        assert_eq!(convars.kind("game_mode"), Some(ConvarKind::Plain));
+    }
+
+    #[test]
+    fn only_replicated_convars_are_listed_with_their_latest_value() {
+        let mut convars = Convars::new();
+        convars.set("a", "1", ConvarKind::Plain);
+        convars.set("b", "2", ConvarKind::ServerInfo);
+        convars.set("d", "4", ConvarKind::Replicated);
+        convars.set("c", "3", ConvarKind::Replicated);
+        convars.set("c", "5", ConvarKind::Replicated);
+        assert_eq!(
+            convars.replicated(),
+            [
+                ("c".to_owned(), "5".to_owned()),
+                ("d".to_owned(), "4".to_owned()),
+            ]
+        );
+
+        convars.set("c", "gone", ConvarKind::Plain);
+        assert_eq!(convars.replicated(), [("d".to_owned(), "4".to_owned())]);
     }
 }

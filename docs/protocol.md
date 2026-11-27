@@ -129,21 +129,33 @@ Server to client (`ServerMessage`):
 | 12 | `EntityTransforms` | list of `(id: u32, position: 3 floats, rotation: 3 floats)` |
 | 13 | `EntityDeleted` | `id: u32` |
 | 14 | `EntitySnapshot` | list of entity entries |
+| 15 | `Convars` | list of `(name: string, value: string or nil)` (see below) |
+
+### Convars
+
+`Convars` carries replicated convars. A `nil` value means the server no longer
+replicates the convar, and the client removes it. A name is 1 to 256 bytes and a
+value is at most 4096 bytes. The decoder rejects a frame that breaks either
+limit, and the encoder refuses to build one. Each pair costs one unit of the
+decoding budget. A join snapshot may span several frames.
 
 ### Handshake
 
-1. The client sends `Hello` with `protocol = 6` and its player name. The
+1. The client sends `Hello` with `protocol = 7` and its player name. The
    server has already verified the client certificate, so only a client with a
    certificate gets this far.
 2. A different protocol number is refused with `Rejected`, for example
-   `unsupported protocol version 5, server speaks 6`.
+   `unsupported protocol version 6, server speaks 7`.
 3. A name outside 1 to 64 characters is refused.
 4. The server replies `Welcome`, or `Rejected` with a reason.
-5. The server sends a `Resources` snapshot. It may span several frames, which
-   add entries. An empty `Resources` frame ends the snapshot.
+5. The server sends every replicated convar as `Convars`, when there are any.
+   It may span several frames. Without replicated convars, no frame is sent.
 6. The server sends every existing entity as an `EntitySnapshot`, which may
    span several frames. With no entities, no frame is sent.
 7. The server sends the replicated state as a `StateSnapshot`.
+8. The server sends a `Resources` snapshot. It may span several frames, which
+   add entries. An empty `Resources` frame ends the snapshot and the join.
+   Everything before it describes the world the client's scripts start in.
 
 After the handshake, the server sends `ResourceStarted`, `ResourceStopped`,
 state and entity messages as they happen. `EntityCreated` and `EntityDeleted`

@@ -258,13 +258,17 @@ impl ResourceManager {
 
         self.network.players.borrow_mut().admit(id);
         self.with_server(|server| server.accept(connection, id));
+        // The resource list goes last: a client waits for its end before it
+        // starts any script, so the convars, entities and state sent before it
+        // are already applied when the scripts load.
+        self.join_convars(id);
+        self.join_entities(id);
+        self.join_state(id);
         self.with_server(|server| {
             if let Err(err) = server.send_resources(id) {
                 warn!("cannot send the resource list to player {id}: {err}");
             }
         });
-        self.join_entities(id);
-        self.join_state(id);
         self.dispatch("playerJoining", EventSource::Player(id), &[]);
         info!("{name} ({id}) joined from {endpoint}");
     }

@@ -9,7 +9,7 @@
 use std::fs;
 use std::net::SocketAddr;
 
-use sixm_core::{Host, Value};
+use sixm_core::{ConvarKind, Host, Value};
 use tracing::{debug, error, info, warn};
 
 use crate::access::Permission;
@@ -119,7 +119,9 @@ pub(crate) fn run_words(
         return;
     }
     match lower.as_str() {
-        "set" | "sets" | "setr" => set_convar(manager, args),
+        "set" => set_convar(manager, "set", args, ConvarKind::Plain),
+        "sets" => set_convar(manager, "sets", args, ConvarKind::ServerInfo),
+        "setr" => set_convar(manager, "setr", args, ConvarKind::Replicated),
         "start" => resource_command(args, "start <resource>", |resource| manager.start(resource)),
         "stop" => resource_command(args, "stop <resource>", |resource| manager.stop(resource)),
         "restart" => resource_command(args, "restart <resource>", |resource| {
@@ -202,8 +204,15 @@ fn run_script_or_convar(
             CommandSource::Player(player) => {
                 info!("player {player} may not read or set the convar `{name}`");
             }
-            CommandSource::Console if args.is_empty() => info!("{name} = \"{value}\""),
-            CommandSource::Console => manager.set_convar(name, &args.join(" ")),
+            CommandSource::Console if args.is_empty() => {
+                match manager.convar_kind(name).unwrap_or(ConvarKind::Plain) {
+                    ConvarKind::Plain => info!("{name} = \"{value}\""),
+                    kind => info!("{name} = \"{value}\" ({})", kind.as_str()),
+                }
+            }
+            CommandSource::Console => {
+                store_convar(manager, name, &args.join(" "), ConvarKind::Plain);
+            }
         }
         return;
     }
@@ -213,14 +222,22 @@ fn run_script_or_convar(
     }
 }
 
-/// `set`, `sets` and `setr`: store a convar. The value is the rest of the line,
-/// joined by single spaces.
-fn set_convar(manager: &ResourceManager, args: &[String]) {
+/// `set`, `sets` and `setr`: store a convar with `kind`. The value is the rest
+/// of the line, joined by single spaces. `command` names the command in the
+/// usage line.
+fn set_convar(manager: &ResourceManager, command: &str, args: &[String], kind: ConvarKind) {
     let Some((name, value)) = args.split_first() else {
-        warn!("usage: set <name> <value>");
+        warn!("usage: {command} <name> <value>");
         return;
     };
-    manager.set_convar(name, &value.join(" "));
+    store_convar(manager, name, &value.join(" "), kind);
+}
+
+/// Stores a convar. A refused store is logged, and the convar keeps its value.
+fn store_convar(manager: &ResourceManager, name: &str, value: &str, kind: ConvarKind) {
+    if let Err(err) = manager.set_convar(name, value, kind) {
+        error!("cannot set `{name}`: {err}");
+    }
 }
 
 /// Runs a resource command with the resource name as its only argument.
@@ -260,7 +277,7 @@ fn endpoint(manager: &ResourceManager, args: &[String], alias: bool) {
     };
     match address.parse::<SocketAddr>() {
         Ok(_) => {
-            manager.set_convar(ENDPOINT, address);
+            store_convar(manager, ENDPOINT, address, ConvarKind::Plain);
             info!("Listening address set to {address}; it applies at the next start");
         }
         Err(err) => error!("endpoint_add_udp: `{address}` is not an ip:port address: {err}"),

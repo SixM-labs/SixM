@@ -93,6 +93,11 @@ pub enum ClientNotice {
     },
     /// An entity was deleted.
     EntityDeleted { id: u32 },
+    /// Replicated convars, as `(name, value)`. A `None` value means the server
+    /// no longer replicates the convar.
+    Convars {
+        entries: Vec<(String, Option<String>)>,
+    },
     /// The server kicked the client, or shut down.
     Kicked { reason: String },
     /// The connection ended.
@@ -230,6 +235,34 @@ impl Client {
         }
     }
 
+    /// Takes what the server sent before the resource list: its replicated
+    /// convars, entities and state. A runtime applies these before it starts
+    /// any script, so scripts see them while they load. Resource events stay
+    /// queued for [`poll`](Self::poll).
+    pub fn join_notices(&mut self) -> Vec<ClientNotice> {
+        let mut notices = Vec::new();
+        let mut kept = VecDeque::with_capacity(self.backlog.len());
+        // `handle` expands an entity snapshot into creations at the back of the
+        // backlog, so this loop also turns those into notices.
+        while let Some(event) = self.backlog.pop_front() {
+            if matches!(
+                event,
+                ClientEvent::Resources { .. }
+                    | ClientEvent::ResourceStarted { .. }
+                    | ClientEvent::ResourceStopped { .. }
+                    | ClientEvent::Event { .. }
+                    | ClientEvent::Kicked { .. }
+                    | ClientEvent::Disconnected { .. }
+            ) {
+                kept.push_back(event);
+            } else if let Some(notice) = self.handle(event) {
+                notices.push(notice);
+            }
+        }
+        self.backlog = kept;
+        notices
+    }
+
     /// Handles one event. Returns `None` for a resource frame, which only queues
     /// one start per resource for `poll` to handle.
     fn handle(&mut self, event: ClientEvent) -> Option<ClientNotice> {
@@ -268,6 +301,7 @@ impl Client {
                 );
                 return None;
             }
+            ClientEvent::Convars { entries } => ClientNotice::Convars { entries },
             ClientEvent::Kicked { reason } => ClientNotice::Kicked { reason },
             ClientEvent::Disconnected { reason } => ClientNotice::Disconnected { reason },
         };

@@ -122,6 +122,31 @@ pub enum ScriptError {
     Runtime(String),
 }
 
+/// How the server treats a convar's value, decided by the command or function
+/// that stored it last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConvarKind {
+    /// Kept on the server. The default, set by `set` and `SetConvar`.
+    Plain,
+    /// Marked as server information, set by `sets` and `SetConvarServerInfo`.
+    /// Nothing sends it anywhere yet.
+    ServerInfo,
+    /// Sent to every connected client, and to each player who joins. Set by
+    /// `setr` and `SetConvarReplicated`.
+    Replicated,
+}
+
+impl ConvarKind {
+    /// The kind's name, as the console shows it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Plain => "plain",
+            Self::ServerInfo => "server info",
+            Self::Replicated => "replicated",
+        }
+    }
+}
+
 /// Services a host provides to script runtimes, on every side.
 ///
 /// A host is either a server or a client, and [`server`](Self::server) and
@@ -292,6 +317,12 @@ pub trait ServerHost {
     /// [`set_entity_position`](Self::set_entity_position). Fails for an unknown
     /// entity or a rotation that is not finite.
     fn set_entity_rotation(&self, entity: u32, rotation: [f32; 3]) -> Result<(), ScriptError>;
+
+    /// Stores a convar with the given kind, as `SetConvar`, `SetConvarReplicated`
+    /// and `SetConvarServerInfo` do. The kind of the last store decides whether
+    /// clients receive the value. Fails for a replicated convar whose name or
+    /// value is too long to send, and then nothing changes.
+    fn set_convar(&self, name: &str, value: &str, kind: ConvarKind) -> Result<(), ScriptError>;
 }
 
 /// Services only a client provides: the connection to the server.

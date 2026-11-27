@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use common::{Fixture, manifest};
 use sixm_client::{Client, ClientRuntime};
-use sixm_core::{GLOBAL_BAG, Host, Value};
+use sixm_core::{ConvarKind, GLOBAL_BAG, Host, Value};
 use sixm_net::Identity;
 use sixm_server::Input;
 use tempfile::TempDir;
@@ -64,6 +64,7 @@ local function report(text)
 end
 
 report(('duplicity %s'):format(tostring(IsDuplicityVersion())))
+report(('probe at load %s'):format(tostring(GlobalState.probe)))
 
 RegisterNetEvent('hello:pong', function(text)
     report(('pong %d %s'):format(source, text))
@@ -362,12 +363,15 @@ fn client_handler_without_register_net_event_gets_no_server_events() {
 #[test]
 fn replicated_global_state_is_readable_and_reaches_client_change_handlers() {
     let s = session();
-    s.h.wait_for_report(&s.runtime, "the initial state", |log| {
-        has_line(
-            log,
-            "1: change global.probe ready readable ready replicated true",
-        )
+    // The state is applied before the scripts load, so the script reads it at
+    // once, and its change handler is only called for later changes.
+    let log = s.h.wait_for_report(&s.runtime, "the initial state", |log| {
+        has_line(log, "1: probe at load ready")
     });
+    assert!(
+        !log.contains("change global.probe ready"),
+        "the join must not run change handlers: {log}"
+    );
 
     s.h.fx
         .manager()
@@ -677,4 +681,221 @@ fn players_cannot_quit_stop_or_read_and_set_convars_through_the_server() {
         h.fx.manager().convar("sv_hostname").as_deref(),
         Some("hacked")
     );
+}
+
+/// Name of the resource that holds [`CONVARS_SERVER_SCRIPT`] and [`CONVARS_CLIENT_SCRIPT`].
+const CONVARS_RESOURCE: &str = "convars";
+
+/// Server side of the convar tests: records the client's reports, replicates a
+/// convar from a command, and reads booleans as a server script.
+const CONVARS_SERVER_SCRIPT: &str = r"
+local lines = {}
+
+RegisterNetEvent('convars:report', function(text)
+    lines[#lines + 1] = text
+end)
+
+RegisterCommand('replicate', function(_, args)
+    SetConvarReplicated(args[1], args[2])
+end, false)
+
+RegisterCommand('boolprobe', function(_, args)
+    lines[#lines + 1] = ('server %s %s'):format(args[1], tostring(GetConvarBool(args[1], true)))
+end, false)
+
+function report()
+    return table.concat(lines, '\n')
+end
+";
+
+/// Client side of the convar tests: `show` reports `game_mode`, and `boolprobe`
+/// reports a boolean convar.
+const CONVARS_CLIENT_SCRIPT: &str = r"
+local function report(text)
+    TriggerServerEvent('convars:report', text)
+end
+
+-- Runs while the script loads, so it sees only what the join delivered first.
+report('load ' .. GetConvar('game_mode', 'none'))
+
+RegisterCommand('show', function()
+    report('show ' .. GetConvar('game_mode', 'none'))
+end, false)
+
+RegisterCommand('boolprobe', function(_, args)
+    report(('client %s %s'):format(args[1], tostring(GetConvarBool(args[1], true))))
+end, false)
+";
+
+/// A server with the convar resource running and no client yet.
+fn convars_harness() -> Harness {
+    let h = Harness::bare(CONVARS_RESOURCE);
+    let text = manifest(&["server.lua"], &["report"], &[]) + "client_scripts { 'client.lua' }\n";
+    h.add(
+        CONVARS_RESOURCE,
+        &text,
+        &[
+            ("server.lua", CONVARS_SERVER_SCRIPT),
+            ("client.lua", CONVARS_CLIENT_SCRIPT),
+        ],
+    );
+    h.start(CONVARS_RESOURCE);
+    h
+}
+
+impl Harness {
+    /// Runs both loops for `span`, handling every server input and client notice
+    /// that arrives in that time.
+    fn settle(&self, runtime: &ClientRuntime, span: Duration) {
+        let end = Instant::now() + span;
+        while Instant::now() < end {
+            match self.input.recv_timeout(STEP) {
+                Ok(input) => self.fx.server.handle(input),
+                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {}
+            }
+            self.pump_server();
+            runtime.pump(STEP);
+        }
+    }
+}
+
+/// Runs the client command `command` until the server's log ends with the line
+/// `expected`, and returns the log. Each attempt adds a report, so the last line
+/// is the client's latest answer.
+fn client_reports_last(
+    h: &Harness,
+    runtime: &ClientRuntime,
+    command: &str,
+    expected: &str,
+) -> String {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        runtime.execute(command);
+        h.settle(runtime, CONVARS_SETTLE);
+        let log = h.fx.text(h.reporter, "report");
+        if log.lines().last() == Some(expected) {
+            return log;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for `{expected}` as the last line; the server has:\n{log}"
+        );
+    }
+}
+
+/// How long a convar test lets both loops run after each client command.
+const CONVARS_SETTLE: Duration = Duration::from_millis(100);
+
+#[test]
+fn a_replicated_convar_set_before_the_join_is_read_by_the_client_script() {
+    let h = convars_harness();
+    console(&h, "setr game_mode race");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let runtime = h.connect(&dir.path().join("cache"), &dir.path().join("data"));
+    client_reports_last(&h, &runtime, "show", "show race");
+}
+
+#[test]
+fn client_scripts_see_replicated_convars_while_they_load() {
+    let h = convars_harness();
+    console(&h, "setr game_mode race");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let runtime = h.connect(&dir.path().join("cache"), &dir.path().join("data"));
+    let log = h.wait_for_report(&runtime, "the load report", |log| {
+        log.lines().any(|line| line.starts_with("load "))
+    });
+    assert!(has_line(&log, "load race"), "{log}");
+}
+
+#[test]
+fn later_changes_reach_the_client_and_a_store_of_another_kind_removes_it() {
+    let h = convars_harness();
+    console(&h, "setr game_mode race");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let runtime = h.connect(&dir.path().join("cache"), &dir.path().join("data"));
+    client_reports_last(&h, &runtime, "show", "show race");
+
+    console(&h, "setr game_mode drift");
+    client_reports_last(&h, &runtime, "show", "show drift");
+
+    // Server information is marked, not sent, so the client forgets the convar.
+    console(&h, "sets game_mode info");
+    assert_eq!(
+        h.fx.manager().convar_kind("game_mode"),
+        Some(ConvarKind::ServerInfo)
+    );
+    client_reports_last(&h, &runtime, "show", "show none");
+
+    console(&h, "setr game_mode again");
+    client_reports_last(&h, &runtime, "show", "show again");
+
+    // A plain set is the last store, so the replication ends.
+    console(&h, "set game_mode x");
+    assert_eq!(
+        h.fx.manager().convar_kind("game_mode"),
+        Some(ConvarKind::Plain)
+    );
+    client_reports_last(&h, &runtime, "show", "show none");
+}
+
+#[test]
+fn a_local_set_of_a_replicated_convar_is_refused_and_the_value_stays() {
+    let h = convars_harness();
+    console(&h, "setr game_mode race");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let runtime = h.connect(&dir.path().join("cache"), &dir.path().join("data"));
+    client_reports_last(&h, &runtime, "show", "show race");
+
+    runtime.execute("set game_mode y");
+    runtime.execute("setr game_mode y");
+    runtime.execute("game_mode y");
+    client_reports_last(&h, &runtime, "show", "show race");
+}
+
+#[test]
+fn a_script_on_the_server_replicates_a_convar_to_the_client() {
+    let h = convars_harness();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let runtime = h.connect(&dir.path().join("cache"), &dir.path().join("data"));
+    client_reports_last(&h, &runtime, "show", "show none");
+
+    console(&h, "replicate game_mode gamma");
+    assert_eq!(
+        h.fx.manager().convar_kind("game_mode"),
+        Some(ConvarKind::Replicated)
+    );
+    client_reports_last(&h, &runtime, "show", "show gamma");
+}
+
+#[test]
+fn get_convar_bool_reads_the_usual_spellings_on_both_sides() {
+    let h = convars_harness();
+    console(&h, "setr flag_yes YES");
+    console(&h, "set flag_no OFF");
+    console(&h, "boolprobe flag_yes");
+    console(&h, "boolprobe flag_no");
+    console(&h, "boolprobe flag_missing");
+    let server_log = h.fx.text(CONVARS_RESOURCE, "report");
+    assert!(
+        has_line(&server_log, "server flag_yes true"),
+        "{server_log}"
+    );
+    assert!(
+        has_line(&server_log, "server flag_no false"),
+        "{server_log}"
+    );
+    assert!(
+        has_line(&server_log, "server flag_missing true"),
+        "{server_log}"
+    );
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let runtime = h.connect(&dir.path().join("cache"), &dir.path().join("data"));
+    runtime.execute("set flag_off off");
+    runtime.execute("boolprobe flag_yes");
+    runtime.execute("boolprobe flag_off");
+    let log = h.wait_for_report(&runtime, "the client bool probes", |log| {
+        has_line(log, "client flag_off false")
+    });
+    assert!(has_line(&log, "client flag_yes true"), "{log}");
 }

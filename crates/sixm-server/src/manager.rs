@@ -8,13 +8,14 @@ use std::rc::{Rc, Weak};
 use std::time::Instant;
 
 use sixm_core::{
-    ClientHost, ClientTarget, EntityInfo, EntityKind, EventContext, EventSource, FuncRef, Host,
-    PlayerInfo, ResourceName, ResourceState, ScriptError, ScriptRuntime, ServerHost, Value,
+    ClientHost, ClientTarget, ConvarKind, EntityInfo, EntityKind, EventContext, EventSource,
+    FuncRef, Host, PlayerInfo, ResourceName, ResourceState, ScriptError, ScriptRuntime, ServerHost,
+    Value,
 };
 use sixm_lua::LuaRuntime;
 use sixm_net::{
-    MAX_EXPORT_NAME_LEN, MAX_EXPORTS, MAX_METADATA, MAX_METADATA_KEY_LEN, MAX_METADATA_VALUE_LEN,
-    PublishedResource,
+    MAX_CONVAR_NAME_LEN, MAX_CONVAR_VALUE_LEN, MAX_EXPORT_NAME_LEN, MAX_EXPORTS, MAX_METADATA,
+    MAX_METADATA_KEY_LEN, MAX_METADATA_VALUE_LEN, PublishedResource,
 };
 use sixm_resources::{Catalog, DependencyError, ResourceError, ScanIssue};
 use tracing::{error, info, warn};
@@ -223,14 +224,63 @@ impl ResourceManager {
             .collect()
     }
 
-    /// Sets a convar. Names are case-insensitive.
-    pub fn set_convar(&self, name: &str, value: &str) {
-        self.convars.borrow_mut().set(name, value);
+    /// Stores a convar with `kind`. Names are case-insensitive, and a name must
+    /// not be empty.
+    ///
+    /// The kind of the last store decides what clients get. A replicated convar
+    /// is sent to every connected player at once. A convar that was replicated
+    /// and is stored with another kind is removed on their side. A replicated
+    /// convar must fit the wire limits, and the call fails without changing
+    /// anything when it does not.
+    pub fn set_convar(&self, name: &str, value: &str, kind: ConvarKind) -> Result<(), ScriptError> {
+        if name.is_empty() {
+            return Err(ScriptError::Runtime("a convar needs a name".to_owned()));
+        }
+        if kind == ConvarKind::Replicated {
+            check_replicated(name, value)?;
+        }
+        let previous = self.convars.borrow_mut().set(name, value, kind);
+        let key = name.to_ascii_lowercase();
+        match (kind, previous) {
+            (ConvarKind::Replicated, _) => self.broadcast_convar(&key, Some(value)),
+            (_, Some(ConvarKind::Replicated)) => self.broadcast_convar(&key, None),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Tells every accepted player that the replicated convar `name` changed.
+    /// A `None` value removes it on their side.
+    fn broadcast_convar(&self, name: &str, value: Option<&str>) {
+        self.with_server(|server| {
+            if let Err(err) = server.broadcast_convars(&[(name, value)]) {
+                warn!("cannot send convar `{name}` to the players: {err}");
+            }
+        });
+    }
+
+    /// Sends every replicated convar to `player`, who is being admitted.
+    pub(crate) fn join_convars(&self, player: u32) {
+        let replicated = self.convars.borrow().replicated();
+        let entries: Vec<(&str, Option<&str>)> = replicated
+            .iter()
+            .map(|(name, value)| (name.as_str(), Some(value.as_str())))
+            .collect();
+        self.with_server(|server| {
+            if let Err(err) = server.send_convars(player, &entries) {
+                warn!("cannot send the convars to player {player}: {err}");
+            }
+        });
     }
 
     /// The value of a convar, if it is set.
     pub fn convar(&self, name: &str) -> Option<String> {
         self.convars.borrow().get(name).map(str::to_owned)
+    }
+
+    /// The kind of a convar, if it is set.
+    pub fn convar_kind(&self, name: &str) -> Option<ConvarKind> {
+        self.convars.borrow().kind(name)
     }
 
     /// Asks the server loop to stop after the current command.
@@ -826,7 +876,27 @@ impl Host for ResourceManager {
     }
 }
 
+/// Checks that a replicated convar fits the wire: the name is 1 to
+/// [`MAX_CONVAR_NAME_LEN`] bytes and the value at most [`MAX_CONVAR_VALUE_LEN`].
+fn check_replicated(name: &str, value: &str) -> Result<(), ScriptError> {
+    if name.len() > MAX_CONVAR_NAME_LEN {
+        return Err(ScriptError::Runtime(format!(
+            "a replicated convar name must be at most {MAX_CONVAR_NAME_LEN} bytes"
+        )));
+    }
+    if value.len() > MAX_CONVAR_VALUE_LEN {
+        return Err(ScriptError::Runtime(format!(
+            "a replicated convar value must be at most {MAX_CONVAR_VALUE_LEN} bytes"
+        )));
+    }
+    Ok(())
+}
+
 impl ServerHost for ResourceManager {
+    fn set_convar(&self, name: &str, value: &str, kind: ConvarKind) -> Result<(), ScriptError> {
+        self.set_convar(name, value, kind)
+    }
+
     fn trigger_client_event(
         &self,
         event: &str,

@@ -64,7 +64,7 @@ quotes and comments. See [server.md](server.md).
 |---|---|
 | `help` | Lists the built-in commands and the script commands. |
 | `quit [reason]` | Stops the client. |
-| `set <name> <value>`, `sets`, `setr` | Stores a convar. The value is the rest of the line, joined with single spaces. |
+| `set <name> <value>`, `sets`, `setr` | Stores a local convar. The value is the rest of the line, joined with single spaces. A name the server replicates is refused (see below). |
 
 The client has no `exec`, `start`, `stop` or `refresh`. Those are server
 commands.
@@ -87,7 +87,24 @@ server never sees those lines.
 The server has the same convar name with a default of `20`. The two processes
 keep separate values. The server default does not apply to the client.
 
-Scripts read any convar with `GetConvar` and `GetConvarInt`.
+Scripts read any convar with `GetConvar`, `GetConvarInt` and `GetConvarBool`.
+`GetConvar` returns a replicated value first, then the local value, then the
+default.
+
+### Replicated convars
+
+The server sends its replicated convars to the client when it joins, and again
+whenever one changes or stops being replicated. The client keeps them apart
+from its own convars. A convar the server stops replicating is removed here, so
+it reads its local value again, or the default.
+
+A local `set`, `sets` or `setr` of a name the server replicates is refused with
+a warning, whether it is typed in the console or sent by `ExecuteCommand`. The
+value stays the one the server sent.
+
+The server sends the replicated convars, the entities and the state bags
+before the resource list, and the client applies them before it starts any
+script. A script sees them while it loads.
 
 ## Cache layout
 

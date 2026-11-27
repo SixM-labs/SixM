@@ -33,5 +33,5 @@ pub use files::{
     PublishedFile, PublishedResource, ResourceEntry, hash_hex,
 };
 pub use identity::{Fingerprint, Identity, ParseFingerprintError};
-pub use protocol::PROTOCOL_VERSION;
+pub use protocol::{MAX_CONVAR_NAME_LEN, MAX_CONVAR_VALUE_LEN, PROTOCOL_VERSION};
 pub use server::{ConnectionId, NetEvent, NetServer, ServerConfig};
