@@ -239,7 +239,8 @@ Convar names are case-insensitive. Scripts read them with `GetConvar` and
 | `sv_entityLockdown` | `inactive` | Global client entity creation lockdown mode (`inactive`, `relaxed` to block peds, or `strict` to block all client creations), overridable per routing bucket via `SetRoutingBucketEntityLockdownMode`. |
 
 Any other convar can be set with `set`, `sets` or `setr`, or with the Lua
-setters, and read by scripts. Console-only bootstrap and security convars
+setters, and read by scripts. Script convar writes (`SetConvar*`) are bounded to
+256-byte names and 64 KiB values (or 4096 bytes when replicated). Console-only bootstrap and security convars
 (`rcon_password`, `sv_httpAllowPrivate`, `sv_httpEnabled`,
 `sv_exposePlayerIdentifiers`, `sixm_identityFile`, `sixm_resourcesPath`,
 `sixm_kvpPath`, and `endpoint_add_udp`) cannot be modified by scripts or remote

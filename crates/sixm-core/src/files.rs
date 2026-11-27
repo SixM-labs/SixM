@@ -8,6 +8,11 @@ use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 
+/// Largest single file write accepted from scripts through `SaveResourceFile`.
+pub const MAX_RESOURCE_FILE_WRITE_BYTES: usize = 4 * 1024 * 1024;
+/// Total per-resource storage quota for client-side `SaveResourceFile` data.
+pub const MAX_CLIENT_DATA_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Script file types that the server and client can execute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScriptLanguage {
@@ -122,7 +127,35 @@ impl ResourceDirectory {
 
     /// Writes a regular file, creating missing directories inside the resource.
     pub fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        self.write_bounded(path, data, usize::MAX, None)
+    }
+
+    /// Writes a regular file subject to per-file and optional per-directory
+    /// byte limits without following symbolic links.
+    pub fn write_bounded(
+        &self,
+        path: &str,
+        data: &[u8],
+        max_file_bytes: usize,
+        max_total_bytes: Option<u64>,
+    ) -> io::Result<()> {
+        if data.len() > max_file_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "resource file write exceeds the per-file size limit",
+            ));
+        }
         let path = normalize_resource_path(path).ok_or_else(invalid_resource_path)?;
+        if let Some(limit) = max_total_bytes {
+            let existing = directory_bytes_except(&self.0, "", &path)?;
+            let new_len = u64::try_from(data.len()).unwrap_or(u64::MAX);
+            if existing.saturating_add(new_len) > limit {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "resource directory storage quota exceeded",
+                ));
+            }
+        }
         let (directory, name) = self.file_parent(&path, true)?;
         match directory.symlink_metadata(name) {
             Ok(metadata) if !metadata.is_file() => return Err(invalid_resource_path()),
@@ -178,6 +211,33 @@ pub fn is_protected_resource_file(path: &str) -> bool {
                 || name.eq_ignore_ascii_case("__resource.lua")
         });
     is_manifest || ScriptLanguage::from_path(path).is_some()
+}
+
+fn directory_bytes_except(directory: &Dir, prefix: &str, target: &str) -> io::Result<u64> {
+    let mut total = 0_u64;
+    for entry in directory.entries()? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        let relative = if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let meta = directory.symlink_metadata(name)?;
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
+            let sub = directory.open_dir_nofollow(name)?;
+            total = total.saturating_add(directory_bytes_except(&sub, &relative, target)?);
+        } else if meta.is_file() && relative != target {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    Ok(total)
 }
 
 fn invalid_resource_path() -> io::Error {
@@ -301,5 +361,34 @@ mod tests {
         ] {
             assert!(!is_protected_resource_file(writable), "{writable}");
         }
+    }
+
+    #[test]
+    fn bounded_writes_enforce_file_and_directory_quotas() {
+        let fixture = tempfile::tempdir().expect("temporary directory");
+        let root = fixture.path().join("resource");
+        fs::create_dir(&root).expect("resource directory");
+        let directory = ResourceDirectory::open(&root).expect("open resource");
+
+        assert!(
+            directory
+                .write_bounded("data/too_big.bin", b"123456", 5, None)
+                .is_err()
+        );
+        directory
+            .write_bounded("data/a.bin", b"1234", 5, Some(8))
+            .expect("first write fits");
+        directory
+            .write_bounded("data/b.bin", b"5678", 5, Some(8))
+            .expect("second write hits quota exactly");
+        assert!(
+            directory
+                .write_bounded("data/c.bin", b"x", 5, Some(8))
+                .is_err()
+        );
+        // Replacing an existing file replaces its quota usage instead of double-counting.
+        directory
+            .write_bounded("data/b.bin", b"9999", 5, Some(8))
+            .expect("overwrite within quota");
     }
 }

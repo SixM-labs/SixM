@@ -9,9 +9,9 @@ use std::time::Instant;
 
 use sixm_core::{
     ClientHost, ClientTarget, ConvarKind, EntityAttachment, EntityInfo, EntityKind, EntityState,
-    EventContext, EventSource, FuncRef, Host, HttpRequest, PlayerInfo, ResourceDirectory,
-    ResourceName, ResourceState, ScriptError, ScriptLanguage, ScriptRuntime, ServerHost, Value,
-    WebReply, is_protected_resource_file,
+    EventContext, EventSource, FuncRef, Host, HttpRequest, MAX_RESOURCE_FILE_WRITE_BYTES,
+    PlayerInfo, ResourceDirectory, ResourceName, ResourceState, ScriptError, ScriptLanguage,
+    ScriptRuntime, ServerHost, Value, WebReply, is_protected_resource_file,
 };
 use sixm_js::JsRuntime;
 use sixm_kvp::KvpStore;
@@ -1130,7 +1130,9 @@ impl Host for ResourceManager {
             return false;
         };
         ResourceDirectory::open(&root)
-            .and_then(|directory| directory.write(path, data))
+            .and_then(|directory| {
+                directory.write_bounded(path, data, MAX_RESOURCE_FILE_WRITE_BYTES, None)
+            })
             .is_ok()
     }
 
@@ -1230,6 +1232,12 @@ impl ServerHost for ResourceManager {
         value: &str,
         kind: ConvarKind,
     ) -> Result<(), ScriptError> {
+        const MAX_SCRIPT_CONVAR_VALUE_LEN: usize = 64 * 1024;
+        if name.len() > MAX_CONVAR_NAME_LEN || value.len() > MAX_SCRIPT_CONVAR_VALUE_LEN {
+            return Err(ScriptError::Runtime(
+                "convar name or value exceeds script size limits".to_owned(),
+            ));
+        }
         if Convars::is_console_only(name) {
             return Err(ScriptError::Runtime(format!(
                 "{} is console-only",

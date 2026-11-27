@@ -17,7 +17,8 @@
 
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
+use std::io;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -26,7 +27,10 @@ use std::time::{Duration, Instant};
 
 use sixm_core::{FuncRef, HttpRequest, ResourceName, ScriptError, Value};
 use ureq::Agent;
+use ureq::config::Config;
 use ureq::http::{self, Method, Uri};
+use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
+use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 
 /// Most requests one resource may have open at once.
 pub(crate) const MAX_IN_FLIGHT: usize = 64;
@@ -217,16 +221,16 @@ impl HttpClient {
         }
         let (queue, jobs) = mpsc::sync_channel(QUEUE_CAPACITY);
         let jobs = Arc::new(Mutex::new(jobs));
-        let agent = build_agent();
+        let agents = Agents::new();
         let mut last_error = None;
         let mut started = 0_usize;
         for index in 0..workers.max(1) {
             let jobs = Arc::clone(&jobs);
-            let agent = agent.clone();
+            let agents = agents.clone();
             let finished = Arc::clone(&self.finished);
             let spawned = thread::Builder::new()
                 .name(format!("sixm-http-{index}"))
-                .spawn(move || work(&jobs, &agent, &finished));
+                .spawn(move || work(&jobs, &agents, &finished));
             match spawned {
                 Ok(_) => started += 1,
                 Err(err) => last_error = Some(err),
@@ -275,13 +279,13 @@ impl HttpClient {
 }
 
 /// A worker: takes jobs until the pool is dropped, skipping cancelled ones.
-fn work(jobs: &Mutex<Receiver<Job>>, agent: &Agent, finished: &Mutex<Vec<Completion>>) {
+fn work(jobs: &Mutex<Receiver<Job>>, agents: &Agents, finished: &Mutex<Vec<Completion>>) {
     while let Some(job) = next_job(jobs) {
         if job.cancelled.load(Ordering::Acquire) {
             continue;
         }
         let outcome = perform(
-            agent,
+            agents,
             &job.method,
             &job.uri,
             job.request,
@@ -310,21 +314,65 @@ fn invalid_url(url: &str) -> ScriptError {
     ScriptError::Runtime(format!("`{url}` is not an absolute http or https URL"))
 }
 
-/// The shared agent: rustls with ring, Mozilla roots, manual redirect handling
-/// up to [`MAX_REDIRECTS`] (so each hop is checked against private-network
-/// rules), and error statuses returned as responses.
-fn build_agent() -> Agent {
-    Agent::config_builder()
-        .http_status_as_error(false)
-        .max_redirects(0)
-        .build()
-        .into()
+/// Shared worker agents: `public` pins DNS resolution so forbidden private or
+/// loopback IPs can never be connected to (closing DNS rebinding), while
+/// `private` allows local targets when `sv_httpAllowPrivate` is enabled.
+#[derive(Clone)]
+struct Agents {
+    public: Agent,
+    private: Agent,
+}
+
+impl Agents {
+    fn new() -> Self {
+        let config = || {
+            Agent::config_builder()
+                .http_status_as_error(false)
+                .max_redirects(0)
+                .build()
+        };
+        Self {
+            public: Agent::with_parts(
+                config(),
+                DefaultConnector::default(),
+                SafePublicResolver::default(),
+            ),
+            private: Agent::new_with_config(config()),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct SafePublicResolver(DefaultResolver);
+
+impl Resolver for SafePublicResolver {
+    fn resolve(
+        &self,
+        uri: &Uri,
+        config: &Config,
+        timeout: NextTimeout,
+    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        check_target_syntax(uri, false).map_err(|message| {
+            ureq::Error::Io(io::Error::new(io::ErrorKind::PermissionDenied, message))
+        })?;
+        let addrs = self.0.resolve(uri, config, timeout)?;
+        let host = uri.host().unwrap_or("");
+        for addr in &addrs {
+            if is_forbidden_ip(addr.ip()) {
+                return Err(ureq::Error::Io(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("refused private or loopback HTTP target `{host}`"),
+                )));
+            }
+        }
+        Ok(addrs)
+    }
 }
 
 /// Runs one request to completion on the calling thread, validating initial and
 /// redirected targets when `allow_private` is `false`.
 fn perform(
-    agent: &Agent,
+    agents: &Agents,
     method: &Method,
     uri: &Uri,
     request: HttpRequest,
@@ -332,13 +380,18 @@ fn perform(
     allow_private: bool,
 ) -> Outcome {
     let deadline = Instant::now() + timeout;
+    let agent = if allow_private {
+        &agents.private
+    } else {
+        &agents.public
+    };
     let mut method = method.clone();
     let mut uri = uri.clone();
     let mut headers = request.headers;
     let mut body = request.body.unwrap_or_default();
 
     for hop in 0..=MAX_REDIRECTS {
-        if let Err(msg) = check_target(&uri, allow_private) {
+        if let Err(msg) = check_target_syntax(&uri, allow_private) {
             return Outcome::Failed(msg);
         }
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
@@ -427,7 +480,7 @@ fn collect_headers(response: &http::Response<ureq::Body>) -> Vec<(String, String
     headers
 }
 
-fn check_target(uri: &Uri, allow_private: bool) -> Result<(), String> {
+fn check_target_syntax(uri: &Uri, allow_private: bool) -> Result<(), String> {
     if !matches!(uri.scheme_str(), Some("http" | "https")) {
         return Err(format!("`{uri}` is not an absolute http or https URL"));
     }
@@ -442,20 +495,10 @@ fn check_target(uri: &Uri, allow_private: bool) -> Result<(), String> {
     if lower == "localhost" || lower.ends_with(".localhost") {
         return Err(format!("refused private or loopback HTTP target `{host}`"));
     }
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_forbidden_ip(ip) {
-            return Err(format!("refused private or loopback HTTP target `{host}`"));
-        }
-        return Ok(());
-    }
-    let port = uri.port_u16().unwrap_or_else(|| default_port(uri));
-    let resolved = (host, port)
-        .to_socket_addrs()
-        .map_err(|err| format!("cannot resolve `{host}`: {err}"))?;
-    for addr in resolved {
-        if is_forbidden_ip(addr.ip()) {
-            return Err(format!("refused private or loopback HTTP target `{host}`"));
-        }
+    if let Ok(ip) = host.parse::<IpAddr>()
+        && is_forbidden_ip(ip)
+    {
+        return Err(format!("refused private or loopback HTTP target `{host}`"));
     }
     Ok(())
 }
@@ -957,7 +1000,22 @@ mod tests {
             .parse()
             .expect("uri");
         let blocked = resolve_redirect(&base, "http://169.254.169.254/latest").expect("uri");
-        assert!(check_target(&blocked, false).is_err());
+        assert!(check_target_syntax(&blocked, false).is_err());
+
+        let resolver = SafePublicResolver::default();
+        let cfg = Config::default();
+        let localhost_uri: Uri = "http://localhost:80/".parse().expect("uri");
+        assert!(
+            resolver
+                .resolve(&localhost_uri, &cfg, NextTimeout::default())
+                .is_err()
+        );
+        let loopback_uri: Uri = "http://127.0.0.1:80/".parse().expect("uri");
+        assert!(
+            resolver
+                .resolve(&loopback_uri, &cfg, NextTimeout::default())
+                .is_err()
+        );
 
         let relative = resolve_redirect(&base, "next?ok=1#frag").expect("uri");
         assert_eq!(
