@@ -46,7 +46,7 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
 }
 
 /// Reads a headers table. Both names and values must be strings or numbers.
-fn read_headers(table: &Table) -> mlua::Result<Vec<(String, String)>> {
+pub(crate) fn read_headers(table: &Table) -> mlua::Result<Vec<(String, String)>> {
     let mut headers = Vec::new();
     for pair in table.pairs::<LuaValue, LuaValue>() {
         let (name, value) = pair?;

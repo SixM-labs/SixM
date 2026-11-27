@@ -90,6 +90,7 @@ forge a reference into server code.
 | Metadata key length | 1 to 256 bytes |
 | Metadata value length | 4096 bytes |
 | Deferral message length | 4096 bytes, cut on a character boundary when sent |
+| Refusal reason length | 256 bytes |
 | Resource name length | 256 bytes |
 | Client file name length | 1024 bytes |
 | File size | 64 MiB |
@@ -108,6 +109,8 @@ Client to server (`ClientMessage`):
 | 2 | `RequestFile` | `hash: 32 bytes` |
 | 3 | `Command` | `line: string`, at most 4096 bytes |
 | 4 | `EntityTransforms` | list of transforms (see [Entity transforms](#entity-transforms)), at most 1024 |
+| 5 | `CreateEntity` | `id: u32`, `kind: u8`, `model: u32`, `position: [f32; 3]`, `rotation: [f32; 3]` |
+| 6 | `RequestEntityControl` | `id: u32` |
 
 `Command` carries a console line typed on the client that the client does not
 know. The server runs it with the player's permissions, and it shares the
@@ -143,6 +146,9 @@ Server to client (`ServerMessage`):
 | 14 | `EntitySnapshot` | list of entity entries |
 | 15 | `Convars` | list of `(name: string, value: string or nil)` (see below) |
 | 16 | `Deferral` | `message: string`, at most 4096 bytes |
+| 17 | `EntityIdLease` | `first: u32`, `count: u32` |
+| 18 | `EntityCreateRefused` | `id: u32`, `reason: string`, at most 256 bytes |
+| 19 | `EntityOwner` | `id: u32`, `owner: u32` (`0` for server), `epoch: u32`, `position: [f32; 3]`, `rotation: [f32; 3]` |
 
 ### Convars
 
@@ -154,7 +160,7 @@ decoding budget. A join snapshot may span several frames.
 
 ### Handshake
 
-1. The client sends `Hello` with `protocol = 11` and its player name. The
+1. The client sends `Hello` with `protocol = 12` and its player name. The
    server has already verified the client certificate, so only a client with a
    certificate gets this far.
 2. A different protocol number is refused with `Rejected`, for example

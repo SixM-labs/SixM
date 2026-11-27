@@ -123,7 +123,8 @@ Server (`EventSource::Local` unless noted):
 | `onResourceStop` | `name` | Before the resource stops. |
 | `onServerResourceStop` | `name` | Same time as `onResourceStop`. |
 | `playerConnecting` | `name`, `setKickReason`, `deferrals` | `source` is the new player's id, which is assigned before the handlers run. Call `setKickReason(text)` or `CancelEvent()` to refuse. `setKickReason` is valid only during this event. `deferrals` holds the connection open, see [Deferrals](#deferrals). |
-| `entityCreated` | `entity` | Right after a script created an entity. Its state bag already exists. |
+| `entityCreating` | `entity`, `kind`, `model` | Fired before a client-created entity is accepted (`source` is the creator's player id). `kind` is `1` (ped), `2` (vehicle) or `3` (object). `CancelEvent()` refuses it. |
+| `entityCreated` | `entity` | Right after a server- or client-created entity is stored. Its state bag already exists. |
 | `entityRemoved` | `entity` | Before an entity is deleted, while it still exists. |
 | `playerJoining` | none | `source` is the player's id. Fired after admission and after the player's state bag exists. |
 | `playerDropped` | `reason` | `source` is the player's id. The player is still listed while the handlers run. |
@@ -472,23 +473,26 @@ Behaviour:
 
 ## Entities
 
-The server owns every entity, with one exception: each player has a ped, which
-the client of that player moves. An entity id is also its network id and its
-handle on both sides. There is no game yet, so an entity is its kind, model,
-position and rotation. Clients hold the entities in their scope only, see
-[Scoping](#scoping).
+Entities can be created on the server or as networked entities on a client, and
+each player also has a ped owned by its client. An entity id is also its network
+id and its handle on both sides. There is no game yet, so an entity is its kind,
+model, position and rotation. Clients hold the entities in their scope only,
+see [Scoping](#scoping).
 
 | Name | Side | Signature and result |
 |---|---|---|
-| `CreateVehicle` | server | `CreateVehicle(model, x, y, z, heading, isNetwork, netMissionEntity)`. Returns the new entity id. The flags are ignored. |
+| `CreateVehicle` | both | `CreateVehicle(model, x, y, z, heading, isNetwork, netMissionEntity)`. Returns the new entity id. On the client, `isNetwork` must be `true` and the id comes from the client's leased block. |
 | `CreateVehicleServerSetter` | server | `CreateVehicleServerSetter(model, type, x, y, z, heading)`. Returns the id. `type` is ignored. |
-| `CreatePed` | server | `CreatePed(pedType, model, x, y, z, heading, isNetwork, bScriptHostPed)`. Returns the id. |
-| `CreateObject` / `CreateObjectNoOffset` | server | `CreateObject(model, x, y, z, isNetwork, netMissionEntity, doorFlag)`. Returns the id. |
+| `CreatePed` | both | `CreatePed(pedType, model, x, y, z, heading, isNetwork, bScriptHostPed)`. Returns the id. On the client, `isNetwork` must be `true`. |
+| `CreateObject` / `CreateObjectNoOffset` | both | `CreateObject(model, x, y, z, isNetwork, netMissionEntity, doorFlag)`. Returns the id. On the client, `isNetwork` must be `true` (`CreateObjectNoOffset` is server only). |
 | `DeleteEntity` | server | `DeleteEntity(entity)`. Does nothing for an unknown entity. |
 | `SetEntityCoords` / `SetEntityCoordsNoOffset` | both | `SetEntityCoords(entity, x, y, z, ...)`. Extra arguments are ignored. On the server it moves any entity. On a client it moves only an entity the client owns. |
 | `SetEntityHeading` | both | `SetEntityHeading(entity, heading)`. Keeps pitch and roll. Same rules as `SetEntityCoords`. |
 | `SetEntityRotation` | both | `SetEntityRotation(entity, pitch, roll, yaw, ...)`. Same rules as `SetEntityCoords`. |
-| `NetworkGetEntityOwner` | server | `NetworkGetEntityOwner(entity)`. Returns the id of the player that owns the entity, or `-1` for a server-owned or unknown entity. |
+| `NetworkGetEntityOwner` | both | `NetworkGetEntityOwner(entity)`. Returns the id of the player that owns the entity, or `-1` for a server-owned or unknown entity. |
+| `NetworkRequestControlOfEntity` | client | `NetworkRequestControlOfEntity(entity)`. Asks the server for control of an unowned entity in scope. Returns `true` if the request was sent, or `false` if unknown or already owned. |
+| `SetEntityOwner` | server | `SetEntityOwner(entity, player)` (SixM extension). Gives `entity` to `player`, or `0` for the server, keeping its teleport epoch. Returns `true` if updated. |
+| `SetEntityOrphanMode` | server | `SetEntityOrphanMode(entity, mode)`. Sets what happens when a client-created entity's creator leaves: `'delete'` (default) or `'migrate'`. |
 | `GetAllVehicles` / `GetAllPeds` / `GetAllObjects` | server | Return arrays of entity ids, ascending. |
 | `GetGamePool` | client | `GetGamePool(name)` with `'CVehicle'`, `'CPed'` or `'CObject'`. Returns an array of ids. Other names give an empty array. |
 | `DoesEntityExist` | both | `DoesEntityExist(entity)`. Returns a boolean. |
@@ -574,7 +578,17 @@ Which side moves what:
   computed before a server move is dropped, whenever it arrives. The server's
   move then stands everywhere, even if the owner stops moving afterwards.
 
-`NetworkGetEntityOwner` is available on the server only.
+- **Client-created entities and migration.** Clients create networked
+  entities from leased id blocks, so the returned handle works immediately on
+  the client while the server checks `sv_entityLockdown` / the bucket lockdown
+  mode, `sixm_maxClientEntities` (default 64) and `entityCreating`, refusing
+  with `EntityCreateRefused` if rejected. When an entity's owner disconnects or
+  leaves the entity's bucket, ownership migrates to the nearest in-scope player
+  (or the server) with the current teleport epoch intact. Client-created
+  entities are deleted when their creator leaves unless
+  `SetEntityOrphanMode(entity, 'migrate')` was set.
+
+`NetworkGetEntityOwner` is available on both the server and the client.
 
 ### Routing buckets
 
@@ -630,6 +644,36 @@ never block a frame.
 The client does not have `PerformHttpRequest`. A request from a player's
 machine would expose the player's address and could reach hosts the server
 operator never chose. A client asks the server for the data instead.
+
+## HTTP handlers (server only)
+
+`SetHttpHandler(function(req, res) ... end)` registers the HTTP handler of the
+calling resource. Requests to `/<resource>` and `/<resource>/...` on the server's
+TCP port call it, after the built-in routes of the server. Calling it again
+replaces the handler. The handler is removed when the resource stops.
+
+- `req.method`, `req.path` (the full path, such as `/res/page`), `req.query`
+  (without the `?`) and `req.headers` (lower-case names). The path is the raw one sent by the client: it is not decoded or normalized. The body is not in
+  `req`: `req.setDataHandler(function(data) ... end)` registers a function that
+  is called with the whole body after the handler returns. The body is at most
+  1 MiB; a larger request is refused before the handler runs.
+- `res.writeHead(status, headers)` sets the status and headers. Optional, and
+  the default is `200`.
+- `res.write(data)` adds to the body, and `res.send(data)` adds the last part and
+  completes the response. `data` is optional in `send`.
+
+Both `res.send(...)` and `res:send(...)` work. The handler may complete the
+response later, from another handler or a frame, so it can keep the `res` it was
+given. A response left incomplete for `sixm_httpHandlerTimeout` seconds (default 25) gets `504`. A handler that
+raises an error before it completes gets `500`. A response body is limited to
+16 MiB.
+
+```lua
+SetHttpHandler(function(req, res)
+  res.writeHead(200, { ['Content-Type'] = 'text/plain' })
+  res.send('hello ' .. req.query)
+end)
+```
 
 ## JSON
 

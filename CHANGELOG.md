@@ -9,12 +9,28 @@ may change the protocol and the API.
 
 ### Added
 
+- HTTP on the server's TCP port (the game address): the built-in `/info.json`,
+  `/players.json` and `/dynamic.json`, and `SetHttpHandler` for resources under
+  `/<resource>/...`. Request bodies, connections, timeouts and the request rate
+  per client address are limited. `sv_exposePlayerIdentifiers` controls the
+  identifiers in `/players.json`, `sv_httpEnabled` switches HTTP off and
+  `sixm_httpHandlerTimeout` sets the handler timeout. A busy TCP port leaves the
+  server running without HTTP.
 - Resource key-value storage (`sixm-kvp`) on the server and the client:
   `SetResourceKvp`, the typed variants, `GetResourceKvp*`, `DeleteResourceKvp`,
   `StartFindKvp`/`FindKvp`/`EndFindKvp` and `FlushResourceKvp`. Reads stay in
   memory; a background thread appends CRC-checked records to one log per
   resource and compacts it, so the frame never waits for the disk. The server
   folder is `sixm_kvpPath`.
+- Client-created networked entities and ownership migration: clients can call
+  `CreateVehicle`, `CreatePed` and `CreateObject` (`isNetwork = true`) using
+  leased id blocks so the returned id is usable immediately, plus
+  `NetworkRequestControlOfEntity` and `NetworkGetEntityOwner`. The server
+  enforces `sixm_maxClientEntities` (default 64, replicated),
+  `sv_entityLockdown` and per-bucket lockdown modes, and fires the cancellable
+  `entityCreating` event; `SetEntityOwner` and `SetEntityOrphanMode` control
+  ownership and orphan handling, migrating ownership to the nearest in-scope
+  player or the server while preserving teleport epochs.
 - Routing buckets on the server: `SetPlayerRoutingBucket`,
   `GetPlayerRoutingBucket`, `SetEntityRoutingBucket`, `GetEntityRoutingBucket`,
   `GetPlayersInRoutingBucket`, and the stored population and entity lockdown

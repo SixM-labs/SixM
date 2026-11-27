@@ -26,6 +26,7 @@ mod server;
 mod traffic;
 mod transfer;
 mod transport;
+mod web;
 mod wire;
 
 #[cfg(test)]
@@ -46,3 +47,4 @@ pub use protocol::{
 };
 pub use server::{ConnectionId, NetEvent, NetServer, ServerConfig};
 pub use traffic::Traffic;
+pub use web::{WebExchange, WebResponder, WebServer};

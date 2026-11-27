@@ -27,7 +27,7 @@ pub use files::normalize_resource_path;
 pub use hash::joaat;
 pub use runtime::{
     ClientHost, ClientTarget, ConvarKind, EventContext, EventSource, Host, HttpRequest, PlayerInfo,
-    ResourceState, ScriptError, ScriptRuntime, ServerHost,
+    ResourceState, ScriptError, ScriptRuntime, ServerHost, WebReply, WebRequest, WebResponse,
 };
 pub use state::{GLOBAL_BAG, MAX_STATE_NAME_LEN, player_bag, player_of_bag};
 pub use value::{FuncRef, ResourceName, Value};
