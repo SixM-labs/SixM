@@ -108,6 +108,8 @@ pub struct TestHost {
     /// Access grants as `(principal, object)` pairs. A principal has exactly the
     /// objects it is granted: the test host does not model inheritance.
     pub grants: RefCell<Vec<(String, String)>>,
+    /// Resources restarted via `RestartResource`, as `(caller, target)`.
+    pub restarted_resources: RefCell<Vec<(String, String)>>,
 }
 
 impl TestHost {
@@ -688,6 +690,13 @@ impl ServerHost for TestHost {
     fn detach_entity(&self, entity: u32) -> Result<(), ScriptError> {
         self.entity_state_slot(entity)?.attachment = None;
         Ok(())
+    }
+
+    fn restart_resource(&self, caller: &str, resource: &str) -> bool {
+        self.restarted_resources
+            .borrow_mut()
+            .push((caller.to_owned(), resource.to_owned()));
+        self.roots.borrow().contains_key(resource)
     }
 }
 

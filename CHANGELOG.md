@@ -7,6 +7,34 @@ may change the protocol and the API.
 
 ## [Unreleased]
 
+### Added
+
+- Manifest `provide` / `provides` virtual resource alias directives, resolved
+  across dependencies, `@alias/...` manifest references, `exports`, file/state/metadata
+  natives, and resource lifecycle commands and natives (with duplicate
+  deduplication and conflict warnings).
+- Global `msgpack.pack` and `msgpack.unpack` in Lua (`sixm-lua`) and JavaScript
+  (`sixm-js`) with `vector2`/`vector3`/`vector4`/`quat` preservation, a 4 MiB
+  payload cap (`MAX_MSGPACK_BYTES`), and a 32-level nesting limit.
+- Lua and JavaScript natives: `GetConvarFloat`, `DoesPlayerExist`,
+  `IsPrincipalAceAllowed`, `RestartResource` (server, ACE-gated via
+  `command.restart`), and batch player ID array targets in
+  `TriggerClientEvent`, `TriggerLatentClientEvent`, and `emitNet`.
+- Server operations and observability: `--log-file`, `--log-json`, and `--watch`
+  CLI flags; `watch_resources [on|off]` hot-reload command; `/healthz`,
+  `/metrics` (`sv_metricsEnabled`), and `/admin` (`sv_adminUiEnabled` +
+  `rcon_password`) HTTP routes; optional master-server heartbeats
+  (`sv_masterUrl`, `sv_heartbeatInterval`); and per-player
+  `TriggerServerEvent` token-bucket rate limiting (`sv_playerEventRateLimit`).
+- Official IDE type definitions in `types/sixm.lua` and `types/sixm.d.ts`, plus
+  clean-room `[system]/sessionmanager` and `[system]/baseevents` resources in
+  `examples/server-data`.
+
+### Changed
+
+- Marked `sv_playerEventRateLimit`, `sv_metricsEnabled`, `sv_adminUiEnabled`,
+  `sv_masterUrl`, and `sv_heartbeatInterval` as console-only convars.
+
 ## [0.2.1]
 
 ### Changed

@@ -1,11 +1,14 @@
 //! The resource manager: installed and running resources, script commands, and
 //! the [`Host`] that script runtimes call back into.
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::time::Instant;
+
+use serde_json::json;
 
 use sixm_core::{
     ClientHost, ClientTarget, ConvarKind, EntityAttachment, EntityInfo, EntityKind, EntityState,
@@ -36,6 +39,7 @@ use crate::profiler::Profiler;
 use crate::resource_files::{FileHashes, listing};
 use crate::scope::Scopes;
 use crate::state::StateStore;
+use crate::watch::ResourceWatcher;
 use crate::web::WebState;
 
 /// Why a resource operation did not complete.
@@ -146,6 +150,12 @@ pub struct ResourceManager {
     pub(crate) web: WebState,
     /// The key-value store of the resources, opened on first use in `sixm_kvpPath`.
     kvp: RefCell<Option<KvpStore>>,
+    /// Whether hot-reload watching is enabled (`--watch` or `watch_resources on`).
+    watch_enabled: Cell<bool>,
+    /// File modification tracker for running resources when watch is enabled.
+    watcher: RefCell<ResourceWatcher>,
+    /// When the last master heartbeat was queued.
+    last_heartbeat: Cell<Option<Instant>>,
 }
 
 impl ResourceManager {
@@ -182,7 +192,30 @@ impl ResourceManager {
             http: HttpClient::default(),
             web: WebState::default(),
             kvp: RefCell::default(),
+            watch_enabled: Cell::new(false),
+            watcher: RefCell::default(),
+            last_heartbeat: Cell::new(None),
         })
+    }
+
+    /// Resolves `name` through the catalog's `provide` aliases to its canonical
+    /// installed resource name, or returns `name` unchanged if unknown/canonical.
+    fn resolve_resource<'a>(&self, name: &'a str) -> Cow<'a, str> {
+        let catalog = self.catalog.borrow();
+        let resolved = catalog.resolve_name(name);
+        if resolved == name {
+            Cow::Borrowed(name)
+        } else {
+            Cow::Owned(resolved.to_owned())
+        }
+    }
+
+    /// Whether canonical resource name `canonical` is currently running.
+    fn is_running_canonical(&self, canonical: &str) -> bool {
+        self.running
+            .borrow()
+            .iter()
+            .any(|res| res.name.as_ref() == canonical)
     }
 
     /// Starts `name`, after any of its dependencies that are not running yet.
@@ -191,13 +224,14 @@ impl ResourceManager {
     /// load. A canceled or unloadable dependency stops the chain.
     pub fn start(&self, name: &str) -> Result<(), ManagerError> {
         self.ensure_scanned();
-        if self.is_running(name) {
-            info!("Resource {name} is already running");
+        let canonical = self.resolve_resource(name);
+        if self.is_running_canonical(&canonical) {
+            info!("Resource {canonical} is already running");
             return Ok(());
         }
-        let order = self.catalog.borrow().start_order(name)?;
+        let order = self.catalog.borrow().start_order(&canonical)?;
         for resource in &order {
-            if !self.is_running(resource) {
+            if !self.is_running_canonical(resource) {
                 self.start_one(resource)?;
             }
         }
@@ -213,11 +247,12 @@ impl ResourceManager {
     /// dependents start in dependency order after `name`. A resource that is
     /// not running is started.
     pub fn restart(&self, name: &str) -> Result<(), ManagerError> {
-        if !self.is_running(name) {
-            return self.start(name);
+        let canonical = self.resolve_resource(name);
+        if !self.is_running_canonical(&canonical) {
+            return self.start(&canonical);
         }
-        let dependents = self.stop_with_dependents(name)?;
-        self.start(name)?;
+        let dependents = self.stop_with_dependents(&canonical)?;
+        self.start(&canonical)?;
         for dependent in dependents.iter().rev() {
             self.start(dependent)?;
         }
@@ -226,10 +261,12 @@ impl ResourceManager {
 
     /// Restarts `name` if it is running, and starts it otherwise.
     pub fn ensure(&self, name: &str) -> Result<(), ManagerError> {
-        if self.is_running(name) {
-            self.restart(name)
+        self.ensure_scanned();
+        let canonical = self.resolve_resource(name);
+        if self.is_running_canonical(&canonical) {
+            self.restart(&canonical)
         } else {
-            self.start(name)
+            self.start(&canonical)
         }
     }
 
@@ -256,12 +293,99 @@ impl ResourceManager {
         self.scanned.set(true);
     }
 
-    /// Whether `name` is running.
+    /// Whether `name` (canonical name or `provide` alias) is running.
     pub fn is_running(&self, name: &str) -> bool {
-        self.running
-            .borrow()
-            .iter()
-            .any(|res| res.name.as_ref() == name)
+        let canonical = self.resolve_resource(name);
+        self.is_running_canonical(&canonical)
+    }
+
+    /// Whether hot-reload resource watching is enabled.
+    pub fn watch_enabled(&self) -> bool {
+        self.watch_enabled.get()
+    }
+
+    /// Enables or disables hot-reload resource watching, resetting cached
+    /// file baselines.
+    pub fn set_watch_enabled(&self, enabled: bool) {
+        self.watch_enabled.set(enabled);
+        self.watcher.borrow_mut().reset();
+    }
+
+    /// Polls running resources for manifest/script changes when watching is
+    /// enabled and the poll interval has elapsed, calling `refresh` and
+    /// `restart` on changed resources.
+    pub(crate) fn poll_watch(&self, now: Instant) {
+        if !self.watch_enabled.get() {
+            return;
+        }
+        if !self.watcher.borrow_mut().poll_due(now) {
+            return;
+        }
+        let running = self.running_roots();
+        let changed = self.watcher.borrow_mut().detect_changes(&running);
+        if changed.is_empty() {
+            return;
+        }
+        self.refresh();
+        for resource in changed {
+            if self.is_running_canonical(&resource) {
+                info!("watch: reloading changed resource `{resource}`");
+                if let Err(err) = self.restart(&resource) {
+                    error!("watch: failed to restart `{resource}`: {err}");
+                }
+            }
+        }
+        let updated = self.running_roots();
+        self.watcher.borrow_mut().seed(&updated);
+    }
+
+    fn running_roots(&self) -> Vec<(ResourceName, PathBuf)> {
+        let names = self.running_resources();
+        let catalog = self.catalog.borrow();
+        names
+            .into_iter()
+            .filter_map(|name| {
+                catalog
+                    .get(name.as_ref())
+                    .map(|info| (name, info.root.clone()))
+            })
+            .collect()
+    }
+
+    /// Sends a periodic discovery heartbeat if `sv_masterUrl` is configured.
+    pub(crate) fn tick_heartbeat(&self, now: Instant) {
+        let (url, interval, timeout, workers, allow_private) = {
+            let convars = self.convars.borrow();
+            let Some(url) = convars.master_url().map(str::to_owned) else {
+                return;
+            };
+            (
+                url,
+                convars.heartbeat_interval(),
+                convars.http_timeout(),
+                convars.http_workers(),
+                convars.http_allow_private(),
+            )
+        };
+        if let Some(last) = self.last_heartbeat.get()
+            && now.saturating_duration_since(last) < interval
+        {
+            return;
+        }
+        self.last_heartbeat.set(Some(now));
+        let payload = json!({
+            "info": self.info_document(),
+            "dynamic": self.dynamic_document(),
+        });
+        let Ok(body) = serde_json::to_vec(&payload) else {
+            return;
+        };
+        if let Err(err) =
+            self.http
+                .post_fire_and_forget(&url, body, timeout, workers, allow_private)
+        {
+            debug!("master heartbeat to `{url}` skipped: {err}");
+        }
     }
 
     /// Names of the running resources, in start order.
@@ -784,13 +908,14 @@ impl ResourceManager {
     /// Stops the running dependents of `name`, then `name`. Returns the
     /// dependents that were stopped, in stop order.
     fn stop_with_dependents(&self, name: &str) -> Result<Vec<ResourceName>, ManagerError> {
+        let canonical = self.resolve_resource(name);
         let target = self
-            .running_name(name)
+            .running_name(&canonical)
             .ok_or_else(|| ManagerError::NotRunning(name.to_owned()))?;
         let dependents: Vec<ResourceName> = {
             let catalog = self.catalog.borrow();
             catalog
-                .dependents_stop_order(name)
+                .dependents_stop_order(&canonical)
                 .iter()
                 .filter_map(|dependent| self.running_name(dependent))
                 .collect()
@@ -944,8 +1069,9 @@ impl Host for ResourceManager {
         args: &[Value],
         invoker: Option<&ResourceName>,
     ) -> Result<Vec<Value>, ScriptError> {
+        let canonical = self.resolve_resource(resource);
         let runtimes = self
-            .running_runtimes(resource)
+            .running_runtimes(&canonical)
             .ok_or_else(|| ScriptError::ResourceNotRunning(resource.to_owned()))?;
         for runtime in &runtimes {
             match runtime.call_export(export, args, invoker) {
@@ -963,19 +1089,20 @@ impl Host for ResourceManager {
     /// A transition or a running runtime wins over the catalog, so a running
     /// resource that a `refresh` dropped from the catalog is still `started`.
     fn resource_state(&self, resource: &str) -> ResourceState {
+        let canonical = self.resolve_resource(resource);
         let transitional = self
             .transitions
             .borrow()
             .iter()
             .rev()
-            .find(|(owner, _)| owner.as_ref() == resource)
+            .find(|(owner, _)| owner.as_ref() == canonical.as_ref())
             .map(|(_, state)| *state);
         if let Some(state) = transitional {
             return state;
         }
-        if self.is_running(resource) {
+        if self.is_running_canonical(&canonical) {
             ResourceState::Started
-        } else if self.catalog.borrow().get(resource).is_some() {
+        } else if self.catalog.borrow().get(&canonical).is_some() {
             ResourceState::Stopped
         } else {
             ResourceState::Missing
@@ -991,9 +1118,10 @@ impl Host for ResourceManager {
     }
 
     fn resource_metadata(&self, resource: &str, key: &str) -> Vec<String> {
+        let canonical = self.resolve_resource(resource);
         self.catalog
             .borrow()
-            .get(resource)
+            .get(&canonical)
             .map(|info| {
                 info.manifest
                     .metadata
@@ -1111,9 +1239,10 @@ impl Host for ResourceManager {
     }
 
     fn resource_path(&self, resource: &str) -> Option<PathBuf> {
+        let canonical = self.resolve_resource(resource);
         self.catalog
             .borrow()
-            .get(resource)
+            .get(&canonical)
             .map(|info| info.root.clone())
     }
 
@@ -1437,6 +1566,20 @@ impl ServerHost for ResourceManager {
             Ok(()) => !self.is_running(resource),
             Err(err) => {
                 error!("StopResource `{resource}` failed: {err}");
+                false
+            }
+        }
+    }
+
+    fn restart_resource(&self, caller: &str, resource: &str) -> bool {
+        if !self.resource_may(caller, "command.restart") {
+            warn!("resource `{caller}` may not run `RestartResource`");
+            return false;
+        }
+        match self.restart(resource) {
+            Ok(()) => true,
+            Err(err) => {
+                error!("RestartResource `{resource}` failed: {err}");
                 false
             }
         }

@@ -18,6 +18,7 @@ mod console;
 mod entity;
 mod files;
 mod hash;
+pub mod msgpack;
 mod runtime;
 mod state;
 mod value;

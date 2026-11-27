@@ -290,6 +290,49 @@ fn get_convar_bool_reads_the_usual_spellings_and_falls_back_to_the_default() {
 }
 
 #[test]
+fn get_convar_float_parses_trimmed_finite_numbers_and_falls_back_to_default() {
+    let host = new_host_with_convars(&[
+        ("gravity", " 9.81 "),
+        ("whole", "-12"),
+        ("nan_val", "NaN"),
+        ("inf_val", "inf"),
+        ("neg_inf", "-infinity"),
+        ("bad", "not-a-float"),
+    ]);
+    let rt = start(
+        &host,
+        "floats",
+        &["probe"],
+        &[(
+            "main.lua",
+            "exports('probe', function()\n\
+               return {\n\
+                 GetConvarFloat('gravity', 1.0),\n\
+                 GetConvarFloat('whole', 1.0),\n\
+                 GetConvarFloat('nan_val', 2.5),\n\
+                 GetConvarFloat('inf_val', 3.5),\n\
+                 GetConvarFloat('neg_inf', 4.5),\n\
+                 GetConvarFloat('bad', 5.5),\n\
+                 GetConvarFloat('missing', 6.5),\n\
+               }\n\
+             end)\n",
+        )],
+    );
+    assert_eq!(
+        first(&rt, "probe"),
+        Value::Array(vec![
+            Value::Float(9.81),
+            Value::Float(-12.0),
+            Value::Float(2.5),
+            Value::Float(3.5),
+            Value::Float(4.5),
+            Value::Float(5.5),
+            Value::Float(6.5),
+        ])
+    );
+}
+
+#[test]
 fn debug_traceback_and_getinfo_are_available() {
     let host = new_host();
     let rt = start(

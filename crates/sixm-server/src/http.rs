@@ -26,6 +26,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use sixm_core::{FuncRef, HttpRequest, ResourceName, ScriptError, Value};
+use tracing::debug;
 use ureq::Agent;
 use ureq::config::Config;
 use ureq::http::{self, Method, Uri};
@@ -91,6 +92,18 @@ impl Outcome {
     }
 }
 
+/// Where a completed HTTP request reports.
+#[derive(Debug)]
+enum JobTarget {
+    Resource {
+        owner: ResourceName,
+        callback: FuncRef,
+        /// Set when the owner stops, so a worker skips the request.
+        cancelled: Arc<AtomicBool>,
+    },
+    FireAndForget,
+}
+
 /// One request waiting for a worker.
 #[derive(Debug)]
 struct Job {
@@ -99,10 +112,7 @@ struct Job {
     request: HttpRequest,
     timeout: Duration,
     allow_private: bool,
-    owner: ResourceName,
-    callback: FuncRef,
-    /// Set when the owner stops, so a worker skips the request.
-    cancelled: Arc<AtomicBool>,
+    target: JobTarget,
 }
 
 /// The requests one start of a resource has open.
@@ -151,10 +161,7 @@ impl HttpClient {
         workers: usize,
         allow_private: bool,
     ) -> Result<(), ScriptError> {
-        let uri: Uri = request.url.parse().map_err(|_| invalid_url(&request.url))?;
-        if !matches!(uri.scheme_str(), Some("http" | "https")) || uri.host().is_none() {
-            return Err(invalid_url(&request.url));
-        }
+        let uri = parse_http_uri(&request.url)?;
         let method = Method::from_bytes(request.method.as_bytes()).map_err(|_| {
             ScriptError::Runtime(format!("`{}` is not an HTTP method", request.method))
         })?;
@@ -162,31 +169,69 @@ impl HttpClient {
         let instance = callback.instance;
         let cancelled = self.reserve(resource, instance)?;
 
-        let queued = self.pool(workers).and_then(|pool| {
-            pool.queue
-                .try_send(Job {
-                    method,
-                    uri,
-                    request,
-                    timeout,
-                    allow_private,
+        let queued = self.enqueue(
+            workers,
+            Job {
+                method,
+                uri,
+                request,
+                timeout,
+                allow_private,
+                target: JobTarget::Resource {
                     owner: resource.clone(),
                     callback,
                     cancelled,
-                })
-                .map_err(|err| match err {
-                    TrySendError::Full(_) => ScriptError::Runtime(format!(
-                        "{QUEUE_CAPACITY} HTTP requests are already waiting for a worker"
-                    )),
-                    TrySendError::Disconnected(_) => {
-                        ScriptError::Runtime("the HTTP workers have stopped".to_owned())
-                    }
-                })
-        });
+                },
+            },
+        );
         if queued.is_err() {
             self.release(resource, instance);
         }
         queued
+    }
+
+    /// Queues a fire-and-forget JSON `POST` to `url` without needing a script
+    /// callback. Failures are logged at `debug` level by the worker.
+    pub(crate) fn post_fire_and_forget(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+        timeout: Duration,
+        workers: usize,
+        allow_private: bool,
+    ) -> Result<(), ScriptError> {
+        let uri = parse_http_uri(url)?;
+        let request = HttpRequest {
+            url: url.to_owned(),
+            method: "POST".to_owned(),
+            headers: vec![("Content-Type".to_owned(), "application/json".to_owned())],
+            body: Some(body),
+            timeout: Some(timeout),
+        };
+        self.enqueue(
+            workers,
+            Job {
+                method: Method::POST,
+                uri,
+                request,
+                timeout,
+                allow_private,
+                target: JobTarget::FireAndForget,
+            },
+        )
+    }
+
+    fn enqueue(&self, workers: usize, job: Job) -> Result<(), ScriptError> {
+        self.pool(workers).and_then(|pool| {
+            pool.queue.try_send(job).map_err(|err| match err {
+                TrySendError::Full(_) => ScriptError::Runtime(format!(
+                    "{QUEUE_CAPACITY} HTTP requests are already waiting for a worker"
+                )),
+                TrySendError::Disconnected(_) => {
+                    ScriptError::Runtime("the HTTP workers have stopped".to_owned())
+                }
+            })
+        })
     }
 
     /// Takes every finished request, oldest first. Empty when none finished,
@@ -281,9 +326,15 @@ impl HttpClient {
 /// A worker: takes jobs until the pool is dropped, skipping cancelled ones.
 fn work(jobs: &Mutex<Receiver<Job>>, agents: &Agents, finished: &Mutex<Vec<Completion>>) {
     while let Some(job) = next_job(jobs) {
-        if job.cancelled.load(Ordering::Acquire) {
+        if let JobTarget::Resource { ref cancelled, .. } = job.target
+            && cancelled.load(Ordering::Acquire)
+        {
             continue;
         }
+        let url_for_log = match job.target {
+            JobTarget::FireAndForget => Some(job.request.url.clone()),
+            JobTarget::Resource { .. } => None,
+        };
         let outcome = perform(
             agents,
             &job.method,
@@ -292,15 +343,44 @@ fn work(jobs: &Mutex<Receiver<Job>>, agents: &Agents, finished: &Mutex<Vec<Compl
             job.timeout,
             job.allow_private,
         );
-        finished
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(Completion {
-                resource: job.owner,
-                callback: job.callback,
-                outcome,
-            });
+        match job.target {
+            JobTarget::Resource {
+                owner, callback, ..
+            } => {
+                finished
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(Completion {
+                        resource: owner,
+                        callback,
+                        outcome,
+                    });
+            }
+            JobTarget::FireAndForget => match outcome {
+                Outcome::Response { status, .. } if status >= 400 => {
+                    debug!(
+                        "heartbeat POST `{}` returned HTTP {status}",
+                        url_for_log.as_deref().unwrap_or("")
+                    );
+                }
+                Outcome::Response { .. } => {}
+                Outcome::Failed(err) => {
+                    debug!(
+                        "heartbeat POST `{}` failed: {err}",
+                        url_for_log.as_deref().unwrap_or("")
+                    );
+                }
+            },
+        }
     }
+}
+
+fn parse_http_uri(url: &str) -> Result<Uri, ScriptError> {
+    let uri: Uri = url.parse().map_err(|_| invalid_url(url))?;
+    if !matches!(uri.scheme_str(), Some("http" | "https")) || uri.host().is_none() {
+        return Err(invalid_url(url));
+    }
+    Ok(uri)
 }
 
 /// Waits for the next job. `None` when the pool has been dropped. The queue's

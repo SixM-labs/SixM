@@ -13,6 +13,7 @@ mod events;
 mod exports;
 mod http;
 mod kvp;
+mod msgpack;
 mod natives;
 mod players;
 mod refs;

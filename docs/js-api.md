@@ -14,8 +14,9 @@ Each entry says where it exists:
 - **client**: client scripts only
 
 Sources: `crates/sixm-js/src/` (`runtime.rs`, `sandbox.rs`, `scheduler.rs`,
-`events.rs`, `exports.rs`, `state.rs`, `vector.rs`, `natives.rs`, `resources.rs`,
-`kvp.rs`, `players.rs`, `entities.rs`, `client.rs`, `http.rs`, `web.rs`).
+`events.rs`, `exports.rs`, `state.rs`, `vector.rs`, `msgpack.rs`, `natives.rs`,
+`resources.rs`, `kvp.rs`, `players.rs`, `entities.rs`, `client.rs`, `http.rs`,
+`web.rs`).
 
 ## Sandbox
 
@@ -70,9 +71,9 @@ for synchronous continuations and across event/timer boundaries.
 | `onNet` | both | `onNet(name, fn)`. Marks `name` as a network event and attaches `fn`. |
 | `RegisterNetEvent` / `RegisterServerEvent` | both | `RegisterNetEvent(name [, fn])`. Allows `name` to arrive over the network, optionally registering `fn`. |
 | `emit` / `TriggerEvent` | both | `emit(name, ...args)`. Triggers every local handler of `name` synchronously. |
-| `emitNet` / `TriggerClientEvent` | server | `emitNet(name, target, ...args)`. Sends an event to a player id (`number` or decimal string) or `-1` for all players. Functions cannot be sent. |
+| `emitNet` / `TriggerClientEvent` | server | `emitNet(name, target, ...args)`. Sends an event to a player id (`number` or decimal string), an array of player ids (e.g. `[1, 2]`; `[]` sends to nobody, and `-1` is not allowed inside an array), or `-1` for all players. Functions cannot be sent. |
 | `emitNet` / `TriggerServerEvent` | client | `emitNet(name, ...args)`. Sends an event to the server. Functions cannot be sent. |
-| `TriggerLatentClientEvent` | server | `TriggerLatentClientEvent(name, target, bps, ...args)`. Sends a paced event to one player or `-1`. |
+| `TriggerLatentClientEvent` | server | `TriggerLatentClientEvent(name, target, bps, ...args)`. Sends a paced event to one player id, an array of player ids, or `-1`. |
 | `TriggerLatentServerEvent` | client | `TriggerLatentServerEvent(name, bps, ...args)`. Sends a paced event to the server. |
 | `CancelEvent` | both | `CancelEvent()`. Marks the active event dispatch as canceled. |
 | `WasEventCanceled` | both | `WasEventCanceled()`. Returns whether the active dispatch was canceled. |
@@ -134,6 +135,20 @@ Vectors are 32-bit float wrappers supporting:
 - Helper methods: `.length()`, `.normalize()`, `.add(other)`, `.sub(other)`,
   `.mul(scalar)`, `.div(scalar)`, `.dot(other)`, `.cross(other)` (3D)
 
+## MessagePack (`msgpack`)
+
+The global `msgpack` object is available on both server and client:
+
+| Name | Side | Signature and result |
+|---|---|---|
+| `msgpack.pack` | both | `msgpack.pack(value)`. Serializes `value` into a `Uint8Array` (`msgpack.pack()` with no argument packs `nil`). Throws on functions, unsupported objects (such as `Map` or cyclic objects), nesting deeper than 32 levels, or payloads exceeding 4 MiB. |
+| `msgpack.unpack` | both | `msgpack.unpack(data)`. Decodes a `Uint8Array`, `ArrayBuffer`, or string back into a JS value (`Uint8Array` for MessagePack `bin`, `null` for `nil`). Throws on invalid input types, empty/malformed/truncated payloads, trailing bytes, nesting deeper than 32 levels, or payloads exceeding 4 MiB. |
+
+- `Vector2`, `Vector3`, `Vector4`, and `Quat` values round-trip with their
+  32-bit float components intact via SixM extension types.
+- Maximum payload size is 4 MiB (`MAX_MSGPACK_BYTES`) and maximum container
+  nesting depth is 32 levels.
+
 ## General natives, convars, resources, and KVP
 
 All core utility, command, convar, resource, and KVP functions match
@@ -141,14 +156,14 @@ All core utility, command, convar, resource, and KVP functions match
 
 - **General & Commands:** `GetHashKey`, `RegisterCommand`,
   `GetRegisteredCommands`, `ExecuteCommand`, `GetConvar`, `GetConvarInt`,
-  `GetConvarBool`, `SetConvar`, `SetConvarReplicated`, `SetConvarServerInfo`,
-  `AddConvarChangeListener`, `RemoveConvarChangeListener`.
+  `GetConvarFloat`, `GetConvarBool`, `SetConvar`, `SetConvarReplicated`,
+  `SetConvarServerInfo`, `AddConvarChangeListener`, `RemoveConvarChangeListener`.
 - **Resources:** `GetCurrentResourceName`, `GetInvokingResource` (returns `null`
   when called without a resource invoker), `GetResourceState`, `GetNumResources`,
   `GetResourceByFindIndex`, `GetResourceMetadata`, `GetNumResourceMetadata`,
   `GetResourcePath`, `LoadResourceFile` (returns `null` if missing),
   `SaveResourceFile`, `StartResource` (server, ACE-gated),
-  `StopResource` (server, ACE-gated).
+  `StopResource` (server, ACE-gated), `RestartResource` (server, ACE-gated).
 - **KVP:** `GetResourceKvpString`, `GetResourceKvpInt`, `GetResourceKvpFloat`,
   `SetResourceKvp`, `SetResourceKvpInt`, `SetResourceKvpFloat`,
   `DeleteResourceKvp`, `SetResourceKvpNoSync`, `SetResourceKvpIntNoSync`,
@@ -159,10 +174,11 @@ All core utility, command, convar, resource, and KVP functions match
 ## Players, entities, routing buckets, and HTTP
 
 - **Players (server):** `getPlayers()` / `GetPlayers()`, `GetNumPlayerIndices()`,
-  `GetPlayerName`, `GetPlayerEndpoint`, `GetPlayerPing`, `GetPlayerLastMsg`,
-  `GetPlayerPed`, `GetPlayerIdentifiers`, `GetNumPlayerIdentifiers`,
-  `GetPlayerIdentifier`, `GetPlayerIdentifierByType`, `GetNumPlayerTokens`,
-  `GetPlayerToken`, `DropPlayer`, `IsPlayerAceAllowed`.
+  `DoesPlayerExist`, `GetPlayerName`, `GetPlayerEndpoint`, `GetPlayerPing`,
+  `GetPlayerLastMsg`, `GetPlayerPed`, `GetPlayerIdentifiers`,
+  `GetNumPlayerIdentifiers`, `GetPlayerIdentifier`,
+  `GetPlayerIdentifierByType`, `GetNumPlayerTokens`, `GetPlayerToken`,
+  `DropPlayer`, `IsPlayerAceAllowed`, `IsPrincipalAceAllowed`.
 - **Client identity & pool:** `PlayerId()` (`0`), `GetPlayerServerId`,
   `PlayerPedId`, `GetGamePool`, `IsDuplicityVersion()`.
 - **Entities (server & shared readers):** `DoesEntityExist`, `GetEntityCoords`,

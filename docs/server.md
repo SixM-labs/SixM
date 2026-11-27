@@ -5,16 +5,26 @@ The server binary is `sixm-server`. Source: `crates/sixm-server/src/`.
 ## Command line
 
 ```text
-sixm-server [+command [args...]]...
+sixm-server [options] [+command [args...]]...
 sixm-server --help
 sixm-server --version
 ```
+
+Options:
+
+| Option | Effect |
+|---|---|
+| `--log-file <path>` | Also append logs to `<path>` (parent directories are created if needed; `--log-file=<path>` is also accepted). |
+| `--log-json` | Emit logs as single-line JSON objects (`timestamp`, `level`, `target`, `message`, and optional `fields`) instead of compact text. |
+| `--watch` | Enable the development hot-reload watcher for running resources at startup (same as `watch_resources on`). |
+| `--help` | Print usage and exit. |
+| `--version` | Print the version and exit. |
 
 - Each `+name` starts a console command. The words after it, up to the next
   `+name`, are its arguments. Words are kept exactly as the shell passed them,
   so `+set motd "a # b"` sets `a # b`.
 - Commands run in the order given, before the network starts.
-- Arguments that come before the first `+command` are an error.
+- Unknown non-option arguments that come before the first `+command` are an error.
 - A bare `+` is an error.
 - `--help` and `--version` win over everything else.
 - If no `+command` is given and `server.cfg` exists in the working directory,
@@ -80,6 +90,7 @@ same name is never reached.
 | `restart <resource>` | Stops the resource and its running dependents, starts the resource, then starts the dependents in dependency order. If the resource is not running, it is started. |
 | `ensure <resource>` | Restarts the resource if it is running, otherwise starts it. |
 | `refresh` | Scans `sixm_resourcesPath` again. Running resources are not affected. `start` scans on its own if no scan has run yet. |
+| `watch_resources [on\|off]` | Console-only. Prints or toggles hot-reload watching for running resources. When on, polls running resource folders every 500 ms for changes to manifests (`fxmanifest.lua`, `__resource.lua`) and `.lua`/`.js` scripts (ignoring `data/`, hidden `.` entries, `[...]` folders, and symlinks) and runs `refresh` and `restart` on changed resources. |
 | `endpoint_add_udp <ip:port>` | Stores the listen address in `endpoint_add_udp`. It applies at the next start. The address must parse. |
 | `endpoint_add_tcp <ip:port>` | The same as `endpoint_add_udp`: TCP (HTTP) and UDP (the game) share one address, so this sets both. |
 | `perf` | Prints the frame times of the last 1200 frames: count, average, p50, p99 and max, in milliseconds. Then the tick rate and the budget per frame, the players, entities and running resources, and the network rate in KiB/s and frames/s since the previous `perf` call, or since the server started. See [Load testing](#load-testing). |
@@ -237,13 +248,20 @@ Convar names are case-insensitive. Scripts read them with `GetConvar` and
 | `sixm_cullRadius` | `424` | Distance in metres within which a player is sent entities, measured from its ped. Entities the player owns are always sent. Clamped to 0 to 100000. `0` turns scoping off, so every player is sent every entity. A value that is not a number gives 424. A change takes effect on the next frame. See [Scoping](lua-api.md#scoping). |
 | `sixm_maxClientEntities` | `64` | Replicated. Most networked entities one client may create at once, clamped to 0 to 4096. |
 | `sv_entityLockdown` | `inactive` | Global client entity creation lockdown mode (`inactive`, `relaxed` to block peds, or `strict` to block all client creations), overridable per routing bucket via `SetRoutingBucketEntityLockdownMode`. |
+| `sv_playerEventRateLimit` | `60` | Console-only. Per-player `TriggerServerEvent` token-bucket rate limit in events/sec (burst `2×` rate, clamped to 0 to 10000; `0` disables). Excess events are dropped with a rate-limited warning. |
+| `sv_metricsEnabled` | `false` | Console-only. Whether `GET /metrics` exposes Prometheus metrics (`true` or `1` turns it on). |
+| `sv_adminUiEnabled` | `false` | Console-only. Whether `GET /admin` serves the built-in admin UI (`true` or `1` turns it on; also requires `rcon_password`). |
+| `sv_masterUrl` | empty | Console-only. Optional HTTP(S) URL to which the server periodically `POST`s JSON discovery heartbeats (`{"info": ..., "dynamic": ...}`). Honors `sv_httpAllowPrivate` and `sixm_httpTimeout`. |
+| `sv_heartbeatInterval` | `30` | Console-only. Seconds between master-server heartbeats when `sv_masterUrl` is set, clamped to 10 to 3600. |
 
 Any other convar can be set with `set`, `sets` or `setr`, or with the Lua
 setters, and read by scripts. Script convar writes (`SetConvar*`) are bounded to
 256-byte names and 64 KiB values (or 4096 bytes when replicated). Console-only bootstrap and security convars
 (`rcon_password`, `sv_httpAllowPrivate`, `sv_httpEnabled`,
 `sv_exposePlayerIdentifiers`, `sixm_identityFile`, `sixm_resourcesPath`,
-`sixm_kvpPath`, and `endpoint_add_udp`) cannot be modified by scripts or remote
+`sixm_kvpPath`, `endpoint_add_udp`, `sv_playerEventRateLimit`,
+`sv_metricsEnabled`, `sv_adminUiEnabled`, `sv_masterUrl`, and
+`sv_heartbeatInterval`) cannot be modified by scripts or remote
 players. The server checks a value only when the convar is replicated (see
 below).
 
@@ -338,6 +356,9 @@ connection carries one request and is closed after its answer.
 | `/info.json` | JSON: `server`, the running `resources`, and `vars`, the server-info convars (`sets`). |
 | `/players.json` | JSON array of `{id, name, ping}` per player. `identifiers` is added only with `sv_exposePlayerIdentifiers true`. |
 | `/dynamic.json` | JSON: `hostname`, `clients`, `maxclients` and `server`. |
+| `/healthz` | JSON readiness/liveness summary: `{"ok":true,"resources":<count>,"players":<count>}`. |
+| `/metrics` | Prometheus text exposition (`0.0.4`) when `sv_metricsEnabled` is `true` or `1` (`404` otherwise). Exposes `sixm_players_connected`, `sixm_players_max`, `sixm_resources_running`, `sixm_entities_total`, `sixm_tick_duration_ms` (`avg`, `p50`, `p99`, `max`), `sixm_net_rx_bytes_total`, and `sixm_net_tx_bytes_total`. |
+| `/admin` | Self-contained HTML admin UI when `sv_adminUiEnabled` is `true` or `1` and `rcon_password` is set (`404` when disabled, `403` when `rcon_password` is unset). Authenticates against `POST /rcon`. |
 | `/rcon` | [`POST /rcon`](#remote-console) executes one authenticated console command and returns its output as JSON. |
 | `/<resource>/...` | The `SetHttpHandler` function of that resource, if it has one. See [HTTP handlers](lua-api.md#http-handlers-server-only). |
 
@@ -390,9 +411,15 @@ address share that limit.
   Clients must present a certificate, so every player has a `license`.
 - A script can refuse a connection in `playerConnecting`. Without a reason the
   client sees `Rejected by the server`.
-- Each player's inbound events and console lines are rate limited together, at
-  100 per second sustained, with a burst of 200. A player whose traffic stays
-  above 1000 per second for five seconds in a row is kicked for flooding.
+- Each player's inbound events and console lines are rate limited together at
+  the transport layer at 100 per second sustained, with a burst of 200. A player
+  whose traffic stays above 1000 per second for five seconds in a row is kicked
+  for flooding.
+- In addition, inbound `TriggerServerEvent` calls are guarded per player by a
+  token bucket controlled by `sv_playerEventRateLimit` (default `60` events/sec
+  with a burst of `2×` the limit = `120`; `0` disables). Events exceeding the
+  bucket are dropped and logged with a rate-limited warning (at most once every
+  5 seconds per player).
 
 ## Quitting
 

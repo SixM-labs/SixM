@@ -212,3 +212,63 @@ fn resource_files_and_metadata_natives_work() {
     );
     let _ = first;
 }
+
+#[test]
+fn restart_start_stop_resource_work_on_server_only() {
+    let srv_host = new_host();
+    let _target = start(&srv_host, "target", &[], &[("index.js", "")]);
+    let caller = start(
+        &srv_host,
+        "caller",
+        &["check"],
+        &[(
+            "index.js",
+            r#"
+            exports("check", () => [
+                StartResource("target"),
+                StopResource("target"),
+                RestartResource("target"),
+                RestartResource("missing"),
+            ]);
+            "#,
+        )],
+    );
+
+    assert_eq!(
+        call(&caller, "check", &[]),
+        vec![Value::Array(vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+        ])]
+    );
+    assert_eq!(
+        *srv_host.resource_actions.borrow(),
+        vec![
+            ("start", "caller".to_owned(), "target".to_owned()),
+            ("stop", "caller".to_owned(), "target".to_owned()),
+            ("restart", "caller".to_owned(), "target".to_owned()),
+            ("restart", "caller".to_owned(), "missing".to_owned()),
+        ]
+    );
+
+    let cli_host = new_client_host(1);
+    let cli = start(
+        &cli_host,
+        "cli_res",
+        &["check"],
+        &[(
+            "index.js",
+            r#"exports("check", () => [typeof StartResource, typeof StopResource, typeof RestartResource]);"#,
+        )],
+    );
+    assert_eq!(
+        call(&cli, "check", &[]),
+        vec![Value::Array(vec![
+            Value::from("undefined"),
+            Value::from("undefined"),
+            Value::from("undefined"),
+        ])]
+    );
+}

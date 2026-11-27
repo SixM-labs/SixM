@@ -34,6 +34,54 @@ const FULL_REASON: &str = "Server is full";
 const DEFERRAL_TIMEOUT_REASON: &str = "connection timed out";
 /// Extra port choices when the system-assigned UDP port is unavailable to TCP.
 const HTTP_PORT_RETRIES: usize = 4;
+/// Minimum interval between anti-flood drop warnings per player.
+const FLOOD_WARN_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Per-player token bucket for rate-limiting incoming `NetEvent::Event` messages.
+#[derive(Debug)]
+struct EventBucket {
+    tokens: f64,
+    last_refill: Instant,
+    last_warn: Option<Instant>,
+    dropped_since_warn: u64,
+}
+
+impl EventBucket {
+    fn new(now: Instant, rate_per_sec: u32) -> Self {
+        Self {
+            tokens: f64::from(rate_per_sec) * 2.0,
+            last_refill: now,
+            last_warn: None,
+            dropped_since_warn: 0,
+        }
+    }
+
+    fn allow(&mut self, now: Instant, rate_per_sec: u32) -> (bool, Option<u64>) {
+        let rate = f64::from(rate_per_sec);
+        let burst = rate * 2.0;
+        let elapsed = now
+            .saturating_duration_since(self.last_refill)
+            .as_secs_f64();
+        self.last_refill = now;
+        self.tokens = (self.tokens + elapsed * rate).min(burst);
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            return (true, None);
+        }
+        self.dropped_since_warn += 1;
+        let should_warn = self
+            .last_warn
+            .is_none_or(|prev| now.saturating_duration_since(prev) >= FLOOD_WARN_INTERVAL);
+        if should_warn {
+            self.last_warn = Some(now);
+            let dropped = self.dropped_since_warn;
+            self.dropped_since_warn = 0;
+            (false, Some(dropped))
+        } else {
+            (false, None)
+        }
+    }
+}
 
 /// A connection that `playerConnecting` deferred and no `done` has ended yet.
 #[derive(Debug)]
@@ -83,6 +131,8 @@ pub(crate) struct Player {
     last_msg: Instant,
     /// Deterministic client tokens derived from the player's TLS certificate fingerprint.
     tokens: Vec<String>,
+    /// Token-bucket rate limiter for `NetEvent::Event`.
+    event_bucket: Option<EventBucket>,
 }
 
 impl Player {
@@ -113,6 +163,7 @@ impl Player {
             ped: None,
             last_msg: Instant::now(),
             tokens,
+            event_bucket: None,
         }
     }
 }
@@ -723,8 +774,31 @@ impl ResourceManager {
 
     /// Delivers a player's event to the handlers registered with `RegisterNetEvent`.
     fn player_event(&self, player: u32, name: &str, args: &[Value]) {
-        if !self.network.players.borrow().contains(player) {
-            debug!(player, "event `{name}` from an unknown player ignored");
+        let rate = self.convars.borrow().player_event_rate_limit();
+        let (allowed, warn_dropped) = {
+            let mut players = self.network.players.borrow_mut();
+            let Some(found) = players.get_mut(player).filter(|found| found.admitted) else {
+                debug!(player, "event `{name}` from an unknown player ignored");
+                return;
+            };
+            if rate == 0 {
+                found.event_bucket = None;
+                (true, None)
+            } else {
+                let now = Instant::now();
+                let bucket = found
+                    .event_bucket
+                    .get_or_insert_with(|| EventBucket::new(now, rate));
+                bucket.allow(now, rate)
+            }
+        };
+        if let Some(dropped) = warn_dropped {
+            warn!(
+                player,
+                dropped, "dropping flooded server events (limit {rate}/s)"
+            );
+        }
+        if !allowed {
             return;
         }
         self.dispatch(name, EventSource::Net(player), args);
@@ -954,5 +1028,40 @@ impl ResourceManager {
         for (player, reason) in drops {
             self.with_server(|server| server.kick(player, &reason));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_bucket_allows_burst_refills_and_rate_limits_warnings() {
+        let t0 = Instant::now();
+        let mut bucket = EventBucket::new(t0, 5); // burst = 10
+
+        for _ in 0..10 {
+            assert_eq!(bucket.allow(t0, 5), (true, None));
+        }
+        // 11th event at t0 is dropped with a warning count of 1.
+        assert_eq!(bucket.allow(t0, 5), (false, Some(1)));
+        // Subsequent immediate drops suppress warnings until FLOOD_WARN_INTERVAL.
+        assert_eq!(bucket.allow(t0, 5), (false, None));
+        assert_eq!(bucket.allow(t0, 5), (false, None));
+
+        // After 1 second at 5/sec, 5 tokens refill.
+        let t1 = t0 + Duration::from_secs(1);
+        for _ in 0..5 {
+            assert_eq!(bucket.allow(t1, 5), (true, None));
+        }
+        assert_eq!(bucket.allow(t1, 5), (false, None));
+
+        // After FLOOD_WARN_INTERVAL without refill? Wait: 5s refills 10 tokens (capped at burst 10).
+        let t2 = t0 + FLOOD_WARN_INTERVAL;
+        for _ in 0..10 {
+            assert_eq!(bucket.allow(t2, 5), (true, None));
+        }
+        // Next drop after FLOOD_WARN_INTERVAL warns with accumulated dropped count (4: 2 at t0 + 1 at t1 + 1 at t2).
+        assert_eq!(bucket.allow(t2, 5), (false, Some(4)));
     }
 }

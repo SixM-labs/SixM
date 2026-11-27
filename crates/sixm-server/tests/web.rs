@@ -335,3 +335,157 @@ fn a_busy_tcp_port_leaves_the_game_running_without_http() {
 
     assert_eq!(addr.port(), port);
 }
+
+#[test]
+fn healthz_returns_ok_with_resource_and_player_counts() {
+    let lb = started();
+
+    let reply = get(&lb, "/healthz");
+    assert_eq!(reply.status, 200);
+    let doc: serde_json::Value = serde_json::from_slice(&reply.body).expect("JSON");
+    assert_eq!(
+        doc,
+        serde_json::json!({ "ok": true, "resources": 2, "players": 0 })
+    );
+
+    let _alice = lb.connect("Alice").expect("Alice joins");
+    let reply = get(&lb, "/healthz");
+    assert_eq!(reply.status, 200);
+    let doc: serde_json::Value = serde_json::from_slice(&reply.body).expect("JSON");
+    assert_eq!(
+        doc,
+        serde_json::json!({ "ok": true, "resources": 2, "players": 1 })
+    );
+
+    assert_eq!(post(&lb, "/healthz", "x").status, 405);
+}
+
+#[test]
+fn metrics_is_gated_by_sv_metrics_enabled_and_exposes_prometheus_format() {
+    let lb = started();
+    assert_eq!(get(&lb, "/metrics").status, 404);
+
+    lb.fx.server.execute("set sv_metricsEnabled true");
+    let reply = get(&lb, "/metrics");
+    assert_eq!(reply.status, 200);
+    assert!(
+        reply
+            .head
+            .to_ascii_lowercase()
+            .contains("content-type: text/plain; version=0.0.4; charset=utf-8"),
+        "head: {}",
+        reply.head
+    );
+    let text = reply.text();
+    for expected in [
+        "sixm_players_connected 0",
+        "sixm_players_max 32",
+        "sixm_resources_running 2",
+        "sixm_entities_total 0",
+        "sixm_tick_duration_ms{quantile=\"avg\"}",
+        "sixm_tick_duration_ms{quantile=\"p50\"}",
+        "sixm_tick_duration_ms{quantile=\"p99\"}",
+        "sixm_tick_duration_ms{quantile=\"max\"}",
+        "sixm_net_rx_bytes_total ",
+        "sixm_net_tx_bytes_total ",
+    ] {
+        assert!(text.contains(expected), "missing `{expected}` in:\n{text}");
+    }
+    assert_eq!(post(&lb, "/metrics", "x").status, 405);
+}
+
+#[test]
+fn admin_ui_requires_both_sv_admin_ui_enabled_and_rcon_password() {
+    let lb = started();
+    assert_eq!(get(&lb, "/admin").status, 404);
+
+    lb.fx.server.execute("set sv_adminUiEnabled 1");
+    assert_eq!(get(&lb, "/admin").status, 403);
+
+    lb.fx.server.execute("set rcon_password admin-pw");
+    let reply = get(&lb, "/admin");
+    assert_eq!(reply.status, 200);
+    assert!(
+        reply
+            .head
+            .to_ascii_lowercase()
+            .contains("content-type: text/html; charset=utf-8"),
+        "head: {}",
+        reply.head
+    );
+    let html = reply.text();
+    assert!(html.contains("<title>SixM Server Admin</title>"));
+    assert!(html.contains("/rcon"));
+    assert!(!html.contains("http://") && !html.contains("https://"));
+    assert_eq!(post(&lb, "/admin", "x").status, 405);
+
+    lb.fx.server.execute("set rcon_password \"\"");
+    assert_eq!(get(&lb, "/admin").status, 403);
+}
+
+#[test]
+fn master_heartbeat_posts_info_and_dynamic_to_configured_url() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock master");
+    let port = listener.local_addr().expect("addr").port();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let mut buf = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            let mut expected_len: Option<usize> = None;
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(split) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head_end = split + 4;
+                            if expected_len.is_none() {
+                                let head = String::from_utf8_lossy(&buf[..split]);
+                                expected_len = head.lines().find_map(|line| {
+                                    let (k, v) = line.split_once(':')?;
+                                    k.eq_ignore_ascii_case("content-length")
+                                        .then(|| v.trim().parse().ok())
+                                        .flatten()
+                                });
+                            }
+                            if let Some(len) = expected_len
+                                && buf.len() >= head_end + len
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+            let _ = tx.send(buf);
+        }
+    });
+
+    let lb = started();
+    lb.fx.server.execute("set sv_httpAllowPrivate true");
+    lb.fx
+        .server
+        .execute(&format!("set sv_masterUrl \"http://127.0.0.1:{port}/hb\""));
+
+    let raw = lb.wait_for("master heartbeat request", || {
+        thread::sleep(Duration::from_millis(5));
+        rx.try_recv().ok()
+    });
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("HTTP head")
+        + 4;
+    let head = String::from_utf8_lossy(&raw[..split]);
+    assert!(head.starts_with("POST /hb "), "head: {head}");
+    let body: serde_json::Value = serde_json::from_slice(&raw[split..]).expect("JSON body");
+    assert_eq!(
+        body["info"]["resources"],
+        serde_json::json!(["app", "other"])
+    );
+    assert_eq!(body["dynamic"]["hostname"], "SixM Server");
+}

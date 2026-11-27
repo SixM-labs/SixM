@@ -26,6 +26,7 @@ use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 
 use crate::commands::{self, CommandContext, CommandSource};
 use crate::manager::ResourceManager;
+use crate::perf::format_millis;
 
 /// Largest response body a handler may build. Beyond it the response fails with `500`.
 const MAX_RESPONSE: usize = 16 * 1024 * 1024;
@@ -266,38 +267,19 @@ impl ResourceManager {
 
     /// The answer to a built-in route, or `None` when the path is not one.
     fn builtin_route(&self, request: &WebRequest) -> Option<WebResponse> {
-        let document: fn(&ResourceManager) -> Json = match request.path.as_str() {
-            "/info.json" => Self::info_document,
-            "/players.json" => Self::players_document,
-            "/dynamic.json" => Self::dynamic_document,
-            _ => return None,
-        };
-        if request.method != "GET" && request.method != "HEAD" {
-            return Some(WebResponse {
-                status: 405,
-                headers: vec![
-                    ("allow".to_owned(), "GET, HEAD".to_owned()),
-                    (
-                        "content-type".to_owned(),
-                        "text/plain; charset=utf-8".to_owned(),
-                    ),
-                ],
-                body: b"Method Not Allowed".to_vec(),
-            });
+        match request.path.as_str() {
+            "/info.json" => Some(json_route(request, || self.info_document())),
+            "/players.json" => Some(json_route(request, || self.players_document())),
+            "/dynamic.json" => Some(json_route(request, || self.dynamic_document())),
+            "/healthz" => Some(json_route(request, || self.healthz_document())),
+            "/metrics" => Some(self.handle_metrics(request)),
+            "/admin" => Some(self.handle_admin(request)),
+            _ => None,
         }
-        let body = serde_json::to_vec(&document(self)).unwrap_or_default();
-        Some(WebResponse {
-            status: 200,
-            headers: vec![
-                ("content-type".to_owned(), "application/json".to_owned()),
-                ("cache-control".to_owned(), "no-cache".to_owned()),
-            ],
-            body,
-        })
     }
 
     /// `/info.json`: the server, its running resources and its server-info convars.
-    fn info_document(&self) -> Json {
+    pub(crate) fn info_document(&self) -> Json {
         let resources: Vec<String> = self
             .running_resources()
             .into_iter()
@@ -343,7 +325,7 @@ impl ResourceManager {
     }
 
     /// `/dynamic.json`: the host name, the player count and the player limit.
-    fn dynamic_document(&self) -> Json {
+    pub(crate) fn dynamic_document(&self) -> Json {
         let (hostname, max_clients) = {
             let convars = self.convars.borrow();
             (convars.server_name().to_owned(), convars.max_clients())
@@ -354,6 +336,110 @@ impl ResourceManager {
             "clients": self.player_ids().len(),
             "maxclients": max_clients,
         })
+    }
+
+    /// `/healthz`: readiness/liveness summary.
+    fn healthz_document(&self) -> Json {
+        json!({
+            "ok": true,
+            "resources": self.running_resources().len(),
+            "players": self.player_ids().len(),
+        })
+    }
+
+    /// `GET /metrics`: Prometheus text format when `sv_metricsEnabled` is on.
+    fn handle_metrics(&self, request: &WebRequest) -> WebResponse {
+        if !self.convars.borrow().metrics_enabled() {
+            return text(404, "Not Found");
+        }
+        if !is_get_or_head(&request.method) {
+            return method_not_allowed("GET, HEAD");
+        }
+        let players_connected = self.player_ids().len();
+        let players_max = self.convars.borrow().max_clients();
+        let resources_running = self.running_resources().len();
+        let entities_total = self.entity_list().len();
+        let summary = self.frames.borrow().summary();
+        let (avg_ms, p50_ms, p99_ms, max_ms) = match summary {
+            Some(s) => (
+                format_millis(s.average),
+                format_millis(s.p50),
+                format_millis(s.p99),
+                format_millis(s.max),
+            ),
+            None => (
+                "0.00".to_owned(),
+                "0.00".to_owned(),
+                "0.00".to_owned(),
+                "0.00".to_owned(),
+            ),
+        };
+        let traffic = self.network_traffic();
+        let body = format!(
+            "# HELP sixm_players_connected Number of currently connected players.\n\
+             # TYPE sixm_players_connected gauge\n\
+             sixm_players_connected {players_connected}\n\
+             # HELP sixm_players_max Maximum number of allowed players.\n\
+             # TYPE sixm_players_max gauge\n\
+             sixm_players_max {players_max}\n\
+             # HELP sixm_resources_running Number of currently running resources.\n\
+             # TYPE sixm_resources_running gauge\n\
+             sixm_resources_running {resources_running}\n\
+             # HELP sixm_entities_total Total number of active entities.\n\
+             # TYPE sixm_entities_total gauge\n\
+             sixm_entities_total {entities_total}\n\
+             # HELP sixm_tick_duration_ms Server tick duration in milliseconds.\n\
+             # TYPE sixm_tick_duration_ms summary\n\
+             sixm_tick_duration_ms{{quantile=\"avg\"}} {avg_ms}\n\
+             sixm_tick_duration_ms{{quantile=\"p50\"}} {p50_ms}\n\
+             sixm_tick_duration_ms{{quantile=\"p99\"}} {p99_ms}\n\
+             sixm_tick_duration_ms{{quantile=\"max\"}} {max_ms}\n\
+             # HELP sixm_net_rx_bytes_total Total bytes received over the game network.\n\
+             # TYPE sixm_net_rx_bytes_total counter\n\
+             sixm_net_rx_bytes_total {}\n\
+             # HELP sixm_net_tx_bytes_total Total bytes sent over the game network.\n\
+             # TYPE sixm_net_tx_bytes_total counter\n\
+             sixm_net_tx_bytes_total {}\n",
+            traffic.bytes_received, traffic.bytes_sent,
+        );
+        WebResponse {
+            status: 200,
+            headers: vec![
+                (
+                    "content-type".to_owned(),
+                    "text/plain; version=0.0.4; charset=utf-8".to_owned(),
+                ),
+                ("cache-control".to_owned(), "no-cache".to_owned()),
+            ],
+            body: body.into_bytes(),
+        }
+    }
+
+    /// `GET /admin`: self-contained admin UI when `sv_adminUiEnabled` and
+    /// `rcon_password` are both configured.
+    fn handle_admin(&self, request: &WebRequest) -> WebResponse {
+        let convars = self.convars.borrow();
+        if !convars.admin_ui_enabled() {
+            return text(404, "Not Found");
+        }
+        if convars.rcon_password().is_none() {
+            return text(403, "Admin UI requires rcon_password to be configured");
+        }
+        drop(convars);
+        if !is_get_or_head(&request.method) {
+            return method_not_allowed("GET, HEAD");
+        }
+        WebResponse {
+            status: 200,
+            headers: vec![
+                (
+                    "content-type".to_owned(),
+                    "text/html; charset=utf-8".to_owned(),
+                ),
+                ("cache-control".to_owned(), "no-store".to_owned()),
+            ],
+            body: include_str!("admin.html").as_bytes().to_vec(),
+        }
     }
 
     /// `POST /rcon`: authenticates with `rcon_password` and runs one console command.
@@ -498,6 +584,39 @@ fn text(status: u16, message: &str) -> WebResponse {
             "text/plain; charset=utf-8".to_owned(),
         )],
         body: message.as_bytes().to_vec(),
+    }
+}
+
+fn is_get_or_head(method: &str) -> bool {
+    method == "GET" || method == "HEAD"
+}
+
+fn method_not_allowed(allow: &str) -> WebResponse {
+    WebResponse {
+        status: 405,
+        headers: vec![
+            ("allow".to_owned(), allow.to_owned()),
+            (
+                "content-type".to_owned(),
+                "text/plain; charset=utf-8".to_owned(),
+            ),
+        ],
+        body: b"Method Not Allowed".to_vec(),
+    }
+}
+
+fn json_route(request: &WebRequest, build: impl FnOnce() -> Json) -> WebResponse {
+    if !is_get_or_head(&request.method) {
+        return method_not_allowed("GET, HEAD");
+    }
+    let body = serde_json::to_vec(&build()).unwrap_or_default();
+    WebResponse {
+        status: 200,
+        headers: vec![
+            ("content-type".to_owned(), "application/json".to_owned()),
+            ("cache-control".to_owned(), "no-cache".to_owned()),
+        ],
+        body,
     }
 }
 

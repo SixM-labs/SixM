@@ -169,3 +169,202 @@ fn metadata_is_read_from_the_manifest() {
         ])]
     );
 }
+
+#[test]
+fn provide_aliases_work_across_exports_state_metadata_files_and_lifecycle() {
+    let fx = Fixture::new();
+    fx.add_resource(
+        "oxmysql",
+        "fx_version 'cerulean'\n\
+         game 'common'\n\
+         version '2.9.0'\n\
+         provide 'mysql-async'\n\
+         provides { 'ghmattimysql' }\n\
+         server_script 'server.lua'\n\
+         server_export 'query'\n",
+        &[
+            (
+                "server.lua",
+                "exports('query', function(sql) return 'ok:' .. sql end)\n",
+            ),
+            ("config.json", "{\"pool\":4}"),
+        ],
+    );
+    fx.add_resource(
+        "consumer",
+        "fx_version 'cerulean'\n\
+         game 'common'\n\
+         dependency 'mysql-async'\n\
+         server_script 'server.lua'\n\
+         server_export 'probe'\n\
+         server_export 'names'\n",
+        &[(
+            "server.lua",
+            "exports('probe', function()\n\
+                 local a = exports['mysql-async']:query('SELECT 1')\n\
+                 local b = exports['ghmattimysql']:query('SELECT 2')\n\
+                 local st = GetResourceState('mysql-async')\n\
+                 local ver = GetResourceMetadata('mysql-async', 'version', 0)\n\
+                 local cfg = LoadResourceFile('mysql-async', 'config.json')\n\
+                 return { a, b, st, ver, cfg }\n\
+             end)\n\
+             exports('names', function()\n\
+                 local out = {}\n\
+                 for i = 0, GetNumResources() - 1 do\n\
+                     out[#out + 1] = GetResourceByFindIndex(i)\n\
+                 end\n\
+                 return out\n\
+             end)\n",
+        )],
+    );
+
+    fx.manager().refresh();
+    assert!(!fx.manager().is_running("mysql-async"));
+
+    // Starting `consumer` starts its dependency `oxmysql` via the `mysql-async` alias.
+    fx.manager().start("consumer").expect("consumer starts");
+    assert!(fx.manager().is_running("oxmysql"));
+    assert!(fx.manager().is_running("mysql-async"));
+    assert!(fx.manager().is_running("ghmattimysql"));
+
+    let probe = fx
+        .manager()
+        .call_export("consumer", "probe", &[], None)
+        .expect("probe");
+    assert_eq!(
+        probe,
+        vec![Value::Array(vec![
+            Value::from("ok:SELECT 1"),
+            Value::from("ok:SELECT 2"),
+            Value::from("started"),
+            Value::from("2.9.0"),
+            Value::from("{\"pool\":4}"),
+        ])]
+    );
+
+    // GetNumResources / GetResourceByFindIndex keep listing canonical installed names only.
+    let names = fx
+        .manager()
+        .call_export("consumer", "names", &[], None)
+        .expect("names");
+    assert_eq!(
+        names,
+        vec![Value::Array(vec![
+            Value::from("consumer"),
+            Value::from("oxmysql"),
+        ])]
+    );
+
+    // `call_export` directly via alias works too.
+    let direct = fx
+        .manager()
+        .call_export("mysql-async", "query", &[Value::from("PING")], None)
+        .expect("direct alias export");
+    assert_eq!(direct, vec![Value::from("ok:PING")]);
+
+    // `restart` and `stop` via alias restart/stop `oxmysql` and its dependent `consumer`.
+    fx.manager()
+        .restart("mysql-async")
+        .expect("restart by alias");
+    assert!(fx.manager().is_running("oxmysql"));
+    assert!(fx.manager().is_running("consumer"));
+
+    fx.manager().stop("ghmattimysql").expect("stop by alias");
+    assert!(!fx.manager().is_running("oxmysql"));
+    assert!(!fx.manager().is_running("mysql-async"));
+    assert!(!fx.manager().is_running("consumer"));
+}
+
+#[test]
+fn restart_resource_native_checks_ace_and_supports_aliases() {
+    let fx = Fixture::new();
+    fx.add_resource(
+        "target",
+        "fx_version 'cerulean'\n\
+         game 'common'\n\
+         provide 'target-alias'\n\
+         server_script 'server.lua'\n",
+        &[(
+            "server.lua",
+            "GlobalState.boots = (GlobalState.boots or 0) + 1\n",
+        )],
+    );
+    fx.add_resource(
+        "controller",
+        &manifest(&["server.lua"], &["restartTarget"], &[]),
+        &[(
+            "server.lua",
+            "exports('restartTarget', function(name)\n\
+                 return RestartResource(name)\n\
+             end)\n",
+        )],
+    );
+
+    fx.manager().start("target").expect("target starts");
+    fx.manager().start("controller").expect("controller starts");
+    assert_eq!(
+        fx.manager().state_get("global", "boots"),
+        Some(Value::Int(1))
+    );
+
+    // Denied without `command.restart` ACE.
+    let denied = fx
+        .manager()
+        .call_export(
+            "controller",
+            "restartTarget",
+            &[Value::from("target")],
+            None,
+        )
+        .expect("call export");
+    assert_eq!(denied, vec![Value::Bool(false)]);
+    assert_eq!(
+        fx.manager().state_get("global", "boots"),
+        Some(Value::Int(1))
+    );
+
+    // Grant `command.restart` to `resource.controller`.
+    fx.server
+        .execute("add_ace resource.controller command.restart allow");
+
+    let ok_canonical = fx
+        .manager()
+        .call_export(
+            "controller",
+            "restartTarget",
+            &[Value::from("target")],
+            None,
+        )
+        .expect("call export");
+    assert_eq!(ok_canonical, vec![Value::Bool(true)]);
+    assert_eq!(
+        fx.manager().state_get("global", "boots"),
+        Some(Value::Int(2))
+    );
+
+    let ok_alias = fx
+        .manager()
+        .call_export(
+            "controller",
+            "restartTarget",
+            &[Value::from("target-alias")],
+            None,
+        )
+        .expect("call export");
+    assert_eq!(ok_alias, vec![Value::Bool(true)]);
+    assert_eq!(
+        fx.manager().state_get("global", "boots"),
+        Some(Value::Int(3))
+    );
+
+    let missing = fx
+        .manager()
+        .call_export(
+            "controller",
+            "restartTarget",
+            &[Value::from("does-not-exist")],
+            None,
+        )
+        .expect("call export");
+    assert_eq!(missing, vec![Value::Bool(false)]);
+}

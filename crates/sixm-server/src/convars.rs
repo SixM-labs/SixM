@@ -32,10 +32,20 @@ const HTTP_ENABLED: &str = "sv_httpEnabled";
 /// Whether `PerformHttpRequest` may connect to loopback, link-local, or private
 /// network addresses. Off unless set to `true` or `1`.
 pub(crate) const HTTP_ALLOW_PRIVATE: &str = "sv_httpAllowPrivate";
+/// Per-player server event rate limit in events/sec (`0` disables, default `60`).
+const PLAYER_EVENT_RATE_LIMIT: &str = "sv_playerEventRateLimit";
+/// Whether `GET /metrics` exposes Prometheus metrics. Off unless set to `true` or `1`.
+const METRICS_ENABLED: &str = "sv_metricsEnabled";
+/// Whether `GET /admin` serves the built-in admin UI (also requires `rcon_password`).
+const ADMIN_UI_ENABLED: &str = "sv_adminUiEnabled";
+/// Optional HTTP(S) URL for periodic master-server discovery heartbeats.
+const MASTER_URL: &str = "sv_masterUrl";
+/// Interval in seconds between master-server heartbeats (default `30`, `10..=3600`).
+const HEARTBEAT_INTERVAL: &str = "sv_heartbeatInterval";
 
 /// Security-critical and bootstrap convars writable only from the server
 /// console or `server.cfg`.
-const CONSOLE_ONLY_CONVARS: [&str; 8] = [
+const CONSOLE_ONLY_CONVARS: [&str; 13] = [
     RCON_PASSWORD,
     HTTP_ALLOW_PRIVATE,
     HTTP_ENABLED,
@@ -44,6 +54,11 @@ const CONSOLE_ONLY_CONVARS: [&str; 8] = [
     RESOURCES_PATH,
     KVP_PATH,
     ENDPOINT,
+    PLAYER_EVENT_RATE_LIMIT,
+    METRICS_ENABLED,
+    ADMIN_UI_ENABLED,
+    MASTER_URL,
+    HEARTBEAT_INTERVAL,
 ];
 /// Convar naming how many seconds a resource's HTTP handler may take to
 /// complete its response.
@@ -110,6 +125,13 @@ const MAX_CULL_RADIUS: f32 = 100_000.0;
 /// Smallest and largest deferral timeout in seconds the server honours.
 const MIN_DEFERRAL_TIMEOUT: i64 = 1;
 const MAX_DEFERRAL_TIMEOUT: i64 = 3600;
+/// Default and upper clamp for `sv_playerEventRateLimit` (events/sec, `0` disables).
+const DEFAULT_PLAYER_EVENT_RATE_LIMIT: i64 = 60;
+const MAX_PLAYER_EVENT_RATE_LIMIT: i64 = 10_000;
+/// Default and clamp (seconds) for `sv_heartbeatInterval`.
+const DEFAULT_HEARTBEAT_INTERVAL: i64 = 30;
+const MIN_HEARTBEAT_INTERVAL: i64 = 10;
+const MAX_HEARTBEAT_INTERVAL: i64 = 3600;
 
 /// A stored convar: its value and the kind the last store gave it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +193,16 @@ impl Convars {
             ConvarKind::Replicated,
         );
         convars.set(ENTITY_LOCKDOWN, DEFAULT_ENTITY_LOCKDOWN, ConvarKind::Plain);
+        convars.set(
+            PLAYER_EVENT_RATE_LIMIT,
+            &DEFAULT_PLAYER_EVENT_RATE_LIMIT.to_string(),
+            ConvarKind::Plain,
+        );
+        convars.set(
+            HEARTBEAT_INTERVAL,
+            &DEFAULT_HEARTBEAT_INTERVAL.to_string(),
+            ConvarKind::Plain,
+        );
         convars
     }
 
@@ -407,10 +439,57 @@ impl Convars {
     /// Whether `PerformHttpRequest` may connect to private or loopback
     /// addresses, from `sv_httpAllowPrivate`. Only `true` or `1` turns it on.
     pub(crate) fn http_allow_private(&self) -> bool {
-        self.get(HTTP_ALLOW_PRIVATE).is_some_and(|value| {
+        self.is_truthy(HTTP_ALLOW_PRIVATE)
+    }
+
+    /// Whether `GET /metrics` exposes Prometheus metrics, from `sv_metricsEnabled`.
+    /// Only `true` or `1` turns it on.
+    pub(crate) fn metrics_enabled(&self) -> bool {
+        self.is_truthy(METRICS_ENABLED)
+    }
+
+    /// Whether `GET /admin` is enabled, from `sv_adminUiEnabled`.
+    /// Only `true` or `1` turns it on (still requires `rcon_password`).
+    pub(crate) fn admin_ui_enabled(&self) -> bool {
+        self.is_truthy(ADMIN_UI_ENABLED)
+    }
+
+    fn is_truthy(&self, name: &str) -> bool {
+        self.get(name).is_some_and(|value| {
             let value = value.trim();
             value.eq_ignore_ascii_case("true") || value == "1"
         })
+    }
+
+    /// Per-player server event rate limit in events/sec (`0` disables, default `60`,
+    /// clamped to `0..=10_000`).
+    pub(crate) fn player_event_rate_limit(&self) -> u32 {
+        let value = self
+            .get(PLAYER_EVENT_RATE_LIMIT)
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(DEFAULT_PLAYER_EVENT_RATE_LIMIT);
+        u32::try_from(value.clamp(0, MAX_PLAYER_EVENT_RATE_LIMIT)).unwrap_or(0)
+    }
+
+    /// Optional master-server heartbeat URL, from `sv_masterUrl`.
+    pub(crate) fn master_url(&self) -> Option<&str> {
+        self.get(MASTER_URL)
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+    }
+
+    /// Interval between master-server heartbeats, from `sv_heartbeatInterval`,
+    /// clamped to `10..=3600` seconds (default `30`).
+    pub(crate) fn heartbeat_interval(&self) -> Duration {
+        let seconds = self
+            .get(HEARTBEAT_INTERVAL)
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL);
+        Duration::from_secs(
+            seconds
+                .clamp(MIN_HEARTBEAT_INTERVAL, MAX_HEARTBEAT_INTERVAL)
+                .unsigned_abs(),
+        )
     }
 
     /// Updates the credential outside the convar map exposed to scripts and clients.
@@ -634,5 +713,52 @@ mod tests {
         assert_eq!(convars.remove_reader("api_key", "b"), (true, false));
         assert!(!convars.is_restricted("api_key"));
         assert!(convars.can_read("api_key", "a"));
+    }
+
+    #[test]
+    fn ops_and_rate_limit_convars_clamp_and_are_console_only() {
+        let mut convars = Convars::new();
+        assert_eq!(convars.player_event_rate_limit(), 60);
+        assert!(!convars.metrics_enabled());
+        assert!(!convars.admin_ui_enabled());
+        assert_eq!(convars.master_url(), None);
+        assert_eq!(convars.heartbeat_interval(), Duration::from_secs(30));
+
+        for (value, expected) in [
+            ("0", 0),
+            ("-5", 0),
+            ("120", 120),
+            ("999999", 10_000),
+            ("bad", 60),
+        ] {
+            convars.set(PLAYER_EVENT_RATE_LIMIT, value, ConvarKind::Plain);
+            assert_eq!(convars.player_event_rate_limit(), expected, "{value}");
+        }
+
+        for (value, expected) in [("5", 10), ("60", 60), ("9999", 3600), ("invalid", 30)] {
+            convars.set(HEARTBEAT_INTERVAL, value, ConvarKind::Plain);
+            assert_eq!(
+                convars.heartbeat_interval(),
+                Duration::from_secs(expected),
+                "{value}"
+            );
+        }
+
+        convars.set(METRICS_ENABLED, "1", ConvarKind::Plain);
+        assert!(convars.metrics_enabled());
+        convars.set(ADMIN_UI_ENABLED, "true", ConvarKind::Plain);
+        assert!(convars.admin_ui_enabled());
+        convars.set(MASTER_URL, " https://master.example/hb ", ConvarKind::Plain);
+        assert_eq!(convars.master_url(), Some("https://master.example/hb"));
+
+        for protected in [
+            "sv_playerEventRateLimit",
+            "sv_metricsEnabled",
+            "sv_adminUiEnabled",
+            "sv_masterUrl",
+            "sv_heartbeatInterval",
+        ] {
+            assert!(Convars::is_console_only(protected), "{protected}");
+        }
     }
 }
