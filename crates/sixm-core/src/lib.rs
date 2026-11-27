@@ -14,6 +14,7 @@
 //! `RefCell` borrow across a call into a runtime or the host.
 
 mod console;
+mod entity;
 mod files;
 mod hash;
 mod runtime;
@@ -21,6 +22,7 @@ mod state;
 mod value;
 
 pub use console::{TokenError, tokenize};
+pub use entity::{EntityInfo, EntityKind, MAX_ENTITIES, entity_bag, entity_of_bag, is_finite};
 pub use files::normalize_resource_path;
 pub use hash::joaat;
 pub use runtime::{

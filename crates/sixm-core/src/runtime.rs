@@ -2,6 +2,7 @@ use std::cell::Cell;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use crate::entity::{EntityInfo, EntityKind};
 use crate::value::{FuncRef, ResourceName, Value};
 
 /// Where an event came from. Exposed to scripts as `source`.
@@ -136,6 +137,15 @@ pub trait Host {
     /// folders, and returns whether it was written. `path` is normalized.
     fn save_resource_file(&self, resource: &str, path: &str, data: &[u8]) -> bool;
 
+    /// The entity with id `entity`, or `None` when it does not exist. On the
+    /// server this is the entity itself; on a client it is the last state the
+    /// server sent.
+    fn entity(&self, entity: u32) -> Option<EntityInfo>;
+
+    /// Ids of every existing entity of `kind`, or of every kind when `kind` is
+    /// `None`, in ascending order.
+    fn entities(&self, kind: Option<EntityKind>) -> Vec<u32>;
+
     /// Value stored under `key` in state bag `bag`, or `None` when the bag or
     /// the key is not set.
     fn state_get(&self, bag: &str, key: &str) -> Option<Value>;
@@ -174,6 +184,28 @@ pub trait ServerHost {
     /// Disconnects a player with a reason shown to them. Takes effect after
     /// the current script call returns.
     fn drop_player(&self, player: u32, reason: &str);
+
+    /// Creates an entity and returns its id. Ids count up from 1 and are not
+    /// reused while the server runs. The entity's state bag exists from now on,
+    /// every client is told at once, and `entityCreated` runs with the id.
+    /// Fails for a transform that is not finite, or when
+    /// [`MAX_ENTITIES`](crate::MAX_ENTITIES) entities already exist.
+    fn create_entity(&self, info: EntityInfo) -> Result<u32, ScriptError>;
+
+    /// Deletes an entity. `entityRemoved` runs first, while it still exists;
+    /// then it and its state bag are removed and every client is told.
+    /// Returns `false` when it did not exist.
+    fn delete_entity(&self, entity: u32) -> bool;
+
+    /// Moves an entity. Clients receive the latest position and rotation once
+    /// per server frame, however often it moved. Fails for an unknown entity or
+    /// a position that is not finite.
+    fn set_entity_position(&self, entity: u32, position: [f32; 3]) -> Result<(), ScriptError>;
+
+    /// Rotates an entity, sent to clients like
+    /// [`set_entity_position`](Self::set_entity_position). Fails for an unknown
+    /// entity or a rotation that is not finite.
+    fn set_entity_rotation(&self, entity: u32, rotation: [f32; 3]) -> Result<(), ScriptError>;
 }
 
 /// Services only a client provides: the connection to the server.
