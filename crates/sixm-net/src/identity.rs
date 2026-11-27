@@ -79,7 +79,7 @@ impl FromStr for Fingerprint {
             return Err(ParseFingerprintError);
         }
         let mut bytes = [0_u8; FINGERPRINT_LEN];
-        for (byte, pair) in bytes.iter_mut().zip(digits.chunks_exact(2)) {
+        for (byte, pair) in bytes.iter_mut().zip(digits.as_chunks::<2>().0) {
             let high = char::from(pair[0])
                 .to_digit(16)
                 .ok_or(ParseFingerprintError)?;

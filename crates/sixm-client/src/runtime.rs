@@ -214,10 +214,10 @@ impl ClientRuntime {
                 }
             }
         }
-        if !updates.is_empty() {
-            if let Err(err) = self.client.borrow().send_entity_transforms(&updates) {
-                warn!("cannot send the entity transforms: {err}");
-            }
+        if !updates.is_empty()
+            && let Err(err) = self.client.borrow().send_entity_transforms(&updates)
+        {
+            warn!("cannot send the entity transforms: {err}");
         }
         updates.clear();
         *self.owned_updates.borrow_mut() = updates;
@@ -609,10 +609,10 @@ impl ClientRuntime {
             EventContext::invoked_by(name.clone())
         });
         for runtime in snapshot.iter() {
-            if runtime.handles_event(event) {
-                if let Err(err) = runtime.deliver_event(event, source, args, &ctx) {
-                    error!(target: "sixm::script", "[{}] {event}: {err}", runtime.resource());
-                }
+            if runtime.handles_event(event)
+                && let Err(err) = runtime.deliver_event(event, source, args, &ctx)
+            {
+                error!(target: "sixm::script", "[{}] {event}: {err}", runtime.resource());
             }
         }
         ctx.is_canceled()

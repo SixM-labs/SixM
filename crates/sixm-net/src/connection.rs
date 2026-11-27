@@ -283,10 +283,10 @@ async fn refuse(connection: &Connection, mut send: SendStream, reason: &str, sha
 /// acknowledge it, so that the frame is not lost when the connection closes.
 async fn finish(send: &mut SendStream, last: Option<&[u8]>, traffic: &Counters) {
     let flush = async {
-        if let Some(bytes) = last {
-            if send.write_all(bytes).await.is_ok() {
-                traffic.sent(bytes.len());
-            }
+        if let Some(bytes) = last
+            && send.write_all(bytes).await.is_ok()
+        {
+            traffic.sent(bytes.len());
         }
         let _ = send.finish();
         let _ = send.stopped().await;
