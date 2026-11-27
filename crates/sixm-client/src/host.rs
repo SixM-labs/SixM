@@ -6,8 +6,8 @@ use std::path::PathBuf;
 
 use sixm_core::{
     ClientHost, EntityInfo, EntityKind, EntityState, EventSource, FuncRef, GLOBAL_BAG, Host,
-    HttpRequest, ResourceName, ResourceState, ScriptError, ServerHost, Value, entity_of_bag,
-    is_finite, player_of_bag,
+    HttpRequest, MirrorChange, NativeRegistry, ResourceName, ResourceState, ScriptError,
+    ServerHost, Value, entity_of_bag, is_finite, player_of_bag,
 };
 use tracing::warn;
 
@@ -363,6 +363,7 @@ impl ClientHost for ClientRuntime {
                 pending: true,
             },
         );
+        self.push_mirror_change(MirrorChange::Created { id, info });
         self.own_created.borrow_mut().insert(id);
         let sent =
             self.client
@@ -427,6 +428,20 @@ impl ClientHost for ClientRuntime {
         if !queued && slot.is_dirty() {
             self.owned_moves.borrow_mut().push(entity);
         }
+        let moved_info = slot.info;
+        let did_move = position.is_some() || rotation.is_some();
+        drop(entities);
+        if did_move {
+            self.push_mirror_change(MirrorChange::Moved {
+                id: entity,
+                info: moved_info,
+                teleport: true,
+            });
+        }
         Ok(())
+    }
+
+    fn adapter_natives(&self) -> Option<NativeRegistry> {
+        self.adapter_natives.borrow().clone()
     }
 }

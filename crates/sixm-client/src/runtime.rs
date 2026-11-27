@@ -4,6 +4,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -14,8 +15,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use sixm_core::{
-    EntityAttachment, EntityInfo, EntityKind, EntityState, EventContext, EventSource, FuncRef,
-    Host, ResourceName, ResourceState, ScriptRuntime, Value,
+    AdapterError, AdapterSink, EntityAttachment, EntityInfo, EntityKind, EntityState, EventContext,
+    EventSource, FuncRef, GameAdapter, Host, MirrorChange, NativeRegistry, ResourceName,
+    ResourceState, ScriptRuntime, Value, is_finite,
 };
 use sixm_js::JsRuntime;
 use sixm_kvp::KvpStore;
@@ -82,6 +84,9 @@ pub(crate) struct ScriptCommand {
     pub(crate) restricted: bool,
 }
 
+/// Buffered `(entity_id, position, rotation)` collected from an adapter's `read_owned`.
+type OwnedTransform = (u32, [f32; 3], [f32; 3]);
+
 /// The script runtimes of one running resource, in load order.
 #[derive(Debug)]
 struct RunningResource {
@@ -97,7 +102,6 @@ struct RunningResource {
 /// as they do on the server. Everything runs on one thread, and no borrow of the
 /// runtime's cells is held while script code runs, so scripts can call back
 /// into it.
-#[derive(Debug)]
 pub struct ClientRuntime {
     /// Handed to every runtime as its host.
     pub(crate) me: Weak<Self>,
@@ -146,7 +150,30 @@ pub struct ClientRuntime {
     /// Lifecycle states that override the running state while a resource
     /// starts or stops, oldest first.
     transitions: RefCell<Vec<(ResourceName, ResourceState)>>,
+    /// Optional game adapter driving physical/simulated entities on ticks.
+    adapter: RefCell<Option<Box<dyn GameAdapter>>>,
+    /// Natives registered by the attached adapter, if any.
+    pub(crate) adapter_natives: RefCell<Option<NativeRegistry>>,
+    /// Whether an adapter is currently attached (fast guard for mirror pushes).
+    has_adapter: Cell<bool>,
+    /// Queued mirror changes waiting to reach the attached adapter.
+    mirror_changes: RefCell<Vec<MirrorChange>>,
+    /// Reused buffer collecting per-entity errors from `apply_changes`.
+    adapter_errors: RefCell<Vec<(u32, AdapterError)>>,
+    /// Reused buffer of owned entity ids passed to `read_owned`.
+    owned_ids: RefCell<Vec<u32>>,
+    /// Reused buffer of transforms returned from `read_owned`.
+    read_owned_buf: RefCell<Vec<OwnedTransform>>,
     pub(crate) quit: Cell<bool>,
+}
+
+impl fmt::Debug for ClientRuntime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClientRuntime")
+            .field("local_player", &self.local_player)
+            .field("has_adapter", &self.has_adapter.get())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ClientRuntime {
@@ -178,21 +205,80 @@ impl ClientRuntime {
             files: RefCell::default(),
             metadata: RefCell::default(),
             transitions: RefCell::default(),
+            adapter: RefCell::default(),
+            adapter_natives: RefCell::default(),
+            has_adapter: Cell::new(false),
+            mirror_changes: RefCell::default(),
+            adapter_errors: RefCell::default(),
+            owned_ids: RefCell::default(),
+            read_owned_buf: RefCell::default(),
             quit: Cell::new(false),
         })
+    }
+
+    /// Installs an adapter to attach during [`start_synced`](Self::start_synced)
+    /// / [`try_start_synced`](Self::try_start_synced). Must be called before
+    /// starting synced resources so every runtime receives its natives.
+    pub fn set_adapter(&self, adapter: Box<dyn GameAdapter>) {
+        *self.adapter.borrow_mut() = Some(adapter);
+    }
+
+    /// Applies the initial snapshot, attaches any configured [`GameAdapter`],
+    /// and starts every synced resource in server order.
+    pub fn try_start_synced(&self) -> Result<(), AdapterError> {
+        let joined = self.client.borrow_mut().join_notices();
+        for notice in joined {
+            self.handle_notice(notice);
+        }
+        self.attach_pending_adapter()?;
+        let resources = self.client.borrow().resources().to_vec();
+        for resource in &resources {
+            self.start_resource(resource);
+        }
+        Ok(())
     }
 
     /// Starts every resource the connection has synced, in the server's order.
     /// Call it once, before the first [`pump`](Self::pump) or [`run`](Self::run).
     pub fn start_synced(&self) {
-        let joined = self.client.borrow_mut().join_notices();
-        for notice in joined {
-            self.handle_notice(notice);
+        if let Err(err) = self.try_start_synced() {
+            error!("cannot attach game adapter: {err}");
         }
-        let resources = self.client.borrow().resources().to_vec();
-        for resource in &resources {
-            self.start_resource(resource);
+    }
+
+    fn attach_pending_adapter(&self) -> Result<(), AdapterError> {
+        let Some(mut adapter) = self.adapter.borrow_mut().take() else {
+            return Ok(());
+        };
+        if let Err(err) = adapter.attach(AdapterSink::new(self.me.clone())) {
+            self.has_adapter.set(false);
+            *self.adapter_natives.borrow_mut() = None;
+            return Err(err);
         }
+        *self.adapter_natives.borrow_mut() = Some(adapter.natives().clone());
+        self.has_adapter.set(true);
+        // Seed any entities already present from join notices into the adapter queue.
+        let mut seed = Vec::new();
+        for (&id, slot) in self.entities.borrow().iter() {
+            seed.push(MirrorChange::Created {
+                id,
+                info: slot.info,
+            });
+            if slot.state != EntityState::default() {
+                seed.push(MirrorChange::StateChanged {
+                    id,
+                    state: slot.state,
+                });
+            }
+        }
+        if !seed.is_empty() {
+            let mut changes = self.mirror_changes.borrow_mut();
+            let tail = std::mem::take(&mut *changes);
+            *changes = seed;
+            changes.extend(tail);
+        }
+        *self.adapter.borrow_mut() = Some(adapter);
+        Ok(())
     }
 
     /// Handles the network notices that arrive within `timeout`, then every
@@ -210,16 +296,119 @@ impl ClientRuntime {
         }
     }
 
-    /// Runs one frame at `now`: resumes every resource, runs the queued
-    /// commands, then sends the transforms of the owned entities moved in the
-    /// frame, as one batch.
+    /// Runs one frame at `now`: delivers mirror updates and runs adapter
+    /// `before_scripts`, resumes resources, runs queued commands, pushes any
+    /// script moves to the adapter, runs `after_scripts`, reads owned entity
+    /// transforms from the adapter, and sends dirty transforms to the server.
     pub fn tick(&self, now: Instant) {
+        self.flush_mirror_changes();
+        self.with_adapter(|adapter| adapter.before_scripts(now));
         for runtime in self.snapshot().iter() {
             runtime.tick(now);
         }
         self.drain_commands();
+        self.flush_mirror_changes();
+        self.with_adapter(|adapter| adapter.after_scripts(now));
+        self.collect_adapter_owned_moves();
         self.send_owned_moves();
         self.kvp.borrow_mut().flush_due(now);
+    }
+
+    pub(crate) fn push_mirror_change(&self, change: MirrorChange) {
+        if self.has_adapter.get() {
+            self.mirror_changes.borrow_mut().push(change);
+        }
+    }
+
+    fn with_adapter(&self, f: impl FnOnce(&mut dyn GameAdapter)) {
+        let Some(mut adapter) = self.adapter.borrow_mut().take() else {
+            return;
+        };
+        f(&mut *adapter);
+        *self.adapter.borrow_mut() = Some(adapter);
+    }
+
+    fn flush_mirror_changes(&self) {
+        if !self.has_adapter.get() || self.mirror_changes.borrow().is_empty() {
+            return;
+        }
+        let mut changes = std::mem::take(&mut *self.mirror_changes.borrow_mut());
+        let mut errors = std::mem::take(&mut *self.adapter_errors.borrow_mut());
+        errors.clear();
+        self.with_adapter(|adapter| adapter.apply_changes(&changes, &mut errors));
+        for (entity, err) in errors.drain(..) {
+            warn!("adapter error on entity {entity}: {err}");
+        }
+        changes.clear();
+        *self.mirror_changes.borrow_mut() = changes;
+        *self.adapter_errors.borrow_mut() = errors;
+    }
+
+    fn collect_adapter_owned_moves(&self) {
+        if !self.has_adapter.get() {
+            return;
+        }
+        let mut owned = std::mem::take(&mut *self.owned_ids.borrow_mut());
+        owned.clear();
+        for (&id, slot) in self.entities.borrow().iter() {
+            if slot.info.owner == Some(self.local_player)
+                && !slot.state.frozen
+                && slot.state.attachment.is_none()
+            {
+                owned.push(id);
+            }
+        }
+        if !owned.is_empty() {
+            let mut out = std::mem::take(&mut *self.read_owned_buf.borrow_mut());
+            out.clear();
+            self.with_adapter(|adapter| adapter.read_owned(&owned, &mut out));
+            for (id, position, rotation) in out.drain(..) {
+                self.apply_adapter_owned_move(id, position, rotation);
+            }
+            *self.read_owned_buf.borrow_mut() = out;
+        }
+        *self.owned_ids.borrow_mut() = owned;
+    }
+
+    fn apply_adapter_owned_move(&self, entity: u32, position: [f32; 3], rotation: [f32; 3]) {
+        if !is_finite(position) || !is_finite(rotation) {
+            warn!("adapter returned non-finite transform for entity {entity}");
+            return;
+        }
+        let mut entities = self.entities.borrow_mut();
+        let Some(slot) = entities.get_mut(&entity) else {
+            return;
+        };
+        if slot.info.owner != Some(self.local_player)
+            || slot.state.frozen
+            || slot.state.attachment.is_some()
+        {
+            return;
+        }
+        let queued = slot.is_dirty();
+        let mut changed = false;
+        if vec_bits_differ(slot.info.position, position) {
+            slot.info.position = position;
+            slot.position_dirty = true;
+            changed = true;
+        }
+        if vec_bits_differ(slot.info.rotation, rotation) {
+            slot.info.rotation = rotation;
+            slot.rotation_dirty = true;
+            changed = true;
+        }
+        if changed && !queued && slot.is_dirty() {
+            self.owned_moves.borrow_mut().push(entity);
+        }
+    }
+
+    fn detach_adapter(&self) {
+        self.has_adapter.set(false);
+        *self.adapter_natives.borrow_mut() = None;
+        self.mirror_changes.borrow_mut().clear();
+        if let Some(mut adapter) = self.adapter.borrow_mut().take() {
+            adapter.detach();
+        }
     }
 
     /// Sends the latest transform of each owned entity moved since the last
@@ -262,26 +451,36 @@ impl ClientRuntime {
         if info.kind == EntityKind::Ped && info.owner == Some(self.local_player) {
             self.local_ped.set(Some(id));
         }
-        let mut entities = self.entities.borrow_mut();
-        match entities.get_mut(&id) {
-            Some(slot) if slot.pending => {
-                slot.pending = false;
-                slot.epoch = epoch;
-                slot.state = state;
+        let confirmed_pending = {
+            let mut entities = self.entities.borrow_mut();
+            match entities.get_mut(&id) {
+                Some(slot) if slot.pending => {
+                    slot.pending = false;
+                    slot.epoch = epoch;
+                    slot.state = state;
+                    true
+                }
+                _ => {
+                    entities.insert(
+                        id,
+                        ClientEntity {
+                            info,
+                            state,
+                            epoch,
+                            position_dirty: false,
+                            rotation_dirty: false,
+                            pending: false,
+                        },
+                    );
+                    false
+                }
             }
-            _ => {
-                entities.insert(
-                    id,
-                    ClientEntity {
-                        info,
-                        state,
-                        epoch,
-                        position_dirty: false,
-                        rotation_dirty: false,
-                        pending: false,
-                    },
-                );
-            }
+        };
+        if !confirmed_pending {
+            self.push_mirror_change(MirrorChange::Created { id, info });
+        }
+        if state != EntityState::default() {
+            self.push_mirror_change(MirrorChange::StateChanged { id, state });
         }
     }
 
@@ -291,7 +490,9 @@ impl ClientRuntime {
             self.local_ped.set(None);
         }
         self.own_created.borrow_mut().remove(&id);
-        self.entities.borrow_mut().remove(&id);
+        if self.entities.borrow_mut().remove(&id).is_some() {
+            self.push_mirror_change(MirrorChange::Removed { id });
+        }
     }
 
     /// Takes the next id of the leases, and drops a block once it is used up.
@@ -329,16 +530,20 @@ impl ClientRuntime {
     /// and any local move of this client that was not sent is dropped, since
     /// the server's transform is the one that counts now.
     fn apply_owner(&self, id: u32, owner: u32, epoch: u32, position: [f32; 3], rotation: [f32; 3]) {
-        let mut entities = self.entities.borrow_mut();
-        let Some(slot) = entities.get_mut(&id) else {
-            return;
+        let updated = {
+            let mut entities = self.entities.borrow_mut();
+            let Some(slot) = entities.get_mut(&id) else {
+                return;
+            };
+            slot.info.owner = (owner != 0).then_some(owner);
+            slot.info.position = position;
+            slot.info.rotation = rotation;
+            slot.epoch = epoch;
+            slot.position_dirty = false;
+            slot.rotation_dirty = false;
+            slot.info
         };
-        slot.info.owner = (owner != 0).then_some(owner);
-        slot.info.position = position;
-        slot.info.rotation = rotation;
-        slot.epoch = epoch;
-        slot.position_dirty = false;
-        slot.rotation_dirty = false;
+        self.push_mirror_change(MirrorChange::OwnerChanged { id, info: updated });
     }
 
     /// Applies the transforms the server sent. An update with the epoch the
@@ -349,6 +554,34 @@ impl ClientRuntime {
     /// client's value, and a local move of it is still sent. Unknown entities
     /// are ignored.
     fn apply_transforms(&self, updates: &[EntityTransform]) {
+        if self.has_adapter.get() {
+            let mut entities = self.entities.borrow_mut();
+            let mut changes = self.mirror_changes.borrow_mut();
+            for &(id, position, rotation, epoch) in updates {
+                let Some(slot) = entities.get_mut(&id) else {
+                    continue;
+                };
+                if slot.info.owner == Some(self.local_player) && slot.epoch == epoch {
+                    continue;
+                }
+                let teleport = slot.epoch != epoch;
+                if let Some(position) = position {
+                    slot.info.position = position;
+                    slot.position_dirty = false;
+                }
+                if let Some(rotation) = rotation {
+                    slot.info.rotation = rotation;
+                    slot.rotation_dirty = false;
+                }
+                slot.epoch = epoch;
+                changes.push(MirrorChange::Moved {
+                    id,
+                    info: slot.info,
+                    teleport,
+                });
+            }
+            return;
+        }
         let mut entities = self.entities.borrow_mut();
         for &(id, position, rotation, epoch) in updates {
             let Some(slot) = entities.get_mut(&id) else {
@@ -373,6 +606,8 @@ impl ClientRuntime {
     /// entities are ignored.
     fn apply_states(&self, updates: &[EntityStateUpdate]) {
         let mut entities = self.entities.borrow_mut();
+        let has_adapter = self.has_adapter.get();
+        let mut changes = has_adapter.then(|| self.mirror_changes.borrow_mut());
         for update in updates {
             let Some(slot) = entities.get_mut(&update.id) else {
                 continue;
@@ -405,6 +640,12 @@ impl ClientRuntime {
                     slot.position_dirty = false;
                     slot.rotation_dirty = false;
                 }
+            }
+            if let Some(ref mut changes) = changes {
+                changes.push(MirrorChange::StateChanged {
+                    id: update.id,
+                    state: slot.state,
+                });
             }
         }
     }
@@ -464,6 +705,7 @@ impl ClientRuntime {
     /// runs while its resource is still up.
     pub fn shutdown(&self) {
         self.stop_all();
+        self.detach_adapter();
         self.kvp.borrow_mut().shutdown();
         info!("Client stopped");
     }
@@ -551,6 +793,7 @@ impl ClientRuntime {
     /// Ends the session: the connection is gone, so every resource stops.
     fn close(&self) {
         self.stop_all();
+        self.detach_adapter();
         self.quit.set(true);
     }
 
@@ -934,6 +1177,12 @@ fn is_js_script(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("js"))
+}
+
+fn vec_bits_differ(a: [f32; 3], b: [f32; 3]) -> bool {
+    a[0].to_bits() != b[0].to_bits()
+        || a[1].to_bits() != b[1].to_bits()
+        || a[2].to_bits() != b[2].to_bits()
 }
 
 /// Time between frames at `rate` frames per second. `rate` is at least 1.

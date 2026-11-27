@@ -3,6 +3,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::adapter::NativeRegistry;
 use crate::entity::{EntityAttachment, EntityInfo, EntityKind, EntityState};
 use crate::value::{FuncRef, ResourceName, Value};
 
@@ -584,6 +585,12 @@ pub trait ClientHost {
     /// is sent. The server may still refuse it, and then the ownership does not
     /// change.
     fn request_entity_control(&self, entity: u32) -> Result<bool, ScriptError>;
+
+    /// Adapter-provided natives to expose as globals and via `InvokeNative`, if
+    /// an adapter is attached to this client.
+    fn adapter_natives(&self) -> Option<NativeRegistry> {
+        None
+    }
 }
 
 /// One running resource inside one scripting language.

@@ -13,6 +13,7 @@
 //! without fighting the borrow checker. Implementations must never hold a
 //! `RefCell` borrow across a call into a runtime or the host.
 
+mod adapter;
 mod console;
 mod entity;
 mod files;
@@ -21,6 +22,7 @@ mod runtime;
 mod state;
 mod value;
 
+pub use adapter::{AdapterError, AdapterSink, GameAdapter, MirrorChange, NativeFn, NativeRegistry};
 pub use console::{TokenError, tokenize};
 pub use entity::{
     DEFAULT_ENTITY_HEALTH, EntityAttachment, EntityInfo, EntityKind, EntityState, MAX_ENTITIES,

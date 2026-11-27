@@ -7,7 +7,7 @@ until it is told to stop. Source: `crates/sixm-client/src/`.
 ## Command line
 
 ```text
-sixm-client <addr> <name> [--fingerprint HEX] [--cache DIR] [--identity FILE] [+command args...]
+sixm-client <addr> <name> [--fingerprint HEX] [--cache DIR] [--identity FILE] [--sim] [+command args...]
 ```
 
 | Argument | Meaning |
@@ -17,6 +17,7 @@ sixm-client <addr> <name> [--fingerprint HEX] [--cache DIR] [--identity FILE] [+
 | `--fingerprint HEX` | The server's fingerprint, 64 hex characters. The client refuses any other certificate. |
 | `--cache DIR` | Cache folder. Default `sixm-cache`, relative to the working directory. |
 | `--identity FILE` | The client certificate. Default `identity.bin` in the cache folder. The file is created on first use. See [Identity](#identity). |
+| `--sim` | Attach the built-in simulated [`GameAdapter`](design/game-adapter.md) (`SimAdapter`) for velocity integration, `TaskGoStraightToCoord`, and `InvokeNative` testing. |
 | `+command args...` | A console command, run after the client connects. |
 
 - The two positional arguments and the options can come in any order before

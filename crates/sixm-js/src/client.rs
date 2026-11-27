@@ -6,8 +6,9 @@ use std::rc::Weak;
 
 use rquickjs::function::Rest;
 use rquickjs::{Ctx, Exception, Function, Object, Value as JsValue};
-use sixm_core::{ClientHost, Host, player_bag};
+use sixm_core::{ClientHost, Host, NativeRegistry, player_bag};
 
+use crate::convert::values_to_js_return;
 use crate::players::{player_id, whole_number};
 use crate::runtime::JsRuntime;
 use crate::state::state_bag;
@@ -115,7 +116,91 @@ pub(crate) fn install<'js>(
     globals.set("PlayerPedId", player_ped_id)?;
     globals.set("GetPlayerPed", get_player_ped)?;
     globals.set("LocalPlayer", local)?;
+    install_adapter_natives(ctx, weak)?;
     Ok(())
+}
+
+fn install_adapter_natives<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::Result<()> {
+    let Some(rt) = weak.upgrade() else {
+        return Ok(());
+    };
+    let Ok(host) = rt.host(ctx) else {
+        return Ok(());
+    };
+    let Some(registry) = host.client().and_then(ClientHost::adapter_natives) else {
+        return Ok(());
+    };
+    drop(host);
+
+    let globals = ctx.globals();
+    for (name, func) in registry.iter() {
+        let weak = weak.clone();
+        let func = func.clone();
+        globals.set(
+            name,
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'js>, args: Rest<JsValue<'js>>| -> rquickjs::Result<JsValue<'js>> {
+                    let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                    let values = rt
+                        .to_values(&ctx, &args.0)
+                        .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))?;
+                    let out = func(&values)
+                        .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))?;
+                    values_to_js_return(&rt, &ctx, &out)
+                        .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))
+                },
+            )?,
+        )?;
+    }
+
+    let invoke = make_invoke_native(ctx, weak, registry)?;
+    globals.set("InvokeNative", invoke.clone())?;
+    if let Ok(citizen) = globals.get::<_, Object<'js>>("Citizen") {
+        citizen.set("InvokeNative", invoke)?;
+    }
+    Ok(())
+}
+
+fn make_invoke_native<'js>(
+    ctx: &Ctx<'js>,
+    weak: &Weak<JsRuntime>,
+    registry: NativeRegistry,
+) -> rquickjs::Result<Function<'js>> {
+    let weak = weak.clone();
+    Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>,
+              hash: JsValue<'js>,
+              args: Rest<JsValue<'js>>|
+              -> rquickjs::Result<JsValue<'js>> {
+            let rt = JsRuntime::upgrade(&ctx, &weak)?;
+            let hash = native_hash(&ctx, &hash)?;
+            let native = registry.get_by_hash(hash).ok_or_else(|| {
+                Exception::throw_message(&ctx, &format!("unknown native hash {hash:#010x}"))
+            })?;
+            let values = rt
+                .to_values(&ctx, &args.0)
+                .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))?;
+            let out =
+                native(&values).map_err(|err| Exception::throw_message(&ctx, &err.to_string()))?;
+            values_to_js_return(&rt, &ctx, &out)
+                .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))
+        },
+    )
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "native hashes are 32-bit values and may arrive signed via GetHashKey"
+)]
+fn native_hash(ctx: &Ctx<'_>, value: &JsValue<'_>) -> rquickjs::Result<u32> {
+    let number =
+        whole_number(value).filter(|&n| (i64::from(i32::MIN)..=i64::from(u32::MAX)).contains(&n));
+    number.map(|n| n as u32).ok_or_else(|| {
+        Exception::throw_type(ctx, "InvokeNative: native hash must be a 32-bit integer")
+    })
 }
 
 pub(crate) fn latent_bps(ctx: &Ctx<'_>, value: &JsValue<'_>) -> rquickjs::Result<u64> {
