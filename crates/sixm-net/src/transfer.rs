@@ -14,6 +14,7 @@ use tracing::{debug, warn};
 
 use crate::files::{FileHash, PublishedResource, ResourceEntry};
 use crate::protocol::{MAX_FRAME, ServerMessage};
+use crate::traffic::Counters;
 use crate::wire::encode_frame;
 
 /// Bytes read from disk and written to the stream at a time.
@@ -83,6 +84,8 @@ pub(crate) struct Transfer {
     pub(crate) slots: Arc<Semaphore>,
     /// The peer's outbound queue, for the reply to an unknown hash.
     pub(crate) reply: mpsc::Sender<Arc<[u8]>>,
+    /// The server's traffic totals.
+    pub(crate) traffic: Arc<Counters>,
 }
 
 /// Serves the file with `hash`. The advertised set is checked when the request
@@ -94,6 +97,7 @@ pub(crate) async fn serve_file(transfer: Transfer, hash: FileHash) {
         advertised,
         slots,
         reply,
+        traffic,
     } = transfer;
     if lookup(&advertised, &hash).is_none() {
         return unavailable(&reply, hash).await;
@@ -120,7 +124,8 @@ pub(crate) async fn serve_file(transfer: Transfer, hash: FileHash) {
     if stream.write_all(&header).await.is_err() {
         return;
     }
-    if copy_exact(&mut file, &mut stream, source.size).await {
+    traffic.sent(HEADER_LEN);
+    if copy_exact(&mut file, &mut stream, source.size, &traffic).await {
         let _ = stream.finish();
     } else {
         debug!("a file transfer was aborted before the advertised size");
@@ -144,7 +149,12 @@ async fn unavailable(reply: &mpsc::Sender<Arc<[u8]>>, hash: FileHash) {
 
 /// Copies exactly `size` bytes from `file` to `stream`, reading in chunks. Returns
 /// false if the file ends early or either side fails.
-async fn copy_exact(file: &mut tokio::fs::File, stream: &mut SendStream, size: u64) -> bool {
+async fn copy_exact(
+    file: &mut tokio::fs::File,
+    stream: &mut SendStream,
+    size: u64,
+    traffic: &Counters,
+) -> bool {
     let mut buffer = vec![0_u8; CHUNK_LEN];
     let mut remaining = size;
     while remaining > 0 {
@@ -156,6 +166,7 @@ async fn copy_exact(file: &mut tokio::fs::File, stream: &mut SendStream, size: u
         if stream.write_all(&buffer[..read]).await.is_err() {
             return false;
         }
+        traffic.sent_data(read);
         remaining = remaining.saturating_sub(u64::try_from(read).unwrap_or(u64::MAX));
     }
     true

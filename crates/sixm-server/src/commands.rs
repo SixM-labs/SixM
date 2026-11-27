@@ -8,6 +8,7 @@
 
 use std::fs;
 use std::net::SocketAddr;
+use std::time::Instant;
 
 use sixm_core::{ConvarKind, Host, Value};
 use tracing::{debug, error, info, warn};
@@ -16,12 +17,13 @@ use crate::access::Permission;
 use crate::config::tokenize;
 use crate::convars::ENDPOINT;
 use crate::manager::{ManagerError, ResourceManager};
+use crate::perf::{format_millis, per_second};
 
 /// Deepest `exec` nesting. A file that includes itself stops here.
 const MAX_EXEC_DEPTH: usize = 16;
 
 /// Built-in command names, as listed by `help`.
-const BUILT_IN: [&str; 23] = [
+const BUILT_IN: [&str; 24] = [
     "add_ace",
     "add_principal",
     "endpoint_add_tcp",
@@ -32,6 +34,7 @@ const BUILT_IN: [&str; 23] = [
     "help",
     "list_aces",
     "list_principals",
+    "perf",
     "players",
     "quit",
     "refresh",
@@ -133,6 +136,7 @@ pub(crate) fn run_words(
         "refresh" => manager.refresh(),
         "endpoint_add_udp" => endpoint(manager, args, false),
         "endpoint_add_tcp" => endpoint(manager, args, true),
+        "perf" => perf(manager, args),
         "players" => players(manager),
         "entities" => entities(manager),
         "state" => state(manager, args),
@@ -300,6 +304,73 @@ fn players(manager: &ResourceManager) {
             .unwrap_or_default();
         info!("{id:>5}  {}  {license}  {}", player.name, player.endpoint);
     }
+}
+
+/// `perf`: prints the frame times of the recent frames against the tick budget,
+/// the load, and the network rates since the previous `perf` call, or since the
+/// server started.
+fn perf(manager: &ResourceManager, args: &[String]) {
+    if !args.is_empty() {
+        warn!("usage: perf");
+        return;
+    }
+    let tick_rate = manager.tick_rate();
+    let budget = 1_000_000 / tick_rate;
+    let summary = manager.frames.borrow().summary();
+    if let Some(frames) = summary {
+        info!(
+            "frames: {} recorded, average {} ms, p50 {} ms, p99 {} ms, max {} ms",
+            frames.count,
+            format_millis(frames.average),
+            format_millis(frames.p50),
+            format_millis(frames.p99),
+            format_millis(frames.max),
+        );
+    } else {
+        info!("frames: none recorded yet");
+    }
+    info!(
+        "tick rate {tick_rate} per second, budget {} ms per frame",
+        format_millis(budget)
+    );
+    info!(
+        "{} players, {} entities, {} running resources",
+        manager.player_ids().len(),
+        manager.entity_list().len(),
+        manager.running_resources().len()
+    );
+    let now = Instant::now();
+    let traffic = manager.network_traffic();
+    let (since, previous) = manager.perf_mark.replace((now, traffic));
+    let millis = now.saturating_duration_since(since).as_millis();
+    info!(
+        "network over {:.1} s: sent {} KiB/s ({} frames/s), received {} KiB/s ({} frames/s)",
+        now.saturating_duration_since(since).as_secs_f64(),
+        per_second(
+            traffic.bytes_sent.saturating_sub(previous.bytes_sent),
+            1024,
+            millis
+        ),
+        per_second(
+            traffic.frames_sent.saturating_sub(previous.frames_sent),
+            1,
+            millis
+        ),
+        per_second(
+            traffic
+                .bytes_received
+                .saturating_sub(previous.bytes_received),
+            1024,
+            millis
+        ),
+        per_second(
+            traffic
+                .frames_received
+                .saturating_sub(previous.frames_received),
+            1,
+            millis
+        ),
+    );
 }
 
 /// `entities`: lists every entity with its id, kind, model in hex, position and

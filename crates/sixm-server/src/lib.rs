@@ -13,6 +13,7 @@ mod entities;
 mod host_functions;
 mod manager;
 mod network;
+mod perf;
 mod resource_files;
 mod scope;
 mod server;

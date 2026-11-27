@@ -36,7 +36,7 @@ use crate::protocol::{
     ServerMessage,
 };
 
-const FRAME_HEADER_LEN: usize = 4;
+pub(crate) const FRAME_HEADER_LEN: usize = 4;
 const MESSAGE_NAME: &str = "Message";
 const VALUE_NAME: &str = "Value";
 const TAG_NIL: u32 = 0;

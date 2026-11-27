@@ -71,12 +71,15 @@ impl Server {
     }
 
     /// Runs one frame at `now`: resumes every running resource, runs the queued
-    /// commands, and refuses the deferred connections that ran out of time.
+    /// commands, refuses the deferred connections that ran out of time and
+    /// sends the entity changes. The frame's duration is recorded for `perf`.
     pub fn tick(&self, now: Instant) {
+        let started = Instant::now();
         self.manager.tick_all(now);
         self.drain_commands();
         self.manager.expire_deferrals(now);
         self.manager.flush_entities();
+        self.manager.frames.borrow_mut().record(started.elapsed());
     }
 
     /// Binds the listening socket and sends its events to `input`, the sending

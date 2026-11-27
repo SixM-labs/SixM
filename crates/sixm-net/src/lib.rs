@@ -20,6 +20,7 @@ mod identity;
 mod protocol;
 mod ratelimit;
 mod server;
+mod traffic;
 mod transfer;
 mod transport;
 mod wire;
@@ -35,3 +36,4 @@ pub use files::{
 pub use identity::{Fingerprint, Identity, ParseFingerprintError};
 pub use protocol::{MAX_CONVAR_NAME_LEN, MAX_CONVAR_VALUE_LEN, PROTOCOL_VERSION};
 pub use server::{ConnectionId, NetEvent, NetServer, ServerConfig};
+pub use traffic::Traffic;

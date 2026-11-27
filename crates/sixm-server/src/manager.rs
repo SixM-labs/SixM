@@ -15,7 +15,7 @@ use sixm_core::{
 use sixm_lua::LuaRuntime;
 use sixm_net::{
     MAX_CONVAR_NAME_LEN, MAX_CONVAR_VALUE_LEN, MAX_EXPORT_NAME_LEN, MAX_EXPORTS, MAX_METADATA,
-    MAX_METADATA_KEY_LEN, MAX_METADATA_VALUE_LEN, PublishedResource,
+    MAX_METADATA_KEY_LEN, MAX_METADATA_VALUE_LEN, PublishedResource, Traffic,
 };
 use sixm_resources::{Catalog, DependencyError, ResourceError, ScanIssue};
 use tracing::{error, info, warn};
@@ -25,6 +25,7 @@ use crate::convars::Convars;
 use crate::entities::{EntityStore, EntityUpdate};
 use crate::host_functions::{HostFunctions, is_host};
 use crate::network::Network;
+use crate::perf::FrameHistory;
 use crate::resource_files::{FileHashes, listing};
 use crate::scope::Scopes;
 use crate::state::StateStore;
@@ -102,6 +103,11 @@ pub struct ResourceManager {
     pub(crate) access: RefCell<AccessStore>,
     /// Functions the server offers to scripts, such as `setKickReason`.
     pub(crate) host_functions: RefCell<HostFunctions>,
+    /// Durations of the recent frames, for the `perf` command.
+    pub(crate) frames: RefCell<FrameHistory>,
+    /// When `perf` last ran, and the traffic totals it saw then. The rates
+    /// cover the time since this mark. It starts at the server's start.
+    pub(crate) perf_mark: Cell<(Instant, Traffic)>,
     /// Client files of the running resources, in start order. Advertised to
     /// players as a whole whenever it changes.
     advertised: RefCell<Vec<PublishedResource>>,
@@ -134,6 +140,8 @@ impl ResourceManager {
             entity_updates: RefCell::default(),
             access: RefCell::default(),
             host_functions: RefCell::default(),
+            frames: RefCell::default(),
+            perf_mark: Cell::new((Instant::now(), Traffic::default())),
             advertised: RefCell::default(),
             hashes: RefCell::default(),
             transitions: RefCell::default(),

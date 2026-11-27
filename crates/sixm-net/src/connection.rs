@@ -21,9 +21,12 @@ use crate::protocol::{
 };
 use crate::ratelimit::{RateLimiter, Verdict};
 use crate::server::{ConnectionId, NetEvent};
+use crate::traffic::Counters;
 use crate::transfer::{Advertised, Transfer, serve_file};
 use crate::transport::{close_connection, closing_reason};
-use crate::wire::{decode_client_message, encode_frame, read_frame, validate_event_name};
+use crate::wire::{
+    FRAME_HEADER_LEN, decode_client_message, encode_frame, read_frame, validate_event_name,
+};
 
 /// Application close code for an ordinary end of the connection.
 const CLOSE_NORMAL: u32 = 0;
@@ -42,6 +45,8 @@ pub(crate) struct Shared {
     pub(crate) max_frame: usize,
     /// The files the server advertises, shared with the server handle.
     pub(crate) advertised: Arc<RwLock<Advertised>>,
+    /// Traffic totals, shared with the server handle.
+    pub(crate) traffic: Arc<Counters>,
 }
 
 /// The server's answer to a connection that completed its `Hello`.
@@ -102,19 +107,23 @@ pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket)
         close_connection(&connection, CLOSE_PROTOCOL, NO_CLIENT_CERTIFICATE);
         return;
     };
-    let hello =
-        match tokio::time::timeout_at(deadline, read_hello(&connection, shared.max_frame)).await {
-            Ok(Ok(hello)) => hello,
-            Ok(Err(NetError::Closed)) => return,
-            Ok(Err(err)) => {
-                close_connection(&connection, CLOSE_PROTOCOL, &err.to_string());
-                return;
-            }
-            Err(_) => {
-                close_connection(&connection, CLOSE_PROTOCOL, "handshake timed out");
-                return;
-            }
-        };
+    let hello = match tokio::time::timeout_at(
+        deadline,
+        read_hello(&connection, shared.max_frame, &shared.traffic),
+    )
+    .await
+    {
+        Ok(Ok(hello)) => hello,
+        Ok(Err(NetError::Closed)) => return,
+        Ok(Err(err)) => {
+            close_connection(&connection, CLOSE_PROTOCOL, &err.to_string());
+            return;
+        }
+        Err(_) => {
+            close_connection(&connection, CLOSE_PROTOCOL, "handshake timed out");
+            return;
+        }
+    };
     let Hello {
         mut send,
         recv,
@@ -124,11 +133,11 @@ pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket)
     if protocol != PROTOCOL_VERSION {
         let reason =
             format!("unsupported protocol version {protocol}, server speaks {PROTOCOL_VERSION}");
-        return refuse(&connection, send, &reason, shared.max_frame).await;
+        return refuse(&connection, send, &reason, &shared).await;
     }
     let Some(name) = validate_player_name(&name) else {
         let reason = format!("player name must be 1 to {MAX_PLAYER_NAME_LEN} characters");
-        return refuse(&connection, send, &reason, shared.max_frame).await;
+        return refuse(&connection, send, &reason, &shared).await;
     };
     (shared.on_event)(NetEvent::Connecting {
         connection: id,
@@ -141,7 +150,7 @@ pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket)
         return;
     };
     match decided {
-        Decision::Reject(reason) => refuse(&connection, send, &reason, shared.max_frame).await,
+        Decision::Reject(reason) => refuse(&connection, send, &reason, &shared).await,
         Decision::Accept(player) => {
             let accepted = Accepted {
                 connection,
@@ -181,6 +190,7 @@ async fn decide(
                         (shared.on_event)(NetEvent::Abandoned { connection: id });
                         return None;
                     }
+                    shared.traffic.sent(frame.len());
                 }
                 None => return Some(Decision::Reject(SHUTTING_DOWN.to_owned())),
             },
@@ -219,11 +229,16 @@ struct Hello {
 }
 
 /// Opens the first bidirectional stream and reads the `Hello` on it.
-async fn read_hello(connection: &Connection, max_frame: usize) -> Result<Hello, NetError> {
+async fn read_hello(
+    connection: &Connection,
+    max_frame: usize,
+    traffic: &Counters,
+) -> Result<Hello, NetError> {
     let (send, mut recv) = connection.accept_bi().await.map_err(|_| NetError::Closed)?;
     let payload = read_frame(&mut recv, max_frame)
         .await?
         .ok_or(NetError::Closed)?;
+    traffic.received(FRAME_HEADER_LEN + payload.len());
     match decode_client_message(&payload)? {
         ClientMessage::Hello { protocol, name } => Ok(Hello {
             send,
@@ -241,24 +256,26 @@ async fn read_hello(connection: &Connection, max_frame: usize) -> Result<Hello, 
 }
 
 /// Sends a `Rejected` message and closes the connection gracefully.
-async fn refuse(connection: &Connection, mut send: SendStream, reason: &str, max_frame: usize) {
+async fn refuse(connection: &Connection, mut send: SendStream, reason: &str, shared: &Shared) {
     let frame = encode_frame(
         &ServerMessage::Rejected {
             reason: reason.to_owned(),
         },
-        max_frame,
+        shared.max_frame,
     )
     .ok();
-    finish(&mut send, frame.as_deref()).await;
+    finish(&mut send, frame.as_deref(), &shared.traffic).await;
     close_connection(connection, CLOSE_NORMAL, reason);
 }
 
 /// Writes an optional last frame, finishes the stream and waits for the peer to
 /// acknowledge it, so that the frame is not lost when the connection closes.
-async fn finish(send: &mut SendStream, last: Option<&[u8]>) {
+async fn finish(send: &mut SendStream, last: Option<&[u8]>, traffic: &Counters) {
     let flush = async {
         if let Some(bytes) = last {
-            let _ = send.write_all(bytes).await;
+            if send.write_all(bytes).await.is_ok() {
+                traffic.sent(bytes.len());
+            }
         }
         let _ = send.finish();
         let _ = send.stopped().await;
@@ -284,6 +301,7 @@ struct Requests {
     advertised: Arc<RwLock<Advertised>>,
     slots: Arc<Semaphore>,
     reply: mpsc::Sender<Arc<[u8]>>,
+    traffic: Arc<Counters>,
     tasks: JoinSet<()>,
 }
 
@@ -292,12 +310,14 @@ impl Requests {
         connection: Connection,
         advertised: Arc<RwLock<Advertised>>,
         reply: mpsc::Sender<Arc<[u8]>>,
+        traffic: Arc<Counters>,
     ) -> Self {
         Self {
             connection,
             advertised,
             slots: Arc::new(Semaphore::new(MAX_CONCURRENT_TRANSFERS)),
             reply,
+            traffic,
             tasks: JoinSet::new(),
         }
     }
@@ -314,6 +334,7 @@ impl Requests {
             advertised: Arc::clone(&self.advertised),
             slots: Arc::clone(&self.slots),
             reply: self.reply.clone(),
+            traffic: Arc::clone(&self.traffic),
         };
         self.tasks.spawn(serve_file(transfer, hash));
         Ok(())
@@ -349,8 +370,14 @@ async fn serve(shared: &Shared, accepted: Accepted) {
         outbound,
         kick: kick.subscribe(),
         max_frame: shared.max_frame,
+        traffic: Arc::clone(&shared.traffic),
     }));
-    let mut requests = Requests::new(connection.clone(), Arc::clone(&shared.advertised), reply);
+    let mut requests = Requests::new(
+        connection.clone(),
+        Arc::clone(&shared.advertised),
+        reply,
+        Arc::clone(&shared.traffic),
+    );
     let mut reader = pin!(read_loop(shared, player, &mut recv, &mut requests));
     let (code, reason) = tokio::select! {
         stop = &mut reader => match stop {
@@ -394,7 +421,10 @@ async fn read_loop(
     let mut limiter = RateLimiter::new(Instant::now());
     loop {
         let payload = match read_frame(recv, shared.max_frame).await {
-            Ok(Some(payload)) => payload,
+            Ok(Some(payload)) => {
+                shared.traffic.received(FRAME_HEADER_LEN + payload.len());
+                payload
+            }
             Ok(None) | Err(NetError::Closed) => return Stop::Closed,
             Err(err) => return Stop::Protocol(err.to_string()),
         };
@@ -461,6 +491,7 @@ struct WriteLoop {
     outbound: mpsc::Receiver<Arc<[u8]>>,
     kick: watch::Receiver<Option<Arc<str>>>,
     max_frame: usize,
+    traffic: Arc<Counters>,
 }
 
 /// Sends the welcome, then queued frames, until the player is kicked or the
@@ -473,6 +504,7 @@ async fn write_loop(writer: WriteLoop) -> String {
         mut outbound,
         mut kick,
         max_frame,
+        traffic,
     } = writer;
     let welcome = match encode_frame(
         &ServerMessage::Welcome {
@@ -484,22 +516,22 @@ async fn write_loop(writer: WriteLoop) -> String {
         Ok(frame) => frame,
         Err(err) => return err.to_string(),
     };
-    if let Err(reason) = write_frame(&mut send, &welcome, &mut kick).await {
+    if let Err(reason) = write_frame(&mut send, &welcome, &mut kick, &traffic).await {
         return reason;
     }
     loop {
         let frame = tokio::select! {
             biased;
-            reason = next_kick(&mut kick) => return kicked(&mut send, &reason, max_frame).await,
+            reason = next_kick(&mut kick) => return kicked(&mut send, &reason, max_frame, &traffic).await,
             frame = outbound.recv() => {
                 let Some(frame) = frame else {
-                    finish(&mut send, None).await;
+                    finish(&mut send, None, &traffic).await;
                     return SHUTTING_DOWN.to_owned();
                 };
                 frame
             }
         };
-        if let Err(reason) = write_frame(&mut send, &frame, &mut kick).await {
+        if let Err(reason) = write_frame(&mut send, &frame, &mut kick, &traffic).await {
             return reason;
         }
     }
@@ -512,6 +544,7 @@ async fn write_frame(
     send: &mut SendStream,
     bytes: &[u8],
     kick: &mut watch::Receiver<Option<Arc<str>>>,
+    traffic: &Counters,
 ) -> Result<(), String> {
     tokio::select! {
         biased;
@@ -519,7 +552,13 @@ async fn write_frame(
             let _ = send.reset(VarInt::from_u32(CLOSE_NORMAL));
             Err(reason.to_string())
         }
-        result = send.write_all(bytes) => result.map_err(|err| format!("write failed: {err}")),
+        result = send.write_all(bytes) => match result {
+            Ok(()) => {
+                traffic.sent(bytes.len());
+                Ok(())
+            }
+            Err(err) => Err(format!("write failed: {err}")),
+        },
     }
 }
 
@@ -536,7 +575,12 @@ async fn next_kick(kick: &mut watch::Receiver<Option<Arc<str>>>) -> Arc<str> {
 }
 
 /// Sends `Kicked` with `reason`, finishes the stream and returns the reason.
-async fn kicked(send: &mut SendStream, reason: &str, max_frame: usize) -> String {
+async fn kicked(
+    send: &mut SendStream,
+    reason: &str,
+    max_frame: usize,
+    traffic: &Counters,
+) -> String {
     let frame = encode_frame(
         &ServerMessage::Kicked {
             reason: reason.to_owned(),
@@ -544,6 +588,6 @@ async fn kicked(send: &mut SendStream, reason: &str, max_frame: usize) -> String
         max_frame,
     )
     .ok();
-    finish(send, frame.as_deref()).await;
+    finish(send, frame.as_deref(), traffic).await;
     reason.to_owned()
 }

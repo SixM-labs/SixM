@@ -1,3 +1,4 @@
 /target
 /examples/server-data/cache/
 /.claude/
+/examples/loadtest/cache/
