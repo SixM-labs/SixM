@@ -71,10 +71,13 @@ fn install_resource_files<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquick
         let weak = weak.clone();
         globals.set(
             "GetCurrentResourceName",
-            Function::new(ctx.clone(), move |ctx: Ctx<'js>| -> rquickjs::Result<String> {
-                let rt = JsRuntime::upgrade(&ctx, &weak)?;
-                Ok(rt.resource.as_ref().to_owned())
-            })?,
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'js>| -> rquickjs::Result<String> {
+                    let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                    Ok(rt.resource.as_ref().to_owned())
+                },
+            )?,
         )?;
     }
     {
@@ -296,8 +299,8 @@ pub(crate) fn data_bytes(ctx: &Ctx<'_>, value: &JsValue<'_>) -> rquickjs::Result
         return text.to_string().map(String::into_bytes);
     }
     if let Some(obj) = value.as_object()
-        && let Some(bytes) = read_bytes(obj)
-            .map_err(|err| Exception::throw_message(ctx, &err.to_string()))?
+        && let Some(bytes) =
+            read_bytes(obj).map_err(|err| Exception::throw_message(ctx, &err.to_string()))?
     {
         return Ok(bytes);
     }
@@ -323,11 +326,7 @@ fn hash_key(text: &[u8]) -> i64 {
     i64::from(joaat(text) as i32)
 }
 
-fn resource_root(
-    rt: &JsRuntime,
-    ctx: &Ctx<'_>,
-    name: &str,
-) -> rquickjs::Result<Option<PathBuf>> {
+fn resource_root(rt: &JsRuntime, ctx: &Ctx<'_>, name: &str) -> rquickjs::Result<Option<PathBuf>> {
     if name == rt.resource.as_ref() {
         return Ok(Some(rt.root.clone()));
     }

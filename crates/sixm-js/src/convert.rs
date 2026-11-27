@@ -37,7 +37,9 @@ pub(crate) fn read_bytes(obj: &Object<'_>) -> Result<Option<Vec<u8>>, ScriptErro
         let ta = TypedArray::<u8>::from_object(obj.clone())
             .map_err(|err| ScriptError::Runtime(err.to_string()))?;
         if ta.as_raw().is_none() {
-            return Err(ScriptError::Runtime("Uint8Array buffer is detached".to_owned()));
+            return Err(ScriptError::Runtime(
+                "Uint8Array buffer is detached".to_owned(),
+            ));
         }
         let len = ta.len();
         let mut out = Vec::with_capacity(len);
@@ -129,7 +131,9 @@ pub(crate) fn exact_safe_int(float: f64) -> Option<i64> {
 /// Checks if `obj` is a built-in container type other than plain Object/Array/TypedArray/ArrayBuffer.
 fn is_disallowed_builtin<'js>(ctx: &Ctx<'js>, obj: &Object<'js>) -> bool {
     let globals = ctx.globals();
-    for ctor_name in ["Map", "Set", "WeakMap", "WeakSet", "RegExp", "Date", "Error"] {
+    for ctor_name in [
+        "Map", "Set", "WeakMap", "WeakSet", "RegExp", "Date", "Error",
+    ] {
         if let Ok(ctor) = globals.get::<_, JsValue<'_>>(ctor_name)
             && !ctor.is_undefined()
             && obj.is_instance_of(&ctor)
@@ -221,10 +225,7 @@ impl JsRuntime {
             let text = Coerced::<String>::from_js(ctx, value.clone())
                 .map_err(|err| js_err(ctx, err))?
                 .0;
-            let int = bigint
-                .clone()
-                .to_i64()
-                .map_err(|err| js_err(ctx, err))?;
+            let int = bigint.clone().to_i64().map_err(|err| js_err(ctx, err))?;
             if int.to_string() != text {
                 return Err(ScriptError::Runtime(
                     "BigInt value is outside the signed 64-bit integer range".to_owned(),
@@ -420,9 +421,15 @@ impl JsRuntime {
                 }
                 obj.into_value()
             }
-            Value::Vector2(c) => crate::vector::make_vector(ctx, *c).map_err(|err| js_err(ctx, err))?,
-            Value::Vector3(c) => crate::vector::make_vector(ctx, *c).map_err(|err| js_err(ctx, err))?,
-            Value::Vector4(c) => crate::vector::make_vector(ctx, *c).map_err(|err| js_err(ctx, err))?,
+            Value::Vector2(c) => {
+                crate::vector::make_vector(ctx, *c).map_err(|err| js_err(ctx, err))?
+            }
+            Value::Vector3(c) => {
+                crate::vector::make_vector(ctx, *c).map_err(|err| js_err(ctx, err))?
+            }
+            Value::Vector4(c) => {
+                crate::vector::make_vector(ctx, *c).map_err(|err| js_err(ctx, err))?
+            }
             Value::FuncRef(func) => self.js_function(ctx, func)?,
         })
     }

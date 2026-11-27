@@ -134,7 +134,9 @@ fn install_events(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::
         let saved: LuaValue = rt.lua.globals().raw_get("source")?;
         let outcome = host.trigger_event(&name, EventSource::Local, &values, Some(&rt.resource));
         rt.lua.globals().raw_set("source", saved)?;
-        outcome.map(|_| ()).map_err(lua_err)
+        let canceled = outcome.map_err(lua_err)?;
+        rt.set_last_emit_canceled(canceled);
+        Ok(())
     })?;
     let cancel_event = bind_fn(lua, weak, |rt, (): ()| {
         rt.set_canceled();

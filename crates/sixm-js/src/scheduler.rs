@@ -11,7 +11,7 @@ use rquickjs::function::{Opt, Rest};
 use rquickjs::{Ctx, Function, Object, Persistent, Promise, Value as JsValue};
 use sixm_core::{EventSource, ResourceName};
 
-use crate::convert::{int_to_js, MAX_SAFE_INTEGER};
+use crate::convert::{MAX_SAFE_INTEGER, int_to_js};
 use crate::runtime::{CALLBACK_BUDGET, JsRuntime};
 use crate::sandbox::catch_script;
 
@@ -189,11 +189,10 @@ fn install_timers<'js>(
                   rest: Rest<JsValue<'js>>|
                   -> rquickjs::Result<JsValue<'js>> {
                 let rt = JsRuntime::upgrade(&ctx, &weak)?;
-                let delay = ms
-                    .0
-                    .as_ref()
-                    .map_or(Duration::ZERO, delay_from_value)
-                    .max(Duration::from_millis(1));
+                let delay =
+                    ms.0.as_ref()
+                        .map_or(Duration::ZERO, delay_from_value)
+                        .max(Duration::from_millis(1));
                 let id = rt.add_interval(&ctx, func, delay, rest.0);
                 Ok(int_to_js(&ctx, id_to_i64(id)))
             },
@@ -216,7 +215,10 @@ fn install_timers<'js>(
         let weak = weak.clone();
         Function::new(
             ctx.clone(),
-            move |ctx: Ctx<'js>, ms: JsValue<'js>, func: Function<'js>| -> rquickjs::Result<JsValue<'js>> {
+            move |ctx: Ctx<'js>,
+                  ms: JsValue<'js>,
+                  func: Function<'js>|
+                  -> rquickjs::Result<JsValue<'js>> {
                 let rt = JsRuntime::upgrade(&ctx, &weak)?;
                 let delay = delay_from_value(&ms);
                 let id = rt.add_timeout(&ctx, func, delay, Vec::new());
@@ -272,9 +274,7 @@ impl JsRuntime {
         let globals = ctx.globals();
         match source {
             EventSource::Local => globals.set("source", ""),
-            EventSource::Net(id) | EventSource::Player(id) => {
-                globals.set("source", i64::from(id))
-            }
+            EventSource::Net(id) | EventSource::Player(id) => globals.set("source", i64::from(id)),
             EventSource::Server => globals.set("source", SERVER_SOURCE),
         }
     }

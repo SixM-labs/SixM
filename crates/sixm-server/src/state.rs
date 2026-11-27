@@ -10,8 +10,7 @@
 use std::collections::HashMap;
 
 use sixm_core::{
-    GLOBAL_BAG, MAX_STATE_NAME_LEN, ScriptError, ScriptRuntime, Value, entity_of_bag, player_bag,
-    player_of_bag,
+    GLOBAL_BAG, MAX_STATE_NAME_LEN, ScriptError, Value, entity_of_bag, player_bag, player_of_bag,
 };
 use tracing::warn;
 

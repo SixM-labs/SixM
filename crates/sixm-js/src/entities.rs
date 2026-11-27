@@ -5,7 +5,9 @@ use std::rc::Weak;
 
 use rquickjs::function::{Flat, Opt};
 use rquickjs::{Ctx, Exception, Function, Object, Value as JsValue};
-use sixm_core::{EntityInfo, EntityKind, entity_bag, entity_of_bag, joaat};
+use sixm_core::{
+    EntityAttachment, EntityInfo, EntityKind, EntityState, entity_bag, entity_of_bag, joaat,
+};
 
 use crate::client::client;
 use crate::players::{player_id, server, whole_number};
@@ -16,6 +18,7 @@ use crate::vector::{make_vector, number_of};
 pub(crate) fn install(ctx: &Ctx<'_>, weak: &Weak<JsRuntime>) -> rquickjs::Result<()> {
     install_entity_queries(ctx, weak)?;
     install_entity_meta(ctx, weak)?;
+    install_state_read_functions(ctx, weak)?;
     Ok(())
 }
 
@@ -37,8 +40,7 @@ fn install_entity_queries<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquick
             ctx.clone(),
             move |ctx: Ctx<'js>, entity: JsValue<'js>| -> rquickjs::Result<JsValue<'js>> {
                 let rt = JsRuntime::upgrade(&ctx, &weak)?;
-                let pos =
-                    existing(&rt, &ctx, &entity)?.map_or([0.0; 3], |(_, info)| info.position);
+                let pos = existing(&rt, &ctx, &entity)?.map_or([0.0; 3], |(_, info)| info.position);
                 make_vector(&ctx, pos)
             },
         )?
@@ -63,8 +65,7 @@ fn install_entity_queries<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquick
                   _order: Opt<JsValue<'js>>|
                   -> rquickjs::Result<JsValue<'js>> {
                 let rt = JsRuntime::upgrade(&ctx, &weak)?;
-                let rot =
-                    existing(&rt, &ctx, &entity)?.map_or([0.0; 3], |(_, info)| info.rotation);
+                let rot = existing(&rt, &ctx, &entity)?.map_or([0.0; 3], |(_, info)| info.rotation);
                 make_vector(&ctx, rot)
             },
         )?
@@ -79,17 +80,18 @@ fn install_entity_queries<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquick
             },
         )?
     };
-    let entity_type = {
-        let weak = weak.clone();
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'js>, entity: JsValue<'js>| -> rquickjs::Result<i64> {
-                let rt = JsRuntime::upgrade(&ctx, &weak)?;
-                Ok(existing(&rt, &ctx, &entity)?
-                    .map_or(0, |(_, info)| i64::from(info.kind.code())))
-            },
-        )?
-    };
+    let entity_type =
+        {
+            let weak = weak.clone();
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'js>, entity: JsValue<'js>| -> rquickjs::Result<i64> {
+                    let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                    Ok(existing(&rt, &ctx, &entity)?
+                        .map_or(0, |(_, info)| i64::from(info.kind.code())))
+                },
+            )?
+        };
     for (name, func) in [
         ("DoesEntityExist", does_exist),
         ("GetEntityCoords", coords),
@@ -186,12 +188,136 @@ fn install_entity_meta<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs:
     Ok(())
 }
 
+fn install_state_read_functions(ctx: &Ctx<'_>, weak: &Weak<JsRuntime>) -> rquickjs::Result<()> {
+    let globals = ctx.globals();
+    for (name, func) in state_bool_read_functions(ctx, weak)?
+        .into_iter()
+        .chain(state_value_read_functions(ctx, weak)?)
+    {
+        globals.set(name, func)?;
+    }
+    Ok(())
+}
+
+fn state_bool_read_functions<'js>(
+    ctx: &Ctx<'js>,
+    weak: &Weak<JsRuntime>,
+) -> rquickjs::Result<Vec<(&'static str, Function<'js>)>> {
+    let is_frozen = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, entity: JsValue<'js>| -> rquickjs::Result<bool> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                Ok(existing_state(&rt, &ctx, &entity)?.is_some_and(|(_, state)| state.frozen))
+            },
+        )?
+    };
+    let is_visible = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, entity: JsValue<'js>| -> rquickjs::Result<bool> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                Ok(existing_state(&rt, &ctx, &entity)?.is_some_and(|(_, state)| state.visible))
+            },
+        )?
+    };
+    let is_attached = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, entity: JsValue<'js>| -> rquickjs::Result<bool> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                Ok(existing_state(&rt, &ctx, &entity)?
+                    .is_some_and(|(_, state)| state.attachment.is_some()))
+            },
+        )?
+    };
+    Ok(vec![
+        ("IsEntityPositionFrozen", is_frozen),
+        ("IsEntityVisible", is_visible),
+        ("IsEntityAttached", is_attached),
+    ])
+}
+
+fn state_value_read_functions<'js>(
+    ctx: &Ctx<'js>,
+    weak: &Weak<JsRuntime>,
+) -> rquickjs::Result<Vec<(&'static str, Function<'js>)>> {
+    let get_velocity = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, entity: JsValue<'js>| -> rquickjs::Result<JsValue<'js>> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                let velocity = existing_state(&rt, &ctx, &entity)?
+                    .map_or([0.0; 3], |(_, state)| state.velocity);
+                make_vector(&ctx, velocity)
+            },
+        )?
+    };
+    let get_health = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, entity: JsValue<'js>| -> rquickjs::Result<i64> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                Ok(existing_state(&rt, &ctx, &entity)?
+                    .map_or(0, |(_, state)| i64::from(state.health)))
+            },
+        )?
+    };
+    let get_max_health = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, entity: JsValue<'js>| -> rquickjs::Result<i64> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                Ok(existing_state(&rt, &ctx, &entity)?
+                    .map_or(0, |(_, state)| i64::from(state.max_health)))
+            },
+        )?
+    };
+    let get_alpha = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, entity: JsValue<'js>| -> rquickjs::Result<i64> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                Ok(existing_state(&rt, &ctx, &entity)?
+                    .map_or(0, |(_, state)| i64::from(state.alpha)))
+            },
+        )?
+    };
+    let get_attached_to = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, entity: JsValue<'js>| -> rquickjs::Result<i64> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                Ok(existing_state(&rt, &ctx, &entity)?
+                    .and_then(|(_, state)| state.attachment)
+                    .map_or(0, |att| i64::from(att.parent)))
+            },
+        )?
+    };
+    Ok(vec![
+        ("GetEntityVelocity", get_velocity),
+        ("GetEntityHealth", get_health),
+        ("GetEntityMaxHealth", get_max_health),
+        ("GetEntityAlpha", get_alpha),
+        ("GetEntityAttachedTo", get_attached_to),
+    ])
+}
+
 pub(crate) fn install_server(ctx: &Ctx<'_>, weak: &Weak<JsRuntime>) -> rquickjs::Result<()> {
     let globals = ctx.globals();
     for (name, func) in spawn_functions(ctx, weak)?
         .into_iter()
         .chain(change_functions(ctx, weak)?)
         .chain(server_owner_functions(ctx, weak)?)
+        .chain(state_write_functions(ctx, weak)?)
         .chain(list_functions(ctx, weak)?)
         .chain(bucket_functions(ctx, weak)?)
     {
@@ -281,7 +407,14 @@ fn spawn_functions<'js>(
                 let rt = JsRuntime::upgrade(&ctx, &weak)?;
                 let pos = coordinates(&ctx, &x, &y, &z)?;
                 let heading = real(&ctx, &heading, "heading")?;
-                spawn(&rt, &ctx, EntityKind::Vehicle, &model, pos, [0.0, 0.0, heading])
+                spawn(
+                    &rt,
+                    &ctx,
+                    EntityKind::Vehicle,
+                    &model,
+                    pos,
+                    [0.0, 0.0, heading],
+                )
             },
         )?
     };
@@ -300,7 +433,14 @@ fn spawn_functions<'js>(
                 let rt = JsRuntime::upgrade(&ctx, &weak)?;
                 let pos = coordinates(&ctx, &x, &y, &z)?;
                 let heading = real(&ctx, &heading, "heading")?;
-                spawn(&rt, &ctx, EntityKind::Vehicle, &model, pos, [0.0, 0.0, heading])
+                spawn(
+                    &rt,
+                    &ctx,
+                    EntityKind::Vehicle,
+                    &model,
+                    pos,
+                    [0.0, 0.0, heading],
+                )
             },
         )?
     };
@@ -487,7 +627,10 @@ fn movement_functions<'js>(
         let weak = weak.clone();
         Function::new(
             ctx.clone(),
-            move |ctx: Ctx<'js>, entity: JsValue<'js>, heading: JsValue<'js>| -> rquickjs::Result<()> {
+            move |ctx: Ctx<'js>,
+                  entity: JsValue<'js>,
+                  heading: JsValue<'js>|
+                  -> rquickjs::Result<()> {
                 let rt = JsRuntime::upgrade(&ctx, &weak)?;
                 let heading = real(&ctx, &heading, "heading")?;
                 match existing(&rt, &ctx, &entity)? {
@@ -536,7 +679,10 @@ fn server_owner_functions<'js>(
         let weak = weak.clone();
         Function::new(
             ctx.clone(),
-            move |ctx: Ctx<'js>, entity: JsValue<'js>, owner: JsValue<'js>| -> rquickjs::Result<bool> {
+            move |ctx: Ctx<'js>,
+                  entity: JsValue<'js>,
+                  owner: JsValue<'js>|
+                  -> rquickjs::Result<bool> {
                 let rt = JsRuntime::upgrade(&ctx, &weak)?;
                 let owner = match whole_number(&owner) {
                     Some(0) | None => 0,
@@ -575,6 +721,230 @@ fn server_owner_functions<'js>(
     ])
 }
 
+fn state_write_functions<'js>(
+    ctx: &Ctx<'js>,
+    weak: &Weak<JsRuntime>,
+) -> rquickjs::Result<Vec<(&'static str, Function<'js>)>> {
+    let mut funcs = state_physics_write_functions(ctx, weak)?;
+    funcs.extend(state_appearance_write_functions(ctx, weak)?);
+    funcs.extend(attachment_write_functions(ctx, weak)?);
+    Ok(funcs)
+}
+
+fn state_physics_write_functions<'js>(
+    ctx: &Ctx<'js>,
+    weak: &Weak<JsRuntime>,
+) -> rquickjs::Result<Vec<(&'static str, Function<'js>)>> {
+    let freeze = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, entity: JsValue<'js>, toggle: bool| -> rquickjs::Result<()> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                if let Some(id) = existing_id(&rt, &ctx, &entity)? {
+                    server(&ctx, &*rt.host(&ctx)?)?
+                        .set_entity_frozen(id, toggle)
+                        .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))?;
+                }
+                Ok(())
+            },
+        )?
+    };
+    let set_velocity = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>,
+                  entity: JsValue<'js>,
+                  x: JsValue<'js>,
+                  y: JsValue<'js>,
+                  z: JsValue<'js>|
+                  -> rquickjs::Result<()> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                let velocity = coordinates(&ctx, &x, &y, &z)?;
+                if let Some(id) = existing_id(&rt, &ctx, &entity)? {
+                    server(&ctx, &*rt.host(&ctx)?)?
+                        .set_entity_velocity(id, velocity)
+                        .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))?;
+                }
+                Ok(())
+            },
+        )?
+    };
+    Ok(vec![
+        ("FreezeEntityPosition", freeze),
+        ("SetEntityVelocity", set_velocity),
+    ])
+}
+
+fn state_appearance_write_functions<'js>(
+    ctx: &Ctx<'js>,
+    weak: &Weak<JsRuntime>,
+) -> rquickjs::Result<Vec<(&'static str, Function<'js>)>> {
+    let set_health = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>,
+                  entity: JsValue<'js>,
+                  health: JsValue<'js>|
+                  -> rquickjs::Result<()> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                let health = non_negative_i32(&ctx, &health, "health")?;
+                if let Some(id) = existing_id(&rt, &ctx, &entity)? {
+                    server(&ctx, &*rt.host(&ctx)?)?
+                        .set_entity_health(id, health)
+                        .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))?;
+                }
+                Ok(())
+            },
+        )?
+    };
+    let set_max_health = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, entity: JsValue<'js>, max: JsValue<'js>| -> rquickjs::Result<()> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                let max = non_negative_i32(&ctx, &max, "max")?;
+                if let Some(id) = existing_id(&rt, &ctx, &entity)? {
+                    server(&ctx, &*rt.host(&ctx)?)?
+                        .set_entity_max_health(id, max)
+                        .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))?;
+                }
+                Ok(())
+            },
+        )?
+    };
+    let set_visible = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, entity: JsValue<'js>, toggle: bool| -> rquickjs::Result<()> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                if let Some(id) = existing_id(&rt, &ctx, &entity)? {
+                    server(&ctx, &*rt.host(&ctx)?)?
+                        .set_entity_visible(id, toggle)
+                        .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))?;
+                }
+                Ok(())
+            },
+        )?
+    };
+    let set_alpha = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>,
+                  entity: JsValue<'js>,
+                  alpha: JsValue<'js>|
+                  -> rquickjs::Result<()> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                let alpha = clamped_alpha(&ctx, &alpha)?;
+                if let Some(id) = existing_id(&rt, &ctx, &entity)? {
+                    server(&ctx, &*rt.host(&ctx)?)?
+                        .set_entity_alpha(id, alpha)
+                        .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))?;
+                }
+                Ok(())
+            },
+        )?
+    };
+    let reset_alpha = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, entity: JsValue<'js>| -> rquickjs::Result<()> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                if let Some(id) = existing_id(&rt, &ctx, &entity)? {
+                    server(&ctx, &*rt.host(&ctx)?)?
+                        .set_entity_alpha(id, 255)
+                        .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))?;
+                }
+                Ok(())
+            },
+        )?
+    };
+    Ok(vec![
+        ("SetEntityHealth", set_health),
+        ("SetEntityMaxHealth", set_max_health),
+        ("SetEntityVisible", set_visible),
+        ("SetEntityAlpha", set_alpha),
+        ("ResetEntityAlpha", reset_alpha),
+    ])
+}
+
+fn attachment_write_functions<'js>(
+    ctx: &Ctx<'js>,
+    weak: &Weak<JsRuntime>,
+) -> rquickjs::Result<Vec<(&'static str, Function<'js>)>> {
+    let attach = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>,
+                  entity: JsValue<'js>,
+                  target: JsValue<'js>,
+                  bone_index: JsValue<'js>,
+                  Flat((x, y, z)): Flat<(JsValue<'js>, JsValue<'js>, JsValue<'js>)>,
+                  Flat((rx, ry, rz)): Flat<(JsValue<'js>, JsValue<'js>, JsValue<'js>)>|
+                  -> rquickjs::Result<()> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                let bone_index = whole_number(&bone_index)
+                    .and_then(|n| i32::try_from(n).ok())
+                    .ok_or_else(|| {
+                        Exception::throw_type(
+                            &ctx,
+                            "AttachEntityToEntity: boneIndex must be an integer",
+                        )
+                    })?;
+                let offset = coordinates(&ctx, &x, &y, &z)?;
+                let rotation = [
+                    real(&ctx, &rx, "rx")?,
+                    real(&ctx, &ry, "ry")?,
+                    real(&ctx, &rz, "rz")?,
+                ];
+                let (Some(id), Some(target_id)) = (
+                    existing_id(&rt, &ctx, &entity)?,
+                    existing_id(&rt, &ctx, &target)?,
+                ) else {
+                    return Ok(());
+                };
+                server(&ctx, &*rt.host(&ctx)?)?
+                    .attach_entity_to_entity(
+                        id,
+                        EntityAttachment {
+                            parent: target_id,
+                            bone_index,
+                            offset,
+                            rotation,
+                        },
+                    )
+                    .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))
+            },
+        )?
+    };
+    let detach = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, entity: JsValue<'js>| -> rquickjs::Result<()> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                if let Some(id) = existing_id(&rt, &ctx, &entity)? {
+                    server(&ctx, &*rt.host(&ctx)?)?
+                        .detach_entity(id)
+                        .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))?;
+                }
+                Ok(())
+            },
+        )?
+    };
+    Ok(vec![
+        ("AttachEntityToEntity", attach),
+        ("DetachEntity", detach),
+    ])
+}
+
 fn bucket_functions<'js>(
     ctx: &Ctx<'js>,
     weak: &Weak<JsRuntime>,
@@ -592,7 +962,10 @@ fn bucket_member_functions<'js>(
         let weak = weak.clone();
         Function::new(
             ctx.clone(),
-            move |ctx: Ctx<'js>, player: JsValue<'js>, bucket: JsValue<'js>| -> rquickjs::Result<()> {
+            move |ctx: Ctx<'js>,
+                  player: JsValue<'js>,
+                  bucket: JsValue<'js>|
+                  -> rquickjs::Result<()> {
                 let rt = JsRuntime::upgrade(&ctx, &weak)?;
                 let bucket = bucket_id(&ctx, &bucket, "SetPlayerRoutingBucket")?;
                 if let Some(id) = player_id(&player) {
@@ -620,7 +993,10 @@ fn bucket_member_functions<'js>(
         let weak = weak.clone();
         Function::new(
             ctx.clone(),
-            move |ctx: Ctx<'js>, entity: JsValue<'js>, bucket: JsValue<'js>| -> rquickjs::Result<()> {
+            move |ctx: Ctx<'js>,
+                  entity: JsValue<'js>,
+                  bucket: JsValue<'js>|
+                  -> rquickjs::Result<()> {
                 let rt = JsRuntime::upgrade(&ctx, &weak)?;
                 let bucket = bucket_id(&ctx, &bucket, "SetEntityRoutingBucket")?;
                 if let Some(id) = entity_id(&entity) {
@@ -730,9 +1106,15 @@ fn list_functions<'js>(
     weak: &Weak<JsRuntime>,
 ) -> rquickjs::Result<Vec<(&'static str, Function<'js>)>> {
     Ok(vec![
-        ("GetAllVehicles", ids_function(ctx, weak, EntityKind::Vehicle)?),
+        (
+            "GetAllVehicles",
+            ids_function(ctx, weak, EntityKind::Vehicle)?,
+        ),
         ("GetAllPeds", ids_function(ctx, weak, EntityKind::Ped)?),
-        ("GetAllObjects", ids_function(ctx, weak, EntityKind::Object)?),
+        (
+            "GetAllObjects",
+            ids_function(ctx, weak, EntityKind::Object)?,
+        ),
     ])
 }
 
@@ -742,11 +1124,14 @@ fn ids_function<'js>(
     kind: EntityKind,
 ) -> rquickjs::Result<Function<'js>> {
     let weak = weak.clone();
-    Function::new(ctx.clone(), move |ctx: Ctx<'js>| -> rquickjs::Result<Vec<i64>> {
-        let rt = JsRuntime::upgrade(&ctx, &weak)?;
-        let ids = rt.host(&ctx)?.entities(Some(kind));
-        Ok(ids.into_iter().map(i64::from).collect())
-    })
+    Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>| -> rquickjs::Result<Vec<i64>> {
+            let rt = JsRuntime::upgrade(&ctx, &weak)?;
+            let ids = rt.host(&ctx)?.entities(Some(kind));
+            Ok(ids.into_iter().map(i64::from).collect())
+        },
+    )
 }
 
 fn bucket_id(ctx: &Ctx<'_>, value: &JsValue<'_>, function: &str) -> rquickjs::Result<u32> {
@@ -769,6 +1154,28 @@ fn existing(
         return Ok(None);
     };
     Ok(rt.host(ctx)?.entity(id).map(|info| (id, info)))
+}
+
+fn existing_id(
+    rt: &JsRuntime,
+    ctx: &Ctx<'_>,
+    value: &JsValue<'_>,
+) -> rquickjs::Result<Option<u32>> {
+    let Some(id) = entity_id(value) else {
+        return Ok(None);
+    };
+    Ok(rt.host(ctx)?.entity(id).map(|_| id))
+}
+
+fn existing_state(
+    rt: &JsRuntime,
+    ctx: &Ctx<'_>,
+    value: &JsValue<'_>,
+) -> rquickjs::Result<Option<(u32, EntityState)>> {
+    let Some(id) = entity_id(value) else {
+        return Ok(None);
+    };
+    Ok(rt.host(ctx)?.entity_state(id).map(|state| (id, state)))
 }
 
 fn spawn(
@@ -923,11 +1330,50 @@ fn coordinates(
     y: &JsValue<'_>,
     z: &JsValue<'_>,
 ) -> rquickjs::Result<[f32; 3]> {
-    Ok([
-        real(ctx, x, "x")?,
-        real(ctx, y, "y")?,
-        real(ctx, z, "z")?,
-    ])
+    Ok([real(ctx, x, "x")?, real(ctx, y, "y")?, real(ctx, z, "z")?])
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the value is finite and clamped to 0..=i32::MAX first"
+)]
+fn non_negative_i32(ctx: &Ctx<'_>, value: &JsValue<'_>, what: &str) -> rquickjs::Result<i32> {
+    if let Some(int) = value.as_int() {
+        Ok(int.max(0))
+    } else if let Some(float) = value.as_float() {
+        if float.is_finite() {
+            Ok(float.round().clamp(0.0, f64::from(i32::MAX)) as i32)
+        } else {
+            Err(Exception::throw_range(
+                ctx,
+                &format!("{what} must be a finite number"),
+            ))
+        }
+    } else {
+        Err(Exception::throw_type(
+            ctx,
+            &format!("{what} must be a number"),
+        ))
+    }
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the value is finite and clamped to 0..=255 first"
+)]
+fn clamped_alpha(ctx: &Ctx<'_>, value: &JsValue<'_>) -> rquickjs::Result<u8> {
+    if let Some(int) = value.as_int() {
+        Ok(u8::try_from(int.clamp(0, 255)).unwrap_or(255))
+    } else if let Some(float) = value.as_float() {
+        if float.is_finite() {
+            Ok(float.round().clamp(0.0, 255.0) as u8)
+        } else {
+            Err(Exception::throw_range(ctx, "alpha must be a finite number"))
+        }
+    } else {
+        Err(Exception::throw_type(ctx, "alpha must be a number"))
+    }
 }
 
 fn invalid_entity(ctx: &Ctx<'_>, function: &str) -> rquickjs::Error {

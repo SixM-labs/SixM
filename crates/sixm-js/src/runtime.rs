@@ -8,7 +8,9 @@ use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
 use rquickjs::context::EvalOptions;
-use rquickjs::{Atom, Context, Ctx, Exception, Filter, Persistent, Runtime, Symbol, Value as JsValue};
+use rquickjs::{
+    Atom, Context, Ctx, Exception, Filter, Persistent, Runtime, Symbol, Value as JsValue,
+};
 use sixm_core::{
     EventContext, EventSource, Host, ResourceName, ScriptError, ScriptRuntime, Value, WebRequest,
 };
@@ -77,6 +79,9 @@ pub(crate) struct Rejections {
     to_report: Vec<(Persistent<JsValue<'static>>, Persistent<JsValue<'static>>)>,
 }
 
+pub(crate) type QueuedEvent = (String, EventSource, Vec<Value>, Option<ResourceName>);
+pub(crate) type QueuedStateChange = (String, String, Value, bool);
+
 /// A sandboxed `QuickJS` state running one resource instance.
 ///
 /// Create it with [`JsRuntime::new`], run the manifest's scripts with
@@ -99,8 +104,8 @@ pub struct JsRuntime {
     pub(crate) in_ctx: Cell<bool>,
     pub(crate) skip_self_event: Cell<bool>,
     pub(crate) skip_self_state: Cell<bool>,
-    pub(crate) pending_events: RefCell<VecDeque<(String, EventSource, Vec<Value>, Option<ResourceName>)>>,
-    pub(crate) pending_state_changes: RefCell<VecDeque<(String, String, Value, bool)>>,
+    pub(crate) pending_events: RefCell<VecDeque<QueuedEvent>>,
+    pub(crate) pending_state_changes: RefCell<VecDeque<QueuedStateChange>>,
     pub(crate) func_ref_symbol: RefCell<Option<Persistent<Symbol<'static>>>>,
     pub(crate) sched: RefCell<Sched>,
     pub(crate) events: RefCell<Events>,
@@ -184,7 +189,10 @@ impl JsRuntime {
             options.global = true;
             options.strict = false;
             options.filename = Some(chunk_name);
-            sandbox::catch_script(ctx, ctx.eval_with_options::<JsValue<'_>, _>(source, options))?;
+            sandbox::catch_script(
+                ctx,
+                ctx.eval_with_options::<JsValue<'_>, _>(source, options),
+            )?;
             Ok(())
         });
         self.drain_jobs();
@@ -300,8 +308,8 @@ impl JsRuntime {
 
     fn install_rejection_tracker(&self) {
         let weak = self.me.clone();
-        self.rt
-            .set_host_promise_rejection_tracker(Some(Box::new(move |ctx, promise, reason, is_handled| {
+        self.rt.set_host_promise_rejection_tracker(Some(Box::new(
+            move |ctx, promise, reason, is_handled| {
                 let Some(rt) = weak.upgrade().filter(|r| !r.shut.get()) else {
                     return;
                 };
@@ -323,7 +331,8 @@ impl JsRuntime {
                         rejections.current.push((p, r));
                     }
                 }
-            })));
+            },
+        )));
     }
 
     pub(crate) fn advance_rejections(&self) {
@@ -365,15 +374,7 @@ impl JsRuntime {
         let rejections = std::mem::take(&mut *self.rejections.borrow_mut());
         let sym = self.func_ref_symbol.borrow_mut().take();
         drop((
-            sched,
-            events,
-            state,
-            exports,
-            refs,
-            deferred,
-            kvp_finds,
-            rejections,
-            sym,
+            sched, events, state, exports, refs, deferred, kvp_finds, rejections, sym,
         ));
 
         self.ctx.with(|ctx| {

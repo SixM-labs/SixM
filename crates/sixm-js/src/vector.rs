@@ -377,7 +377,10 @@ fn construct<'js>(
         } else {
             return Err(Exception::throw_type(
                 ctx,
-                &format!("{name}: expected numbers or vectors, got {}", arg.type_name()),
+                &format!(
+                    "{name}: expected numbers or vectors, got {}",
+                    arg.type_name()
+                ),
             ));
         }
     }

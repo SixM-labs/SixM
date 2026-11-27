@@ -46,7 +46,7 @@ fn vectors_support_properties_indexing_destructuring_and_roundtrip() {
             Value::Int(9),
             Value::Int(6),
             Value::from("vector4(6.0, 7.0, 8.0, 9.0)"),
-            Value::Int(i64::from(joaat(b"adder") as i32)),
+            Value::Int(i64::from(joaat(b"adder").cast_signed())),
         ])]
     );
     assert_eq!(

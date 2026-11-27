@@ -65,7 +65,13 @@ fn dangerous_globals_are_absent_or_disabled() {
 #[test]
 fn infinite_loop_is_interrupted_and_uncatchable() {
     let host = new_host();
-    let rt = start(&host, "spin", &["spin"], &[("index.js", r#"
+    let rt = start(
+        &host,
+        "spin",
+        &["spin"],
+        &[(
+            "index.js",
+            r#"
         exports("spin", () => {
             try {
                 while (true) {}
@@ -74,14 +80,24 @@ fn infinite_loop_is_interrupted_and_uncatchable() {
             }
             return "done";
         });
-    "#)]);
+    "#,
+        )],
+    );
 
     let err = rt.call_export("spin", &[], None).unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("interrupted"), "expected interrupt error, got: {msg}");
+    assert!(
+        msg.contains("interrupted"),
+        "expected interrupt error, got: {msg}"
+    );
 
     // Runtime remains usable afterwards for normal calls
-    let rt2 = start(&host, "ok", &["hi"], &[("index.js", r#"exports("hi", () => "ok")"#)]);
+    let rt2 = start(
+        &host,
+        "ok",
+        &["hi"],
+        &[("index.js", r#"exports("hi", () => "ok")"#)],
+    );
     assert_eq!(text(&rt2, "hi"), "ok");
     tick(&host, Instant::now());
 }
@@ -145,5 +161,8 @@ fn redos_regex_is_interrupted_by_budget() {
     );
 
     let err = rt.call_export("evil", &[], None).unwrap_err().to_string();
-    assert!(err.contains("interrupted"), "expected ReDoS interrupt, got: {err}");
+    assert!(
+        err.contains("interrupted"),
+        "expected ReDoS interrupt, got: {err}"
+    );
 }

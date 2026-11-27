@@ -3,7 +3,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::time::Instant;
 
@@ -12,6 +12,7 @@ use sixm_core::{
     EventContext, EventSource, FuncRef, Host, HttpRequest, PlayerInfo, ResourceName, ResourceState,
     ScriptError, ScriptRuntime, ServerHost, Value, WebReply,
 };
+use sixm_js::JsRuntime;
 use sixm_kvp::KvpStore;
 use sixm_lua::LuaRuntime;
 use sixm_net::{
@@ -71,6 +72,13 @@ pub(crate) struct ScriptCommand {
     pub(crate) restricted: bool,
 }
 
+/// The script runtimes of one running resource, in load order.
+#[derive(Debug)]
+struct RunningResource {
+    name: ResourceName,
+    runtimes: Vec<Rc<dyn ScriptRuntime>>,
+}
+
 /// Owns the installed resources and the running ones, and implements [`Host`]
 /// for the runtimes it creates.
 ///
@@ -84,10 +92,10 @@ pub struct ResourceManager {
     scanned: Cell<bool>,
     pub(crate) convars: RefCell<Convars>,
     /// Running resources in start order.
-    running: RefCell<Vec<Rc<LuaRuntime>>>,
+    running: RefCell<Vec<RunningResource>>,
     /// The running runtimes as one shared slice, rebuilt when `running` changes.
     /// Event fan-out and frames clone this `Rc` instead of allocating.
-    snapshot: RefCell<Rc<[Rc<LuaRuntime>]>>,
+    snapshot: RefCell<Rc<[Rc<dyn ScriptRuntime>]>>,
     next_instance: Cell<u64>,
     /// Script commands by lower-case name.
     commands: RefCell<BTreeMap<String, ScriptCommand>>,
@@ -245,7 +253,7 @@ impl ResourceManager {
         self.running
             .borrow()
             .iter()
-            .any(|runtime| runtime.resource().as_ref() == name)
+            .any(|res| res.name.as_ref() == name)
     }
 
     /// Names of the running resources, in start order.
@@ -253,7 +261,7 @@ impl ResourceManager {
         self.running
             .borrow()
             .iter()
-            .map(|runtime| runtime.resource().clone())
+            .map(|res| res.name.clone())
             .collect()
     }
 
@@ -335,11 +343,11 @@ impl ResourceManager {
     /// `onResourceStop` handler runs while its resource is still up.
     pub(crate) fn stop_all(&self) {
         loop {
-            let last = self.running.borrow().last().cloned();
-            let Some(runtime) = last else {
+            let last = self.running.borrow().last().map(|res| res.name.clone());
+            let Some(name) = last else {
                 return;
             };
-            self.stop_runtime(&runtime);
+            self.stop_resource(&name);
         }
     }
 
@@ -453,34 +461,50 @@ impl ResourceManager {
         }
     }
 
-    /// The running runtime called `name`.
-    fn running_runtime(&self, name: &str) -> Option<Rc<LuaRuntime>> {
+    /// The stored `ResourceName` of `name`, if it is running.
+    fn running_name(&self, name: &str) -> Option<ResourceName> {
         self.running
             .borrow()
             .iter()
-            .find(|runtime| runtime.resource().as_ref() == name)
-            .cloned()
+            .find(|res| res.name.as_ref() == name)
+            .map(|res| res.name.clone())
+    }
+
+    /// The running runtimes of `name`, in load order.
+    fn running_runtimes(&self, name: &str) -> Option<Vec<Rc<dyn ScriptRuntime>>> {
+        self.running
+            .borrow()
+            .iter()
+            .find(|res| res.name.as_ref() == name)
+            .map(|res| res.runtimes.clone())
     }
 
     /// The running runtime that owns `func`, if this exact instance is still up.
-    pub(crate) fn runtime_of(&self, func: &FuncRef) -> Option<Rc<LuaRuntime>> {
+    pub(crate) fn runtime_of(&self, func: &FuncRef) -> Option<Rc<dyn ScriptRuntime>> {
         self.running
             .borrow()
             .iter()
-            .find(|runtime| {
-                runtime.resource().as_ref() == func.owner.as_ref()
-                    && runtime.instance() == func.instance
+            .find(|res| res.name.as_ref() == func.owner.as_ref())
+            .and_then(|res| {
+                res.runtimes
+                    .iter()
+                    .find(|runtime| runtime.instance() == func.instance)
+                    .cloned()
             })
-            .cloned()
     }
 
     /// The running runtimes, in start order, as a shared slice that needs no borrow.
-    pub(crate) fn snapshot(&self) -> Rc<[Rc<LuaRuntime>]> {
+    pub(crate) fn snapshot(&self) -> Rc<[Rc<dyn ScriptRuntime>]> {
         self.snapshot.borrow().clone()
     }
 
     fn rebuild_snapshot(&self) {
-        let fresh: Rc<[Rc<LuaRuntime>]> = self.running.borrow().iter().cloned().collect();
+        let fresh: Rc<[Rc<dyn ScriptRuntime>]> = self
+            .running
+            .borrow()
+            .iter()
+            .flat_map(|res| res.runtimes.iter().cloned())
+            .collect();
         *self.snapshot.borrow_mut() = fresh;
     }
 
@@ -525,21 +549,28 @@ impl ResourceManager {
         }
         let (root, exports, files) = self.script_plan(name)?;
 
-        let instance = self.next_instance.get();
-        self.next_instance.set(instance + 1);
-        let runtime = LuaRuntime::new(name.clone(), instance, root, exports, self.me.clone())
+        let (runtimes, lua_rt, js_rt) = self
+            .create_runtimes(name, &root, &exports, &files)
             .map_err(|source| ManagerError::Runtime {
                 resource: name.to_string(),
                 source,
             })?;
 
-        self.running.borrow_mut().push(Rc::clone(&runtime));
+        self.running.borrow_mut().push(RunningResource {
+            name: name.clone(),
+            runtimes,
+        });
         self.rebuild_snapshot();
         self.advertise(name);
 
         self.set_transition(name, ResourceState::Starting);
         for file in &files {
-            if let Err(err) = runtime.load_script(file) {
+            let result = if is_js_script(file) {
+                js_rt.as_ref().map(|rt| rt.load_script(file))
+            } else {
+                lua_rt.as_ref().map(|rt| rt.load_script(file))
+            };
+            if let Some(Err(err)) = result {
                 error!("[{name}] cannot load {}: {err}", file.display());
             }
         }
@@ -549,6 +580,59 @@ impl ResourceManager {
         self.dispatch_local("onServerResourceStart", name);
         info!("Started resource {name}");
         Ok(())
+    }
+
+    /// Creates up to one Lua runtime and one JS runtime matching the extensions
+    /// present in `files`, in order of first appearance.
+    #[expect(clippy::type_complexity)]
+    fn create_runtimes(
+        &self,
+        name: &ResourceName,
+        root: &Path,
+        exports: &[String],
+        files: &[PathBuf],
+    ) -> Result<
+        (
+            Vec<Rc<dyn ScriptRuntime>>,
+            Option<Rc<LuaRuntime>>,
+            Option<Rc<JsRuntime>>,
+        ),
+        ScriptError,
+    > {
+        let mut runtimes: Vec<Rc<dyn ScriptRuntime>> = Vec::new();
+        let mut lua_rt: Option<Rc<LuaRuntime>> = None;
+        let mut js_rt: Option<Rc<JsRuntime>> = None;
+
+        for file in files {
+            if is_js_script(file) {
+                if js_rt.is_none() {
+                    let instance = self.next_instance.get();
+                    self.next_instance.set(instance + 1);
+                    let rt = JsRuntime::new(
+                        name.clone(),
+                        instance,
+                        root.to_path_buf(),
+                        exports.to_vec(),
+                        self.me.clone(),
+                    )?;
+                    runtimes.push(Rc::clone(&rt) as Rc<dyn ScriptRuntime>);
+                    js_rt = Some(rt);
+                }
+            } else if lua_rt.is_none() {
+                let instance = self.next_instance.get();
+                self.next_instance.set(instance + 1);
+                let rt = LuaRuntime::new(
+                    name.clone(),
+                    instance,
+                    root.to_path_buf(),
+                    exports.to_vec(),
+                    self.me.clone(),
+                )?;
+                runtimes.push(Rc::clone(&rt) as Rc<dyn ScriptRuntime>);
+                lua_rt = Some(rt);
+            }
+        }
+        Ok((runtimes, lua_rt, js_rt))
     }
 
     /// Lists the client files of `name` to players. A resource whose files
@@ -643,43 +727,46 @@ impl ResourceManager {
     /// dependents that were stopped, in stop order.
     fn stop_with_dependents(&self, name: &str) -> Result<Vec<ResourceName>, ManagerError> {
         let target = self
-            .running_runtime(name)
+            .running_name(name)
             .ok_or_else(|| ManagerError::NotRunning(name.to_owned()))?;
-        let dependents: Vec<Rc<LuaRuntime>> = {
+        let dependents: Vec<ResourceName> = {
             let catalog = self.catalog.borrow();
             catalog
                 .dependents_stop_order(name)
                 .iter()
-                .filter_map(|dependent| self.running_runtime(dependent))
+                .filter_map(|dependent| self.running_name(dependent))
                 .collect()
         };
-        let stopped = dependents
-            .iter()
-            .map(|runtime| runtime.resource().clone())
-            .collect();
-        for runtime in &dependents {
-            self.stop_runtime(runtime);
+        for dependent in &dependents {
+            self.stop_resource(dependent);
         }
-        self.stop_runtime(&target);
-        Ok(stopped)
+        self.stop_resource(&target);
+        Ok(dependents)
     }
 
-    /// Fires the stop events, removes the runtime and its commands, and shuts it down.
-    fn stop_runtime(&self, runtime: &Rc<LuaRuntime>) {
-        let name = runtime.resource().clone();
-        self.set_transition(&name, ResourceState::Stopping);
-        self.dispatch_local("onResourceStop", &name);
-        self.dispatch_local("onServerResourceStop", &name);
-        self.release_commands_of(&name);
-        self.forget_web(&name);
-        self.running
-            .borrow_mut()
-            .retain(|candidate| !Rc::ptr_eq(candidate, runtime));
+    /// Fires the stop events, removes the resource's runtimes and commands, and shuts them down.
+    fn stop_resource(&self, name: &ResourceName) {
+        self.set_transition(name, ResourceState::Stopping);
+        self.dispatch_local("onResourceStop", name);
+        self.dispatch_local("onServerResourceStop", name);
+        self.release_commands_of(name);
+        self.forget_web(name);
+        let removed = {
+            let mut running = self.running.borrow_mut();
+            running
+                .iter()
+                .position(|res| res.name == *name)
+                .map(|index| running.remove(index))
+        };
         self.rebuild_snapshot();
-        self.clear_transition(&name);
-        self.withdraw(&name);
-        self.http.discard(&name, runtime.instance());
-        runtime.shutdown();
+        self.clear_transition(name);
+        self.withdraw(name);
+        if let Some(resource) = removed {
+            for runtime in resource.runtimes.into_iter().rev() {
+                self.http.discard(name, runtime.instance());
+                runtime.shutdown();
+            }
+        }
         info!("Stopping resource {name}");
     }
 
@@ -799,10 +886,20 @@ impl Host for ResourceManager {
         args: &[Value],
         invoker: Option<&ResourceName>,
     ) -> Result<Vec<Value>, ScriptError> {
-        let runtime = self
-            .running_runtime(resource)
+        let runtimes = self
+            .running_runtimes(resource)
             .ok_or_else(|| ScriptError::ResourceNotRunning(resource.to_owned()))?;
-        runtime.call_export(export, args, invoker)
+        for runtime in &runtimes {
+            match runtime.call_export(export, args, invoker) {
+                Ok(values) => return Ok(values),
+                Err(ScriptError::NoSuchExport { .. }) => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Err(ScriptError::NoSuchExport {
+            resource: resource.to_owned(),
+            export: export.to_owned(),
+        })
     }
 
     /// A transition or a running runtime wins over the catalog, so a running
@@ -1009,6 +1106,13 @@ impl Host for ResourceManager {
     fn entities(&self, kind: Option<EntityKind>) -> Vec<u32> {
         self.entities.borrow().ids(kind)
     }
+}
+
+/// Whether `path` has a `.js` extension (case-insensitive).
+fn is_js_script(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("js"))
 }
 
 /// Checks that a replicated convar fits the wire: the name is 1 to

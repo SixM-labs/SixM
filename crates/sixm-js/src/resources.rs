@@ -49,8 +49,7 @@ pub(crate) fn install<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::
             Function::new(ctx.clone(), move |ctx: Ctx<'js>| -> rquickjs::Result<i64> {
                 let rt = JsRuntime::upgrade(&ctx, &weak)?;
                 let count = rt.host(&ctx)?.resource_names().len();
-                i64::try_from(count)
-                    .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))
+                i64::try_from(count).map_err(|err| Exception::throw_message(&ctx, &err.to_string()))
             })?,
         )?;
     }

@@ -227,10 +227,9 @@ impl JsRuntime {
             ctx.clone(),
             move |ctx: Ctx<'js>, args: Rest<JsValue<'js>>| -> rquickjs::Result<JsValue<'js>> {
                 let runtime = JsRuntime::upgrade(&ctx, &handle.runtime)?;
-                let host = handle
-                    .host
-                    .upgrade()
-                    .ok_or_else(|| Exception::throw_message(&ctx, "the server is no longer available"))?;
+                let host = handle.host.upgrade().ok_or_else(|| {
+                    Exception::throw_message(&ctx, "the server is no longer available")
+                })?;
                 let values = js_to_value_vec(&runtime, &ctx, &args.0)
                     .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))?;
                 let results = host
@@ -261,9 +260,7 @@ impl JsRuntime {
     ) -> Option<FuncRef> {
         let sym = self.func_ref_symbol()?.restore(ctx).ok()?;
         let obj: &Object<'_> = func.as_ref();
-        let tag = obj
-            .get::<_, Option<rquickjs::Class<FuncTag>>>(sym)
-            .ok()??;
+        let tag = obj.get::<_, Option<rquickjs::Class<FuncTag>>>(sym).ok()??;
         Some(tag.borrow().func.clone())
     }
 }

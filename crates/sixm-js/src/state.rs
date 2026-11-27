@@ -178,10 +178,7 @@ fn bag_set<'js>(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn bag_delete<'js>(
-    target: ProxyTarget<'js>,
-    prop: ProxyProperty<'js>,
-) -> rquickjs::Result<bool> {
+fn bag_delete<'js>(target: ProxyTarget<'js>, prop: ProxyProperty<'js>) -> rquickjs::Result<bool> {
     let ctx = target.0.ctx().clone();
     if prop.is_symbol() {
         return Ok(true);
@@ -321,7 +318,10 @@ impl JsRuntime {
                     .restore(ctx)
                     .map_err(|err| crate::runtime::js_err(ctx, err))?;
                 let js_value = self.to_js(ctx, value)?;
-                catch_script(ctx, func.call::<_, ()>((bag, key, js_value, RESERVED, replicated)))
+                catch_script(
+                    ctx,
+                    func.call::<_, ()>((bag, key, js_value, RESERVED, replicated)),
+                )
             })();
             if let Err(err) = outcome {
                 tracing::error!(

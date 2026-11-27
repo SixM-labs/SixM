@@ -22,6 +22,8 @@ pub(crate) struct Events {
     last_key: i64,
     /// Cancellation flag of each active dispatch. The top is the innermost one.
     cancel_flags: Vec<bool>,
+    /// Cancellation outcome of the last `TriggerEvent` call.
+    last_emit_canceled: bool,
 }
 
 impl Events {
@@ -72,14 +74,19 @@ impl LuaRuntime {
         }
     }
 
-    /// Reads the cancellation flag of the innermost dispatch.
+    /// Records the outcome of a local `TriggerEvent` dispatch.
+    pub(crate) fn set_last_emit_canceled(&self, canceled: bool) {
+        self.events.borrow_mut().last_emit_canceled = canceled;
+    }
+
+    /// Reads the cancellation flag of the innermost dispatch, or the last `TriggerEvent`.
     pub(crate) fn was_canceled(&self) -> bool {
-        self.events
-            .borrow()
+        let events = self.events.borrow();
+        events
             .cancel_flags
             .last()
             .copied()
-            .unwrap_or(false)
+            .unwrap_or(events.last_emit_canceled)
     }
 
     /// Runs every handler of `event`. Each handler starts as its own task and

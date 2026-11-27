@@ -51,7 +51,10 @@ fn install_listeners<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::R
         let weak = weak.clone();
         Function::new(
             ctx.clone(),
-            move |ctx: Ctx<'js>, name: String, func: Function<'js>| -> rquickjs::Result<Object<'js>> {
+            move |ctx: Ctx<'js>,
+                  name: String,
+                  func: Function<'js>|
+                  -> rquickjs::Result<Object<'js>> {
                 let rt = JsRuntime::upgrade(&ctx, &weak)?;
                 let key = rt.add_handler(&ctx, &name, func);
                 handle_object(&ctx, &name, key)
@@ -145,7 +148,8 @@ fn install_dispatch<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::Re
                 rt.current_source.set(saved);
                 let host_canceled =
                     outcome.map_err(|err| Exception::throw_message(&ctx, &err.to_string()))?;
-                rt.events.borrow_mut().last_emit_canceled = local_ctx.is_canceled() || host_canceled;
+                rt.events.borrow_mut().last_emit_canceled =
+                    local_ctx.is_canceled() || host_canceled;
                 Ok(())
             },
         )?
@@ -160,10 +164,13 @@ fn install_dispatch<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::Re
     };
     let was_canceled = {
         let weak = weak.clone();
-        Function::new(ctx.clone(), move |ctx: Ctx<'js>| -> rquickjs::Result<bool> {
-            let rt = JsRuntime::upgrade(&ctx, &weak)?;
-            Ok(rt.was_canceled())
-        })?
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>| -> rquickjs::Result<bool> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                Ok(rt.was_canceled())
+            },
+        )?
     };
 
     for (name, func) in [
@@ -301,9 +308,14 @@ impl JsRuntime {
         }
 
         let outer_source = self.current_source.replace(source);
-        let outer_invoker =
-            std::mem::replace(&mut *self.current_invoker.borrow_mut(), ctx.invoker().cloned());
-        self.events.borrow_mut().cancel_flags.push(ctx.is_canceled());
+        let outer_invoker = std::mem::replace(
+            &mut *self.current_invoker.borrow_mut(),
+            ctx.invoker().cloned(),
+        );
+        self.events
+            .borrow_mut()
+            .cancel_flags
+            .push(ctx.is_canceled());
 
         for handler in handlers {
             let _budget = self.enter_budget(CALLBACK_BUDGET);

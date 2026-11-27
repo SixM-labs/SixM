@@ -13,9 +13,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use serde_json::{Map, Value as Json, json};
-use sixm_core::{
-    FuncRef, Host, ResourceName, ScriptError, ScriptRuntime, WebReply, WebRequest, WebResponse,
-};
+use sixm_core::{FuncRef, Host, ResourceName, ScriptError, WebReply, WebRequest, WebResponse};
 use sixm_net::{WebExchange, WebResponder};
 use tracing::warn;
 
@@ -242,9 +240,9 @@ impl ResourceManager {
     /// `/info.json`: the server, its running resources and its server-info convars.
     fn info_document(&self) -> Json {
         let resources: Vec<String> = self
-            .snapshot()
-            .iter()
-            .map(|runtime| runtime.resource().to_string())
+            .running_resources()
+            .into_iter()
+            .map(|name| name.to_string())
             .collect();
         let vars: Map<String, Json> = self
             .convars

@@ -28,11 +28,14 @@ fn install_roster<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::Resu
     let globals = ctx.globals();
     let get_players = {
         let weak = weak.clone();
-        Function::new(ctx.clone(), move |ctx: Ctx<'js>| -> rquickjs::Result<Vec<String>> {
-            let rt = JsRuntime::upgrade(&ctx, &weak)?;
-            let ids = server(&ctx, &*rt.host(&ctx)?)?.players();
-            Ok(ids.iter().map(u32::to_string).collect())
-        })?
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>| -> rquickjs::Result<Vec<String>> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                let ids = server(&ctx, &*rt.host(&ctx)?)?.players();
+                Ok(ids.iter().map(u32::to_string).collect())
+            },
+        )?
     };
     let get_num_player_indices = {
         let weak = weak.clone();

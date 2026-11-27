@@ -56,7 +56,10 @@ pub(crate) fn new_context(rt: &Runtime) -> Result<Context, ScriptError> {
         // Disable dynamic code generation via `Function(...)` / `(fn).constructor(...)`
         // while keeping `Function.prototype` (`call`, `apply`, `bind`, `instanceof`) intact.
         let blocked = Function::new(ctx.clone(), |ctx: Ctx<'_>| -> rquickjs::Result<()> {
-            Err(Exception::throw_type(&ctx, "Function constructor is disabled"))
+            Err(Exception::throw_type(
+                &ctx,
+                "Function constructor is disabled",
+            ))
         })?;
         let fn_ctor: rquickjs::Object<'_> = globals.get("Function")?;
         let fn_proto: Value<'_> = fn_ctor.get("prototype")?;
@@ -198,7 +201,10 @@ pub(crate) fn format_caught_value<'js>(ctx: &Ctx<'js>, val: &Value<'js>) -> Stri
 }
 
 /// Catches any `QuickJS` exception on `ctx` and maps it into [`ScriptError::Runtime`].
-pub(crate) fn catch_script<T>(ctx: &Ctx<'_>, result: rquickjs::Result<T>) -> Result<T, ScriptError> {
+pub(crate) fn catch_script<T>(
+    ctx: &Ctx<'_>,
+    result: rquickjs::Result<T>,
+) -> Result<T, ScriptError> {
     result
         .catch(ctx)
         .map_err(|caught| ScriptError::Runtime(format_caught(ctx, caught)))

@@ -16,6 +16,7 @@ sixm-core.workspace = true
 sixm-kvp.workspace = true
 sixm-resources.workspace = true
 sixm-lua.workspace = true
+sixm-js.workspace = true
 sixm-net.workspace = true
 ring.workspace = true
 thiserror.workspace = true

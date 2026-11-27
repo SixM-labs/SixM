@@ -64,9 +64,13 @@ impl JsRuntime {
         data: &WebRequest,
         body_handler: &Rc<RefCell<Option<Function<'js>>>>,
     ) -> Result<(), ScriptError> {
-        let handler = handler.clone().restore(ctx).map_err(|err| js_err(ctx, err))?;
+        let handler = handler
+            .clone()
+            .restore(ctx)
+            .map_err(|err| js_err(ctx, err))?;
         let req = build_request(ctx, data, body_handler).map_err(|err| js_err(ctx, err))?;
-        let res = build_response(ctx, self.host.clone(), request).map_err(|err| js_err(ctx, err))?;
+        let res =
+            build_response(ctx, self.host.clone(), request).map_err(|err| js_err(ctx, err))?;
         catch_script(ctx, handler.call::<_, ()>((req, res)))?;
         let body = body_handler.borrow_mut().take();
         if let Some(body_fn) = body {
@@ -139,7 +143,12 @@ fn build_response<'js>(
                         read_headers(&ctx, obj)?
                     }
                 };
-                reply(&ctx, &head_host, request, WebReply::Head { status, headers })
+                reply(
+                    &ctx,
+                    &head_host,
+                    request,
+                    WebReply::Head { status, headers },
+                )
             },
         )?,
     )?;

@@ -11,13 +11,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use sixm_core::{
-    ClientHost, ClientTarget, ConvarKind, EntityInfo, EntityKind, EventContext, EventSource,
-    FuncRef, GLOBAL_BAG, Host, HttpRequest, PlayerInfo, ResourceName, ResourceState, ScriptError,
-    ScriptRuntime, ServerHost, Value, WebReply, entity_bag, entity_of_bag, is_finite,
-    player_of_bag,
+    ClientHost, ClientTarget, ConvarKind, EntityAttachment, EntityInfo, EntityKind, EntityState,
+    EventContext, EventSource, FuncRef, GLOBAL_BAG, Host, HttpRequest, PlayerInfo, ResourceName,
+    ResourceState, ScriptError, ScriptRuntime, ServerHost, Value, WebReply, entity_bag,
+    entity_of_bag, is_finite, player_of_bag,
 };
-use sixm_kvp::KvpStore;
 use sixm_js::JsRuntime;
+use sixm_kvp::KvpStore;
 use tempfile::TempDir;
 
 /// Which side of the connection a [`TestHost`] plays.
@@ -71,6 +71,8 @@ pub struct TestHost {
     /// Entities by id, in id order. On a server they are created and deleted
     /// through the host; on a client a test fills them in directly.
     pub entities: RefCell<BTreeMap<u32, EntityInfo>>,
+    /// Replicated entity state by entity id.
+    pub entity_states: RefCell<BTreeMap<u32, EntityState>>,
     /// The ped of each player by player id, as a server host reports it.
     pub player_peds: RefCell<HashMap<u32, u32>>,
     /// Routing buckets of players and entities outside bucket 0, by id.
@@ -317,6 +319,16 @@ impl Host for TestHost {
         self.entities.borrow().get(&entity).copied()
     }
 
+    fn entity_state(&self, entity: u32) -> Option<EntityState> {
+        self.entities.borrow().contains_key(&entity).then(|| {
+            self.entity_states
+                .borrow()
+                .get(&entity)
+                .copied()
+                .unwrap_or_default()
+        })
+    }
+
     fn entities(&self, kind: Option<EntityKind>) -> Vec<u32> {
         self.entities
             .borrow()
@@ -434,6 +446,9 @@ impl ServerHost for TestHost {
         let id = self.last_entity.get() + 1;
         self.last_entity.set(id);
         self.entities.borrow_mut().insert(id, info);
+        self.entity_states
+            .borrow_mut()
+            .insert(id, EntityState::default());
         Ok(id)
     }
 
@@ -460,6 +475,7 @@ impl ServerHost for TestHost {
 
     fn delete_entity(&self, entity: u32) -> bool {
         let existed = self.entities.borrow_mut().remove(&entity).is_some();
+        self.entity_states.borrow_mut().remove(&entity);
         let bag = entity_bag(entity);
         self.state
             .borrow_mut()
@@ -476,6 +492,126 @@ impl ServerHost for TestHost {
     fn set_entity_rotation(&self, entity: u32, rotation: [f32; 3]) -> Result<(), ScriptError> {
         check_transform([0.0; 3], rotation)?;
         self.entity_slot(entity)?.rotation = rotation;
+        Ok(())
+    }
+
+    fn set_entity_frozen(&self, entity: u32, frozen: bool) -> Result<(), ScriptError> {
+        if self.entity(entity).is_none() {
+            return Err(ScriptError::Runtime(format!(
+                "entity {entity} does not exist"
+            )));
+        }
+        self.entity_states
+            .borrow_mut()
+            .entry(entity)
+            .or_default()
+            .frozen = frozen;
+        Ok(())
+    }
+
+    fn set_entity_velocity(&self, entity: u32, velocity: [f32; 3]) -> Result<(), ScriptError> {
+        check_transform(velocity, [0.0; 3])?;
+        if self.entity(entity).is_none() {
+            return Err(ScriptError::Runtime(format!(
+                "entity {entity} does not exist"
+            )));
+        }
+        self.entity_states
+            .borrow_mut()
+            .entry(entity)
+            .or_default()
+            .velocity = velocity;
+        Ok(())
+    }
+
+    fn set_entity_health(&self, entity: u32, health: i32) -> Result<(), ScriptError> {
+        if self.entity(entity).is_none() {
+            return Err(ScriptError::Runtime(format!(
+                "entity {entity} does not exist"
+            )));
+        }
+        self.entity_states
+            .borrow_mut()
+            .entry(entity)
+            .or_default()
+            .health = health;
+        Ok(())
+    }
+
+    fn set_entity_max_health(&self, entity: u32, max_health: i32) -> Result<(), ScriptError> {
+        if self.entity(entity).is_none() {
+            return Err(ScriptError::Runtime(format!(
+                "entity {entity} does not exist"
+            )));
+        }
+        self.entity_states
+            .borrow_mut()
+            .entry(entity)
+            .or_default()
+            .max_health = max_health;
+        Ok(())
+    }
+
+    fn set_entity_visible(&self, entity: u32, visible: bool) -> Result<(), ScriptError> {
+        if self.entity(entity).is_none() {
+            return Err(ScriptError::Runtime(format!(
+                "entity {entity} does not exist"
+            )));
+        }
+        self.entity_states
+            .borrow_mut()
+            .entry(entity)
+            .or_default()
+            .visible = visible;
+        Ok(())
+    }
+
+    fn set_entity_alpha(&self, entity: u32, alpha: u8) -> Result<(), ScriptError> {
+        if self.entity(entity).is_none() {
+            return Err(ScriptError::Runtime(format!(
+                "entity {entity} does not exist"
+            )));
+        }
+        self.entity_states
+            .borrow_mut()
+            .entry(entity)
+            .or_default()
+            .alpha = alpha;
+        Ok(())
+    }
+
+    fn attach_entity_to_entity(
+        &self,
+        entity: u32,
+        attachment: EntityAttachment,
+    ) -> Result<(), ScriptError> {
+        if entity == attachment.parent {
+            return Err(ScriptError::Runtime(
+                "cannot attach entity to itself".to_owned(),
+            ));
+        }
+        if self.entity(entity).is_none() || self.entity(attachment.parent).is_none() {
+            return Err(ScriptError::Runtime("entity does not exist".to_owned()));
+        }
+        self.entity_states
+            .borrow_mut()
+            .entry(entity)
+            .or_default()
+            .attachment = Some(attachment);
+        Ok(())
+    }
+
+    fn detach_entity(&self, entity: u32) -> Result<(), ScriptError> {
+        if self.entity(entity).is_none() {
+            return Err(ScriptError::Runtime(format!(
+                "entity {entity} does not exist"
+            )));
+        }
+        self.entity_states
+            .borrow_mut()
+            .entry(entity)
+            .or_default()
+            .attachment = None;
         Ok(())
     }
 
@@ -819,7 +955,10 @@ pub fn start(
         .insert(name.to_owned(), root.clone());
     host.dirs.borrow_mut().push(dir);
     for (file, _) in scripts {
-        if file.ends_with(".js") {
+        if std::path::Path::new(file)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("js"))
+        {
             runtime
                 .load_script(&root.join(file))
                 .unwrap_or_else(|err| panic!("loading {file} in {name}: {err}"));

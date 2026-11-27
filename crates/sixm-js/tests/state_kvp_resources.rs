@@ -177,7 +177,9 @@ fn resource_files_and_metadata_natives_work() {
         "res",
         &["check"],
         &[
-            ("index.js", r#"
+            (
+                "index.js",
+                r#"
                 exports("check", () => {
                     SaveResourceFile("res", "out.txt", "saved!");
                     return [
@@ -190,7 +192,8 @@ fn resource_files_and_metadata_natives_work() {
                         IsDuplicityVersion()
                     ];
                 });
-            "#),
+            "#,
+            ),
             ("data.txt", "from-disk"),
         ],
     );

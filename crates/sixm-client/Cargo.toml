@@ -18,6 +18,7 @@ path = "src/main.rs"
 sixm-core.workspace = true
 sixm-kvp.workspace = true
 sixm-lua.workspace = true
+sixm-js.workspace = true
 sixm-net.workspace = true
 sixm-resources.workspace = true
 tempfile.workspace = true

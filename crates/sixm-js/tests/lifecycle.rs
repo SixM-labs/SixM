@@ -31,7 +31,11 @@ fn shutdown_drops_active_persistent_refs_and_cycles() {
     let weak = Rc::downgrade(&rt);
     host.stop(&rt);
     drop(rt);
-    assert_eq!(weak.strong_count(), 0, "JsRuntime leaked via cycle or Persistent ref");
+    assert_eq!(
+        weak.strong_count(),
+        0,
+        "JsRuntime leaked via cycle or Persistent ref"
+    );
 }
 
 #[test]

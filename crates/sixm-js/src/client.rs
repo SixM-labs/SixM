@@ -149,8 +149,9 @@ pub(crate) fn latent_bps(ctx: &Ctx<'_>, value: &JsValue<'_>) -> rquickjs::Result
             "expected a numeric bytes-per-second rate",
         ));
     }
-    let rate = whole_number(value)
-        .ok_or_else(|| Exception::throw_type(ctx, "expected an exactly representable integer rate"))?;
+    let rate = whole_number(value).ok_or_else(|| {
+        Exception::throw_type(ctx, "expected an exactly representable integer rate")
+    })?;
     Ok(if rate > 0 {
         rate.unsigned_abs()
     } else {

@@ -37,6 +37,7 @@ separate adapters, starting with GTA VI once a PC version is released.
 | Core contract (`sixm-core`) | ✅ done |
 | Resource discovery, `fxmanifest.lua`, dependencies (`sixm-resources`) | ✅ done |
 | Lua runtime with FiveM-style API (`sixm-lua`) | ✅ done |
+| JavaScript runtime with FiveM-style API (`sixm-js`) | ✅ done |
 | Server binary: `server.cfg`, console, resource manager (`sixm-server`) | ✅ done |
 | Networking: QUIC transport and protocol (`sixm-net`) | ✅ done |
 | Players, net events and client events (`sixm-server`, `sixm-lua`) | ✅ done |
@@ -54,6 +55,7 @@ crates/
 ├── sixm-resources/   Resource discovery, fxmanifest.lua parsing, dependency order
 ├── sixm-kvp/         Persistent per-resource key-value storage, written by a background thread
 ├── sixm-lua/         Lua 5.4 runtime: scheduler, events, exports, sandbox
+├── sixm-js/          JavaScript (QuickJS) runtime: timers, Promises, events, exports, sandbox
 └── sixm-server/      Server binary: server.cfg, console, resource manager, main loop
 examples/server-data/ A runnable example server with two resources
 ```
@@ -78,8 +80,8 @@ change on both.
 Requirements:
 
 - Rust (stable, edition 2024)
-- A C compiler for the bundled Lua 5.4: on Windows, the MSVC toolchain
-  (Visual Studio Build Tools); on Linux, `gcc` or `clang`
+- A C compiler for the bundled Lua 5.4 and QuickJS: on Windows, the MSVC
+  toolchain (Visual Studio Build Tools); on Linux, `gcc` or `clang`
 
 ```sh
 cargo build --release

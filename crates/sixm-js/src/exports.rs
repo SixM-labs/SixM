@@ -211,7 +211,8 @@ impl JsRuntime {
         invoker: Option<&ResourceName>,
     ) -> Result<Vec<Value>, ScriptError> {
         let _budget = self.enter_budget(CALLBACK_BUDGET);
-        let outer_invoker = std::mem::replace(&mut *self.current_invoker.borrow_mut(), invoker.cloned());
+        let outer_invoker =
+            std::mem::replace(&mut *self.current_invoker.borrow_mut(), invoker.cloned());
         let outcome = (|| {
             let func = self.find_export(ctx, export)?;
             let js_args = self.values_to_js(ctx, args)?;

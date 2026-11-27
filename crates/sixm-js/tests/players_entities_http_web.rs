@@ -1,12 +1,10 @@
 mod common;
 
 use common::{call, new_client_host, new_host, start};
-use sixm_core::{
-    EntityInfo, EntityKind, PlayerInfo, ScriptRuntime, Value, WebReply, WebRequest,
-};
+use sixm_core::{EntityInfo, EntityKind, PlayerInfo, ScriptRuntime, Value, WebReply, WebRequest};
 
 #[test]
-fn players_entities_and_buckets_work_on_server_and_client() {
+fn players_entities_and_buckets_work_on_server() {
     let srv_host = new_host();
     srv_host.players.borrow_mut().push((
         1,
@@ -19,7 +17,10 @@ fn players_entities_and_buckets_work_on_server_and_client() {
         .identifiers
         .borrow_mut()
         .push((1, vec!["license:abc".to_owned(), "ip:127.0.0.1".to_owned()]));
-    srv_host.grants.borrow_mut().push(("player.1".to_owned(), "admin.kick".to_owned()));
+    srv_host
+        .grants
+        .borrow_mut()
+        .push(("player.1".to_owned(), "admin.kick".to_owned()));
 
     let srv = start(
         &srv_host,
@@ -81,7 +82,10 @@ fn players_entities_and_buckets_work_on_server_and_client() {
             Value::Int(1),
         ])]
     );
+}
 
+#[test]
+fn client_entity_natives_and_pool_work() {
     let cli_host = new_client_host(4);
     cli_host.local_ped.set(Some(99));
     cli_host.entities.borrow_mut().insert(
@@ -177,10 +181,7 @@ fn http_client_and_web_handler_work() {
         ],
     )
     .expect("http cb");
-    assert_eq!(
-        call(&rt, "result", &[]),
-        vec![Value::from("200:pong:ok:")]
-    );
+    assert_eq!(call(&rt, "result", &[]), vec![Value::from("200:pong:ok:")]);
 
     let (_, web_cb) = host.web_handlers.borrow()[0].clone();
     let web_req = WebRequest {
@@ -193,10 +194,7 @@ fn http_client_and_web_handler_work() {
     rt.call_web_handler(web_cb.id, 7, &web_req)
         .expect("call_web_handler");
     let replies = host.web_replies.borrow();
-    assert!(matches!(
-        &replies[0].1,
-        WebReply::Head { status: 201, .. }
-    ));
+    assert!(matches!(&replies[0].1, WebReply::Head { status: 201, .. }));
     assert!(matches!(
         &replies[1].1,
         WebReply::Write(chunk) if chunk == b"hi "
@@ -205,4 +203,104 @@ fn http_client_and_web_handler_work() {
         &replies[2].1,
         WebReply::End(chunk) if chunk == b"POST:/echo:a=1:AB"
     ));
+}
+
+#[test]
+fn entity_state_natives_and_attachments_work() {
+    let srv_host = new_host();
+    let srv = start(
+        &srv_host,
+        "state_srv",
+        &["check"],
+        &[(
+            "index.js",
+            r#"
+            exports("check", () => {
+                const parent = CreateVehicle("adder", 0, 0, 0, 0, true, false);
+                const child = CreateObject("prop_bin_01a", 1, 2, 3, true, false, false);
+                FreezeEntityPosition(child, true);
+                SetEntityVelocity(child, 3, 4, 5);
+                SetEntityMaxHealth(child, 500);
+                SetEntityHealth(child, 250);
+                SetEntityVisible(child, false);
+                SetEntityAlpha(child, 128);
+                AttachEntityToEntity(child, parent, 2, 1, 0, 2, 0, 0, 90);
+                const v = GetEntityVelocity(child);
+                const attached = [
+                    IsEntityPositionFrozen(child),
+                    v.x, v.y, v.z,
+                    GetEntityMaxHealth(child),
+                    GetEntityHealth(child),
+                    IsEntityVisible(child),
+                    GetEntityAlpha(child),
+                    IsEntityAttached(child),
+                    GetEntityAttachedTo(child),
+                ];
+                ResetEntityAlpha(child);
+                DetachEntity(child);
+                return [
+                    ...attached,
+                    GetEntityAlpha(child),
+                    IsEntityAttached(child),
+                    GetEntityAttachedTo(child),
+                ];
+            });
+            "#,
+        )],
+    );
+
+    assert_eq!(
+        call(&srv, "check", &[]),
+        vec![Value::Array(vec![
+            Value::Bool(true),
+            Value::Int(3),
+            Value::Int(4),
+            Value::Int(5),
+            Value::Int(500),
+            Value::Int(250),
+            Value::Bool(false),
+            Value::Int(128),
+            Value::Bool(true),
+            Value::Int(1),
+            Value::Int(255),
+            Value::Bool(false),
+            Value::Int(0),
+        ])]
+    );
+
+    let cli_host = new_client_host(1);
+    let cli = start(
+        &cli_host,
+        "state_cli",
+        &["check"],
+        &[(
+            "index.js",
+            r#"
+            exports("check", () => {
+                const v = CreateVehicle("adder", 0, 0, 0, 0, true, false);
+                return [
+                    typeof FreezeEntityPosition,
+                    GetEntityHealth(v),
+                    GetEntityMaxHealth(v),
+                    IsEntityVisible(v),
+                    GetEntityAlpha(v),
+                    IsEntityPositionFrozen(v),
+                    IsEntityAttached(v),
+                ];
+            });
+            "#,
+        )],
+    );
+    assert_eq!(
+        call(&cli, "check", &[]),
+        vec![Value::Array(vec![
+            Value::from("undefined"),
+            Value::Int(200),
+            Value::Int(200),
+            Value::Bool(true),
+            Value::Int(255),
+            Value::Bool(false),
+            Value::Bool(false),
+        ])]
+    );
 }

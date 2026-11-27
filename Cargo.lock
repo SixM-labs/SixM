@@ -1194,6 +1194,7 @@ version = "0.1.0"
 dependencies = [
  "ctrlc",
  "sixm-core",
+ "sixm-js",
  "sixm-kvp",
  "sixm-lua",
  "sixm-net",
@@ -1285,6 +1286,7 @@ dependencies = [
  "serde_json",
  "sixm-client",
  "sixm-core",
+ "sixm-js",
  "sixm-kvp",
  "sixm-lua",
  "sixm-net",
