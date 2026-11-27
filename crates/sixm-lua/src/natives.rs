@@ -203,7 +203,10 @@ fn install_host(
     let get_convar = bind_fn(
         lua,
         weak,
-        |rt, (name, default): (String, LuaValue)| match rt.host()?.get_convar(&name) {
+        |rt, (name, default): (String, LuaValue)| match rt
+            .host()?
+            .get_resource_convar(&rt.resource, &name)
+        {
             Some(value) => Ok(LuaValue::String(rt.lua.create_string(&value)?)),
             None => Ok(default),
         },
@@ -211,14 +214,14 @@ fn install_host(
     let get_convar_int = bind_fn(lua, weak, |rt, (name, default): (String, i64)| {
         let parsed = rt
             .host()?
-            .get_convar(&name)
+            .get_resource_convar(&rt.resource, &name)
             .and_then(|value| value.trim().parse::<i64>().ok());
         Ok(parsed.unwrap_or(default))
     })?;
     let get_convar_bool = bind_fn(lua, weak, |rt, (name, default): (String, bool)| {
         let parsed = rt
             .host()?
-            .get_convar(&name)
+            .get_resource_convar(&rt.resource, &name)
             .and_then(|value| parse_bool(&value));
         Ok(parsed.unwrap_or(default))
     })?;

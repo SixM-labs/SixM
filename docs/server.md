@@ -88,8 +88,9 @@ same name is never reached.
 | `entities` | Lists every entity with its id, kind, model hash, position and heading. |
 | `state [bag]` | Without a name, lists the state bags. With a name, prints the bag's keys and values. Replicated keys are marked. |
 | `set <name> <value>` | Stores a plain convar. The value is the rest of the line, joined with single spaces. See [Convars](#convars). |
-| `sets <name> <value>` | Stores a convar marked as server information. The value is read the same way. Nothing sends it anywhere yet. |
+| `sets <name> <value>` | Stores a convar published in `/info.json`. The value is read the same way. |
 | `setr <name> <value>` | Stores a replicated convar. The value is read the same way. Every connected player gets it, and players who join later get it too. |
+| `add_convar_permission <resource> read <name>` | Grants read access to a plain server convar. See [Private convar readers](#private-convar-readers). |
 | `exec <file>` | Runs each line of the file. See above. |
 | `help` | Lists the built-in commands and the script commands. Restricted commands are marked. |
 | `quit [reason]` | Asks the server to stop. The reason is written to the log. |
@@ -246,7 +247,7 @@ kind, and the last store wins:
 | Console | Lua | Kind |
 |---|---|---|
 | `set` | `SetConvar` | Plain. Kept on the server. |
-| `sets` | `SetConvarServerInfo` | Server information. Marked only. Nothing sends it anywhere yet, since there is no server browser. |
+| `sets` | `SetConvarServerInfo` | Server information. Included in `/info.json`. |
 | `setr` | `SetConvarReplicated` | Replicated. Sent to clients. |
 
 A replicated convar is sent to every connected player as soon as it is stored.
@@ -267,6 +268,23 @@ sv_hostname = "x" (replicated)
 
 Players cannot read or set convars through the server, as described under
 [Permissions](#permissions).
+
+### Private convar readers
+
+Plain server convars are readable by every server resource by default. The
+first `add_convar_permission` limits a convar to its named readers. Add one
+line per resource, before the resources start and before setting a secret:
+
+```text
+add_convar_permission billing read billing_token
+set billing_token "<private-token>"
+```
+
+The command requires the server console or `server.cfg`. It applies to Lua
+and JavaScript. A resource without access receives its supplied default from
+the getters and receives no change notifications for the convar. The policy
+applies to plain convars, and a restricted name cannot be stored with `sets`
+or `setr`.
 
 ## Resource discovery
 

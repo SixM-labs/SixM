@@ -290,6 +290,11 @@ pub trait Host {
 
     fn get_convar(&self, name: &str) -> Option<String>;
 
+    /// Reads a convar as a resource, applying the host's read policy.
+    fn get_resource_convar(&self, _resource: &str, name: &str) -> Option<String> {
+        self.get_convar(name)
+    }
+
     /// Root folder of a known resource (running or not).
     fn resource_path(&self, resource: &str) -> Option<PathBuf>;
 

@@ -3,12 +3,11 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::hash_map::Entry;
-use std::fs;
-use std::io;
+use std::io::{self, Read as _};
 use std::path::{Component, Path, PathBuf};
 
 use globset::GlobBuilder;
-use sixm_core::ResourceName;
+use sixm_core::{ResourceDirectory, ResourceName};
 use walkdir::WalkDir;
 
 use crate::error::ResourceError;
@@ -48,14 +47,18 @@ impl ResourceInfo {
         let manifest_path = find_manifest(root).ok_or_else(|| ResourceError::NoManifest {
             path: root.to_path_buf(),
         })?;
-        let source = fs::read_to_string(&manifest_path).map_err(|source| ResourceError::Io {
-            path: manifest_path.clone(),
-            source,
-        })?;
         let file_name = manifest_path
             .file_name()
             .map(|file| file.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let mut source = String::new();
+        ResourceDirectory::open(root)
+            .and_then(|directory| directory.open_file(&file_name))
+            .and_then(|mut file| file.read_to_string(&mut source))
+            .map_err(|source| ResourceError::Io {
+                path: manifest_path.clone(),
+                source,
+            })?;
         let manifest =
             parse_manifest(&source, &format!("@{name}/{file_name}")).map_err(|source| {
                 ResourceError::Manifest {
@@ -226,7 +229,10 @@ impl<'a> Expansion<'a> {
 
         if !pattern.contains(GLOB_META) {
             let path = root.join(&pattern);
-            if !path.is_file() {
+            if ResourceDirectory::open(root)
+                .and_then(|directory| directory.open_file(&pattern))
+                .is_err()
+            {
                 return Err(ResourceError::MissingFile {
                     resource: self.owner.clone(),
                     pattern: original.to_owned(),

@@ -164,7 +164,7 @@ fn install_convars_and_commands<'js>(
                       default: JsValue<'js>|
                       -> rquickjs::Result<JsValue<'js>> {
                     let rt = JsRuntime::upgrade(&ctx, &weak)?;
-                    match rt.host(&ctx)?.get_convar(&name) {
+                    match rt.host(&ctx)?.get_resource_convar(&rt.resource, &name) {
                         Some(value) => rquickjs::String::from_str(ctx, &value)
                             .map(rquickjs::String::into_value),
                         None => Ok(default),
@@ -183,7 +183,7 @@ fn install_convars_and_commands<'js>(
                     let rt = JsRuntime::upgrade(&ctx, &weak)?;
                     let parsed = rt
                         .host(&ctx)?
-                        .get_convar(&name)
+                        .get_resource_convar(&rt.resource, &name)
                         .and_then(|value| value.trim().parse::<i64>().ok());
                     Ok(parsed.unwrap_or(default))
                 },
@@ -200,7 +200,7 @@ fn install_convars_and_commands<'js>(
                     let rt = JsRuntime::upgrade(&ctx, &weak)?;
                     let parsed = rt
                         .host(&ctx)?
-                        .get_convar(&name)
+                        .get_resource_convar(&rt.resource, &name)
                         .and_then(|value| parse_bool(&value));
                     Ok(parsed.unwrap_or(default))
                 },

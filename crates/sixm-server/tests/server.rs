@@ -5,7 +5,7 @@ mod common;
 use std::time::Instant;
 
 use common::{Fixture, manifest, write_file};
-use sixm_core::{Host, ScriptError, Value};
+use sixm_core::{ConvarKind, Host, ScriptError, Value};
 use sixm_server::ManagerError;
 
 #[test]
@@ -31,6 +31,63 @@ fn unsupported_script_files_remain_data() {
             .call_export("script_types", "data_marker", &[], None),
         Err(ScriptError::NoSuchExport { .. })
     ));
+}
+
+#[test]
+fn convar_read_permissions_cover_getters_and_listeners() {
+    let fx = Fixture::new();
+    fx.add_resource(
+        "reader",
+        &manifest(&["server.lua"], &[], &[]),
+        &[(
+            "server.lua",
+            r"
+            local changes = 0
+            AddConvarChangeListener('private_value', function() changes = changes + 1 end)
+            exports('read', function() return GetConvarInt('PRIVATE_VALUE', -1), changes end)
+        ",
+        )],
+    );
+    fx.add_resource(
+        "observer",
+        &manifest(&["server.js"], &[], &[]),
+        &[(
+            "server.js",
+            r"
+            let changes = 0;
+            AddConvarChangeListener('private_value', () => changes++);
+            exports('read', () => `${GetConvar('private_value', 'hidden')}/${changes}`);
+            ExecuteCommand('add_convar_permission observer read private_value');
+        ",
+        )],
+    );
+    fx.server
+        .execute("add_convar_permission reader read PRIVATE_VALUE");
+    fx.server
+        .execute("add_ace resource.observer command.add_convar_permission allow");
+    fx.server.execute("ensure reader");
+    fx.server.execute("ensure observer");
+    fx.server.execute("set private_value 17");
+
+    let read = fx
+        .manager()
+        .call_export("reader", "read", &[], None)
+        .expect("allowed getter");
+    assert_eq!(read, [Value::Int(17), Value::Int(1)]);
+    assert_eq!(fx.text("observer", "read"), "hidden/0");
+    for kind in [ConvarKind::Replicated, ConvarKind::ServerInfo] {
+        assert!(
+            fx.manager()
+                .set_convar("private_value", "published", kind)
+                .is_err()
+        );
+    }
+    assert_eq!(fx.manager().convar("private_value").as_deref(), Some("17"));
+
+    fx.server
+        .execute("add_convar_permission observer read private_value");
+    fx.server.execute("set private_value 18");
+    assert_eq!(fx.text("observer", "read"), "18/1");
 }
 
 /// A `watch` resource that records lifecycle events into `LOG`, exposed as `log()`.

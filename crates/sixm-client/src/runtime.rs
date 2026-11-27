@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::fs;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -16,8 +16,9 @@ use std::time::{Duration, Instant};
 
 use sixm_core::{
     AdapterError, AdapterSink, EntityAttachment, EntityInfo, EntityKind, EntityState, EventContext,
-    EventSource, FuncRef, GameAdapter, Host, MirrorChange, NativeRegistry, ResourceName,
-    ResourceState, ScriptLanguage, ScriptRuntime, Value, is_finite,
+    EventSource, FuncRef, GameAdapter, Host, MirrorChange, NativeRegistry, ResourceDirectory,
+    ResourceName, ResourceState, ScriptLanguage, ScriptRuntime, Value, is_finite,
+    is_resource_component,
 };
 use sixm_js::JsRuntime;
 use sixm_kvp::KvpStore;
@@ -1018,6 +1019,7 @@ impl ClientRuntime {
             )
         })?;
         fs::create_dir_all(&dir)?;
+        ResourceDirectory::open(&dir)?;
         Ok(dir)
     }
 
@@ -1025,11 +1027,7 @@ impl ClientRuntime {
     /// `resource` is one plain folder name, so that a server cannot make the
     /// client reach outside its data folder.
     pub(crate) fn data_path(&self, resource: &str) -> Option<PathBuf> {
-        let mut parts = Path::new(resource).components();
-        match (parts.next(), parts.next()) {
-            (Some(Component::Normal(_)), None) => Some(self.data_dir.join(resource)),
-            _ => None,
-        }
+        is_resource_component(resource).then(|| self.data_dir.join(resource))
     }
 
     /// Whether a resource called `name` is running.

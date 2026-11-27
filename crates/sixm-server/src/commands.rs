@@ -27,8 +27,9 @@ const MAX_EXEC_DEPTH: usize = 16;
 const MAX_QUEUED_COMMANDS: usize = 1000;
 
 /// Built-in command names, as listed by `help`.
-pub(crate) const BUILT_IN: [&str; 25] = [
+pub(crate) const BUILT_IN: [&str; 26] = [
     "add_ace",
+    "add_convar_permission",
     "add_principal",
     "endpoint_add_tcp",
     "endpoint_add_udp",
@@ -157,6 +158,7 @@ pub(crate) fn run_words(
         "exec" => exec(manager, args, context),
         "help" => help(manager),
         "add_ace" => add_ace(manager, args),
+        "add_convar_permission" => add_convar_permission(manager, args, &context.source),
         "remove_ace" => remove_ace(manager, args),
         "add_principal" => add_principal(manager, args),
         "remove_principal" => remove_principal(manager, args),
@@ -280,6 +282,25 @@ fn set_convar(
 fn store_convar(manager: &ResourceManager, name: &str, value: &str, kind: ConvarKind) {
     if let Err(err) = manager.set_convar(name, value, kind) {
         error!("cannot set `{name}`: {err}");
+    }
+}
+
+fn add_convar_permission(manager: &ResourceManager, args: &[String], source: &CommandSource) {
+    if !matches!(source, CommandSource::Console) {
+        warn!("add_convar_permission is console-only");
+        return;
+    }
+    let Some([resource, operation, name]) =
+        names(args, "add_convar_permission <resource> read <convar>")
+    else {
+        return;
+    };
+    if !operation.eq_ignore_ascii_case("read") {
+        warn!("usage: add_convar_permission <resource> read <convar>");
+        return;
+    }
+    if let Err(error) = manager.convars.borrow_mut().add_reader(name, resource) {
+        error!("cannot add a reader for `{name}`: {error}");
     }
 }
 

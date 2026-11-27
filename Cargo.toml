@@ -22,6 +22,8 @@ sixm-client = { path = "crates/sixm-client" }
 mlua = { version = "0.12.3", features = ["lua54", "vendored"] }
 rquickjs = { version = "0.14", default-features = false, features = ["std", "macro"] }
 globset = "0.4.22"
+cap-std = "4.0.3"
+cap-fs-ext = "4.0.3"
 walkdir = "2.5.1"
 thiserror = "2.0.21"
 tracing = "0.1.44"

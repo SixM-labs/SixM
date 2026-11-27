@@ -155,6 +155,13 @@ Each resource runs in an isolated **Lua 5.4** state inside `sixm-lua`:
   client, `GetResourcePath` only returns the calling resource's own data
   folder (`nil` for any other resource).
 
+For comparison with the [FiveM sandbox](https://docs.fivem.net/docs/developers/sandbox/),
+SixM uses resource-relative paths through its file natives and refuses symbolic
+links and cross-resource writes. Server operators use
+[`add_convar_permission`](../server.md#private-convar-readers) to restrict
+reads of plain server convars. Neither resource runtime exposes a child-process
+or native-module loader API.
+
 ### 2. `ExecuteCommand` runs with `resource.<name>` permissions
 
 In FiveM, server scripts calling `ExecuteCommand` effectively run with full

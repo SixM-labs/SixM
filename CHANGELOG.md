@@ -7,6 +7,16 @@ may change the protocol and the API.
 
 ## [Unreleased]
 
+### Changed
+
+- Resource file APIs reject symbolic links, device names, and paths that
+  would leave the resource directory on Linux or Windows.
+
+### Added
+
+- `add_convar_permission <resource> read <convar>` restricts access to a
+  plain server convar through both getters and change listeners.
+
 ## [0.2.0]
 
 The client and server now use protocol 14. Upgrade both together.
