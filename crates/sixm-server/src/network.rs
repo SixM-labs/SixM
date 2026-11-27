@@ -681,6 +681,7 @@ impl ResourceManager {
         if let Some(ped) = ped {
             self.remove_entity(ped);
         }
+        self.leave_scope(player);
         self.network.players.borrow_mut().remove(player);
         self.leave_state(player);
         info!("{name} ({player}) left: {reason}");

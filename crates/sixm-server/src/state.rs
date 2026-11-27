@@ -83,6 +83,16 @@ impl StateStore {
         names
     }
 
+    /// The replicated keys of `bag`, with their values. Empty for an unknown bag.
+    pub(crate) fn replicated_in(&self, bag: &str) -> Vec<(String, Value)> {
+        self.bags.get(bag).map_or_else(Vec::new, |keys| {
+            keys.iter()
+                .filter(|(_, entry)| entry.replicated)
+                .map(|(key, entry)| (key.clone(), entry.value.clone()))
+                .collect()
+        })
+    }
+
     /// The keys of `bag` as `(key, value, replicated)`, sorted by key. `None`
     /// when the bag does not exist.
     pub(crate) fn entries(&self, bag: &str) -> Option<Vec<(String, Value, bool)>> {
@@ -153,16 +163,20 @@ impl ResourceManager {
         }
     }
 
-    /// Sends a replicated write to every accepted player. Does nothing while
-    /// the network is not running.
+    /// Sends a replicated write to every accepted player, or with scoping on
+    /// and an entity bag, to the players that hold the entity. Does nothing
+    /// while the network is not running.
     fn broadcast_state(&self, bag: &str, key: &str, value: &Value) -> Result<(), ScriptError> {
         let server = self.network.server.borrow();
         let Some(server) = server.as_ref() else {
             return Ok(());
         };
-        server
-            .broadcast_state(bag, key, value)
-            .map_err(|err| ScriptError::Runtime(err.to_string()))
+        match entity_of_bag(bag).filter(|_| self.scoping()) {
+            Some(entity) => self.send_entity_state(server, entity, bag, key, value),
+            None => server
+                .broadcast_state(bag, key, value)
+                .map_err(|err| ScriptError::Runtime(err.to_string())),
+        }
     }
 
     /// The names of every state bag, sorted.
@@ -183,6 +197,12 @@ impl ResourceManager {
             store.create_bag(&player_bag(player));
             store.replicated()
         };
+        let snapshot: Vec<(String, String, Value)> = snapshot
+            .into_iter()
+            .filter(|(bag, _, _)| {
+                entity_of_bag(bag).is_none_or(|entity| self.in_scope(player, entity))
+            })
+            .collect();
         let entries: Vec<(&str, &str, &Value)> = snapshot
             .iter()
             .map(|(bag, key, value)| (bag.as_str(), key.as_str(), value))

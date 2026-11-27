@@ -184,6 +184,7 @@ Convar names are case-insensitive. Scripts read them with `GetConvar` and
 | `sixm_deferralTimeout` | `120` | Seconds a connection that `playerConnecting` deferred may wait for `done`, clamped to 1 to 3600. A deferral that runs longer is refused with `connection timed out`. A value that is not a number gives 120. |
 | `sv_hostname` | `SixM Server` | Server name sent to players when they connect. |
 | `sixm_playerModel` | `player` | Model name of the ped created for each player when it is admitted. The ped is owned by the player and deleted when it leaves. |
+| `sixm_cullRadius` | `424` | Distance in metres within which a player is sent entities, measured from its ped. Entities the player owns are always sent. Clamped to 0 to 100000. `0` turns scoping off, so every player is sent every entity. A value that is not a number gives 424. A change takes effect on the next frame. See [Scoping](lua-api.md#scoping). |
 
 Any other convar can be set with `set`, `sets` or `setr`, or with the Lua
 setters, and read by scripts. The server checks a value only when the convar is

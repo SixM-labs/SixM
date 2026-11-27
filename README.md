@@ -228,12 +228,16 @@ The server owns every entity: a vehicle, a ped or an object, with a model, a
 position and a rotation. Clients keep a copy of each one, so the entity
 natives read the same values on both sides.
 
-- Creating and deleting an entity reaches every client at once. Each entity
+- Creating and deleting an entity reaches the clients at once. Each entity
   has a state bag, `entity:<id>`, which replicates like the others.
 - A move is queued and sent once per server frame, with the latest position
   and rotation, however often the script moved the entity in that frame.
-- A player who joins receives every entity that exists.
-- There is no scoping yet: every client receives every entity.
+- Scoping: by default a player is sent only the entities within 424 metres of
+  its ped, and the entities it owns. An entity that comes within range is
+  created for the player, and one that goes out of range is deleted for it. Set
+  `sixm_cullRadius` to change the distance, or to `0` to send every entity to
+  every player. See [Scoping](docs/lua-api.md#scoping).
+- A player who joins receives every entity in its scope.
 - Each admitted player has a ped, owned by that player. The owner's client moves
   it, with `SetEntityCoords` and the other setters, and the server passes the
   move on to everyone else. Nobody else can move it. A server move, such as
