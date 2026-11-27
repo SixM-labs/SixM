@@ -131,6 +131,8 @@ Differences from FiveM:
   (`files`, `client_scripts` and `shared_scripts`). `SaveResourceFile` writes to
   that resource's local data folder, but never over a declared file.
 
+Full reference: [docs/](docs/README.md).
+
 ## Players and network
 
 The server listens on `endpoint_add_udp` (default `0.0.0.0:30120`) over QUIC.
