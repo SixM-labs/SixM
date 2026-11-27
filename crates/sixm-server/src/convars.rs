@@ -24,6 +24,10 @@ const SERVER_NAME: &str = "sv_hostname";
 const DEFERRAL_TIMEOUT: &str = "sixm_deferralTimeout";
 /// Convar naming the model of the ped created for each player.
 const PLAYER_MODEL: &str = "sixm_playerModel";
+/// Convar naming the distance in metres within which a player is sent
+/// entities. Stored in lower case, as the store keeps every name, so that
+/// reading it does not allocate.
+const CULL_RADIUS: &str = "sixm_cullradius";
 
 /// Certificate file when `sixm_identityFile` is not set.
 const DEFAULT_IDENTITY_FILE: &str = "cache/server-identity.bin";
@@ -40,6 +44,10 @@ const DEFAULT_SERVER_NAME: &str = "SixM Server";
 const DEFAULT_DEFERRAL_TIMEOUT: i64 = 120;
 /// Model name of a player's ped when `sixm_playerModel` is not set.
 const DEFAULT_PLAYER_MODEL: &str = "player";
+/// Scoping radius in metres when `sixm_cullRadius` is not set, and the largest
+/// the server honours.
+const DEFAULT_CULL_RADIUS: f32 = 424.0;
+const MAX_CULL_RADIUS: f32 = 100_000.0;
 /// Smallest and largest deferral timeout in seconds the server honours.
 const MIN_DEFERRAL_TIMEOUT: i64 = 1;
 const MAX_DEFERRAL_TIMEOUT: i64 = 3600;
@@ -79,6 +87,11 @@ impl Convars {
             ConvarKind::Plain,
         );
         convars.set(PLAYER_MODEL, DEFAULT_PLAYER_MODEL, ConvarKind::Plain);
+        convars.set(
+            CULL_RADIUS,
+            &DEFAULT_CULL_RADIUS.to_string(),
+            ConvarKind::Plain,
+        );
         convars
     }
 
@@ -176,6 +189,18 @@ impl Convars {
         self.get(PLAYER_MODEL).unwrap_or(DEFAULT_PLAYER_MODEL)
     }
 
+    /// The radius of entity scoping in metres, from `sixm_cullRadius`. Clamped
+    /// to `0` to `100000`; zero turns scoping off, and every player is then sent
+    /// every entity. A value that is not a number means the default of 424.
+    pub(crate) fn cull_radius(&self) -> f32 {
+        self.values
+            .get(CULL_RADIUS)
+            .and_then(|entry| entry.value.trim().parse::<f32>().ok())
+            .filter(|radius| radius.is_finite())
+            .unwrap_or(DEFAULT_CULL_RADIUS)
+            .clamp(0.0, MAX_CULL_RADIUS)
+    }
+
     /// The most players accepted at once. Clamped to `1..=1024`; a value that
     /// is not a number means the default of 32.
     pub(crate) fn max_clients(&self) -> usize {
@@ -215,6 +240,24 @@ mod tests {
         assert_eq!(before, Some(ConvarKind::ServerInfo));
         assert_eq!(convars.get("GAME_MODE"), Some("plain"));
         assert_eq!(convars.kind("game_mode"), Some(ConvarKind::Plain));
+    }
+
+    #[test]
+    fn the_cull_radius_is_clamped_and_zero_turns_scoping_off() {
+        let mut convars = Convars::new();
+        assert_eq!(convars.cull_radius(), 424.0);
+        convars.set("sixm_cullRadius", "50", ConvarKind::Plain);
+        assert_eq!(convars.cull_radius(), 50.0);
+        convars.set("SIXM_CULLRADIUS", "0", ConvarKind::Plain);
+        assert_eq!(convars.cull_radius(), 0.0);
+        convars.set("sixm_cullRadius", "-5", ConvarKind::Plain);
+        assert_eq!(convars.cull_radius(), 0.0);
+        convars.set("sixm_cullRadius", "1e9", ConvarKind::Plain);
+        assert_eq!(convars.cull_radius(), 100_000.0);
+        convars.set("sixm_cullRadius", "far", ConvarKind::Plain);
+        assert_eq!(convars.cull_radius(), 424.0);
+        convars.set("sixm_cullRadius", "NaN", ConvarKind::Plain);
+        assert_eq!(convars.cull_radius(), 424.0);
     }
 
     #[test]

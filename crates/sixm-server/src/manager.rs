@@ -26,6 +26,7 @@ use crate::entities::{EntityStore, EntityUpdate};
 use crate::host_functions::{HostFunctions, is_host};
 use crate::network::Network;
 use crate::resource_files::{FileHashes, listing};
+use crate::scope::Scopes;
 use crate::state::StateStore;
 
 /// Why a resource operation did not complete.
@@ -93,6 +94,8 @@ pub struct ResourceManager {
     pub(crate) state: RefCell<StateStore>,
     /// Every entity and the transforms queued for the next frame.
     pub(crate) entities: RefCell<EntityStore>,
+    /// The radius in use, and the entities each player holds.
+    pub(crate) scopes: RefCell<Scopes>,
     /// Reused between frames to hold the transforms sent to clients.
     pub(crate) entity_updates: RefCell<Vec<EntityUpdate>>,
     /// Access control entries and principal links, changed by the `add_ace` family.
@@ -127,6 +130,7 @@ impl ResourceManager {
             network: Network::default(),
             state: RefCell::default(),
             entities: RefCell::default(),
+            scopes: RefCell::default(),
             entity_updates: RefCell::default(),
             access: RefCell::default(),
             host_functions: RefCell::default(),

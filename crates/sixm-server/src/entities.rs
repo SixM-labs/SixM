@@ -2,9 +2,10 @@
 //! clients at the end of each frame.
 //!
 //! Scripts create, move and delete entities. Creation and deletion reach clients
-//! at once. A move only marks the entity, and each marked entity is sent once
-//! per frame with its latest transform. The owner of an entity may move it too,
-//! and then the other clients receive the owner's transform.
+//! at once, and with distance scoping (see the `scope` module) only the clients
+//! that hold the entity. A move only marks the entity, and each marked entity is
+//! sent once per frame with its latest transform. The owner of an entity may
+//! move it too, and then the other clients receive the owner's transform.
 
 use std::collections::BTreeMap;
 
@@ -12,10 +13,10 @@ use sixm_core::{
     EntityInfo, EntityKind, EventSource, MAX_ENTITIES, ScriptError, Value, entity_bag, is_finite,
     joaat,
 };
-use sixm_net::EntityEntry;
 use tracing::{debug, warn};
 
 use crate::manager::ResourceManager;
+use crate::scope::{Grid, squared_distance};
 
 /// One transform as clients receive it: the entity id, its position, its
 /// rotation, and its teleport epoch.
@@ -42,6 +43,11 @@ pub(crate) struct EntityStore {
     /// Ids queued for the next frame, each listed once. An id whose entity was
     /// deleted stays here until the frame, and is then skipped.
     dirty: Vec<u32>,
+    /// The ids of the entities each player owns, in creation order.
+    owned: BTreeMap<u32, Vec<u32>>,
+    /// The entities by position, for finding those near a player. Only kept
+    /// while scoping is on.
+    grid: Option<Grid>,
 }
 
 impl Default for EntityStore {
@@ -50,11 +56,72 @@ impl Default for EntityStore {
             next_id: 1,
             by_id: BTreeMap::new(),
             dirty: Vec::new(),
+            owned: BTreeMap::new(),
+            grid: None,
         }
     }
 }
 
 impl EntityStore {
+    /// Turns the position index on, with cells `size` metres wide, or off with
+    /// `None`. A new index covers every entity at its current position.
+    pub(crate) fn set_grid(&mut self, size: Option<f32>) {
+        self.grid = size.map(|size| {
+            let mut grid = Grid::new(size);
+            for (id, slot) in &self.by_id {
+                grid.insert(*id, slot.info.position);
+            }
+            grid
+        });
+    }
+
+    /// The ids of the entities `player` owns, in creation order.
+    pub(crate) fn owned(&self, player: u32) -> &[u32] {
+        self.owned.get(&player).map_or(&[], Vec::as_slice)
+    }
+
+    /// The position of the entity `id`, if it exists.
+    pub(crate) fn position(&self, id: u32) -> Option<[f32; 3]> {
+        self.by_id.get(&id).map(|slot| slot.info.position)
+    }
+
+    /// The entity `id` with its teleport epoch, if it exists.
+    pub(crate) fn info_and_epoch(&self, id: u32) -> Option<(EntityInfo, u32)> {
+        self.by_id.get(&id).map(|slot| (slot.info, slot.epoch))
+    }
+
+    /// Every entity id, in ascending order.
+    pub(crate) fn ids_ascending(&self) -> impl Iterator<Item = u32> + '_ {
+        self.by_id.keys().copied()
+    }
+
+    /// Fills `out` with the scope of `player`: the entities within `radius`
+    /// metres of `center`, and the entities it owns. The list is in ascending
+    /// order and has no duplicates. Without a center, only the owned entities
+    /// are listed. Nothing is allocated when `out` has room already.
+    pub(crate) fn scope_into(
+        &self,
+        player: u32,
+        center: Option<[f32; 3]>,
+        radius: f32,
+        out: &mut Vec<u32>,
+    ) {
+        out.clear();
+        if let (Some(center), Some(grid)) = (center, self.grid.as_ref()) {
+            let limit = radius * radius;
+            grid.for_each_near(center, |id| {
+                if let Some(slot) = self.by_id.get(&id) {
+                    if squared_distance(slot.info.position, center) <= limit {
+                        out.push(id);
+                    }
+                }
+            });
+        }
+        out.extend_from_slice(self.owned(player));
+        out.sort_unstable();
+        out.dedup();
+    }
+
     /// Stores `info` as a new entity and returns its id. Fails for a transform
     /// that is not finite, when [`MAX_ENTITIES`] entities exist, or when no ids are left.
     pub(crate) fn insert(&mut self, info: EntityInfo) -> Result<u32, ScriptError> {
@@ -78,12 +145,35 @@ impl EntityStore {
                 dirty: false,
             },
         );
+        if let Some(grid) = self.grid.as_mut() {
+            grid.insert(id, info.position);
+        }
+        if let Some(owner) = info.owner {
+            self.owned.entry(owner).or_default().push(id);
+        }
         Ok(id)
     }
 
     /// Removes the entity `id`, and returns it when it existed.
     pub(crate) fn remove(&mut self, id: u32) -> Option<EntityInfo> {
-        self.by_id.remove(&id).map(|slot| slot.info)
+        let info = self.by_id.remove(&id)?.info;
+        if let Some(grid) = self.grid.as_mut() {
+            grid.remove(id);
+        }
+        if let Some(owner) = info.owner {
+            self.disown(owner, id);
+        }
+        Some(info)
+    }
+
+    /// Drops `id` from the entities `owner` owns.
+    fn disown(&mut self, owner: u32, id: u32) {
+        if let Some(ids) = self.owned.get_mut(&owner) {
+            ids.retain(|&owned| owned != id);
+            if ids.is_empty() {
+                self.owned.remove(&owner);
+            }
+        }
     }
 
     /// The entity `id`, if it exists.
@@ -137,6 +227,9 @@ impl EntityStore {
             .ok_or_else(|| ScriptError::Runtime(format!("entity {id} does not exist")))?;
         change(&mut slot.info);
         slot.epoch = slot.epoch.wrapping_add(1);
+        if let Some(grid) = self.grid.as_mut() {
+            grid.move_to(id, slot.info.position);
+        }
         if !slot.dirty {
             slot.dirty = true;
             self.dirty.push(id);
@@ -170,6 +263,9 @@ impl EntityStore {
         }
         slot.info.position = position;
         slot.info.rotation = rotation;
+        if let Some(grid) = self.grid.as_mut() {
+            grid.move_to(id, position);
+        }
         if !slot.dirty {
             slot.dirty = true;
             self.dirty.push(id);
@@ -207,12 +303,7 @@ impl ResourceManager {
     pub(crate) fn spawn_entity(&self, info: EntityInfo) -> Result<u32, ScriptError> {
         let id = self.entities.borrow_mut().insert(info)?;
         self.state.borrow_mut().create_bag(&entity_bag(id));
-        let entry = EntityEntry::from((id, info, 0));
-        self.with_server(|server| {
-            if let Err(err) = server.broadcast_entity_created(entry) {
-                warn!("cannot announce entity {id}: {err}");
-            }
-        });
+        self.announce_created(id, info);
         self.dispatch(
             "entityCreated",
             EventSource::Local,
@@ -238,16 +329,8 @@ impl ResourceManager {
         if removed.is_none() {
             return false;
         }
-        let bag = entity_bag(id);
-        self.state.borrow_mut().remove_bag(&bag);
-        self.with_server(|server| {
-            if let Err(err) = server.broadcast_state_removed(&bag) {
-                warn!("cannot announce the removal of state bag `{bag}`: {err}");
-            }
-            if let Err(err) = server.broadcast_entity_deleted(id) {
-                warn!("cannot announce the deletion of entity {id}: {err}");
-            }
-        });
+        self.state.borrow_mut().remove_bag(&entity_bag(id));
+        self.announce_removed(id);
         true
     }
 
@@ -294,13 +377,21 @@ impl ResourceManager {
         }
     }
 
-    /// Sends the transforms queued since the last frame, one update per entity.
-    /// Nothing is sent when no entity moved. The update buffer is reused, so a
-    /// frame does not allocate once the buffer has grown.
+    /// Runs once per frame. Reads `sixm_cullRadius`, then sends the transforms
+    /// queued since the last frame. With scoping on, each player's scope is
+    /// recomputed first, the entities that entered or left it are sent, and each
+    /// player gets only the transforms of the entities it holds. With scoping
+    /// off, the transforms are broadcast. Nothing is sent when no entity moved.
+    /// The update buffer is reused, so a frame does not allocate once warm.
     pub(crate) fn flush_entities(&self) {
+        let radius = self.convars.borrow().cull_radius();
+        self.apply_cull_radius(radius);
         let mut updates = std::mem::take(&mut *self.entity_updates.borrow_mut());
         self.entities.borrow_mut().take_dirty(&mut updates);
-        if !updates.is_empty() {
+        if self.scoping() {
+            self.refresh_scopes();
+            self.send_scoped_transforms(&updates);
+        } else if !updates.is_empty() {
             self.with_server(|server| {
                 if let Err(err) = server.broadcast_entity_transforms(&updates) {
                     warn!("cannot send the entity transforms: {err}");
@@ -311,18 +402,15 @@ impl ResourceManager {
         *self.entity_updates.borrow_mut() = updates;
     }
 
-    /// Every entity, in ascending id order, for the console and for joining players.
+    /// Every entity, in ascending id order, for the console.
     pub(crate) fn entity_list(&self) -> Vec<(u32, EntityInfo, u32)> {
         self.entities.borrow().all()
     }
 
-    /// Sends every existing entity to `player`, who is being admitted.
+    /// Sends `player`, who is being admitted, the entities it holds: every
+    /// entity, or its scope while scoping is on.
     pub(crate) fn join_entities(&self, player: u32) {
-        let entries: Vec<EntityEntry> = self
-            .entity_list()
-            .into_iter()
-            .map(EntityEntry::from)
-            .collect();
+        let entries = self.join_scope(player);
         self.with_server(|server| {
             if let Err(err) = server.send_entity_snapshot(player, &entries) {
                 warn!("cannot send the entity snapshot to player {player}: {err}");
@@ -543,6 +631,44 @@ mod tests {
         assert!(!store.owner_move(4, ped, [f32::NAN, 0.0, 0.0], [0.0; 3], 0));
         assert!(!store.owner_move(4, ped, [0.0; 3], [0.0, f32::INFINITY, 0.0], 0));
         assert!(dirty(&mut store).is_empty(), "nothing is queued");
+    }
+
+    #[test]
+    fn the_owned_index_follows_inserts_and_removals() {
+        let mut store = EntityStore::default();
+        let first = store.insert(owned_by(4)).unwrap();
+        let second = store.insert(owned_by(4)).unwrap();
+        let other = store.insert(owned_by(5)).unwrap();
+        assert_eq!(store.owned(4), &[first, second]);
+        assert_eq!(store.owned(5), &[other]);
+        assert_eq!(store.owned(6), &[] as &[u32]);
+
+        store.remove(first);
+        assert_eq!(store.owned(4), &[second]);
+        store.remove(second);
+        assert_eq!(store.owned(4), &[] as &[u32]);
+        assert!(!store.owned.contains_key(&4), "an empty list is dropped");
+    }
+
+    #[test]
+    fn a_new_grid_indexes_the_entities_already_there() {
+        let mut store = EntityStore::default();
+        let near = store.insert(info(EntityKind::Ped, 80.0)).unwrap();
+        let mut scope = Vec::new();
+        store.set_grid(Some(10.0));
+        store.scope_into(1, Some([0.0; 3]), 100.0, &mut scope);
+        assert!(
+            scope.is_empty(),
+            "a grid of 10 metres does not reach 80 metres"
+        );
+
+        store.set_grid(Some(100.0));
+        store.scope_into(1, Some([0.0; 3]), 100.0, &mut scope);
+        assert_eq!(scope, vec![near]);
+
+        store.set_grid(None);
+        store.scope_into(1, Some([0.0; 3]), 100.0, &mut scope);
+        assert!(scope.is_empty(), "without a grid nothing is near");
     }
 
     #[test]

@@ -377,6 +377,38 @@ impl NetServer {
         self.post(Command::Broadcast { frame })
     }
 
+    /// Tells one player that an entity was created, or entered its scope.
+    pub fn send_entity_created(&self, player: u32, entity: EntityEntry) -> Result<(), NetError> {
+        let frame = encode_frame(&ServerMessage::EntityCreated { entity }, self.max_frame)?;
+        self.post(Command::Send { player, frame })
+    }
+
+    /// Sends new transforms to one player, in the same form as
+    /// [`broadcast_entity_transforms`](Self::broadcast_entity_transforms).
+    /// Nothing is sent for an empty list.
+    pub fn send_entity_transforms(
+        &self,
+        player: u32,
+        updates: &[(u32, [f32; 3], [f32; 3], u32)],
+    ) -> Result<(), NetError> {
+        for frame in encode_entity_transforms(updates, self.max_frame)? {
+            self.post(Command::Send { player, frame })?;
+        }
+        Ok(())
+    }
+
+    /// Tells one player that the entity `id` was deleted, or left its scope.
+    pub fn send_entity_deleted(&self, player: u32, id: u32) -> Result<(), NetError> {
+        let frame = encode_frame(&ServerMessage::EntityDeleted { id }, self.max_frame)?;
+        self.post(Command::Send { player, frame })
+    }
+
+    /// Tells one player that the state bag `bag` was removed.
+    pub fn send_state_removed(&self, player: u32, bag: &str) -> Result<(), NetError> {
+        let frame = encode_state_removed(bag, self.max_frame)?;
+        self.post(Command::Send { player, frame })
+    }
+
     /// Sends the entities that exist to one player, as the fewest frames that
     /// fit. Send it right after the player is accepted. Nothing is sent for an
     /// empty list.

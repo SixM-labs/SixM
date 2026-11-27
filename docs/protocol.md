@@ -209,6 +209,26 @@ script or data file), its size and its SHA-256 hash. A client that receives a
 `Resources` snapshot, the exports and metadata travel once, with the first
 part of the entry.
 
+### Entity scoping
+
+With the `sixm_cullRadius` convar above zero, entity messages are sent per
+player rather than to everyone. The server keeps, for each player, the set of
+entities the player holds, and sends:
+
+- `EntityCreated` when an entity enters the player's scope, followed by a
+  `StateBag` for each replicated key of the entity's bag. The join snapshot,
+  `EntitySnapshot`, lists the entities in the joining player's scope.
+- `EntityDeleted` and `StateBagRemoved` for the entity's bag when an entity
+  leaves the player's scope. `EntityDeleted` therefore also means "left your
+  scope": the client forgets the entity as if it had been deleted.
+- `EntityTransforms`, at most one message per player per frame, with the
+  transforms of the entities that player holds.
+- A `StateBag` write to an `entity:<id>` bag reaches only the players that hold
+  the entity. Other bags are still sent to every player.
+
+With scoping off (`sixm_cullRadius 0`) every message is sent to every player, as
+described above. The message formats are the same either way.
+
 ### Entity entries
 
 An entity entry is `(id: u32, kind: u8, model: u32, position: 3 floats,

@@ -14,6 +14,7 @@ mod host_functions;
 mod manager;
 mod network;
 mod resource_files;
+mod scope;
 mod server;
 mod state;
 

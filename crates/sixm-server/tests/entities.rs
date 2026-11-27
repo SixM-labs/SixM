@@ -16,7 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::{Fixture, manifest};
-use sixm_client::{Client, ClientRuntime, Input as ClientInput};
+use sixm_client::{Client, ClientNotice, ClientRuntime, Input as ClientInput};
 use sixm_core::{EntityKind, Host, Value};
 use sixm_net::Identity;
 use sixm_server::Input;
@@ -192,6 +192,14 @@ impl Harness {
     /// Connects a client that keeps its files in `cache` and its data in
     /// `data`, then starts the resources it synced.
     fn connect(&self, cache: &Path, data: &Path) -> Rc<ClientRuntime> {
+        let runtime = ClientRuntime::new(self.connect_client(cache), data);
+        runtime.start_synced();
+        runtime
+    }
+
+    /// Connects a client that keeps its files in `cache`, and returns the
+    /// connection itself, so that a test can read its notices.
+    fn connect_client(&self, cache: &Path) -> Client {
         let addr = self.addr;
         let cache = cache.to_path_buf();
         let handle = thread::spawn(move || {
@@ -209,13 +217,10 @@ impl Harness {
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         }
-        let client = handle
+        handle
             .join()
             .expect("the client thread does not panic")
-            .expect("the client connects and syncs");
-        let runtime = ClientRuntime::new(client, data);
-        runtime.start_synced();
-        runtime
+            .expect("the client connects and syncs")
     }
 
     /// Runs both loops, ticking the server frames, until the server's report
@@ -617,4 +622,379 @@ fn a_move_sent_before_a_teleport_does_not_undo_the_teleport() {
         h.call("exists", &[Value::Int(i64::from(ped_a))]),
         Value::Bool(true)
     );
+}
+
+/// The resource of the scoping tests.
+const SCOPE_RESOURCE: &str = "scope_demo";
+
+/// The exports of the scoping tests, from the server script.
+const SCOPE_EXPORTS: &[&str] = &["report", "view", "ped_of", "spawn_vehicle", "paint"];
+
+/// Server side of the scoping tests. Keeps the latest view each player reported,
+/// and a vehicle that every player is told about.
+const SCOPE_SERVER: &str = r"
+local views = {}
+local vehicle
+
+RegisterNetEvent('scope:view', function(text)
+    views[source] = text
+end)
+
+AddEventHandler('playerJoining', function()
+    if vehicle then
+        TriggerClientEvent('scope:vehicle', source, vehicle)
+    end
+end)
+
+function view(player)
+    return views[player] or ''
+end
+
+function report()
+    local lines = {}
+    for player, text in pairs(views) do
+        lines[#lines + 1] = ('%d: %s'):format(player, text)
+    end
+    table.sort(lines)
+    return table.concat(lines, '\n')
+end
+
+function ped_of(player)
+    return GetPlayerPed(player)
+end
+
+function spawn_vehicle(x, y, z)
+    vehicle = CreateVehicle('adder', x, y, z, 0.0, true, false)
+    TriggerClientEvent('scope:vehicle', -1, vehicle)
+    return vehicle
+end
+
+function paint(color)
+    Entity(vehicle).state.color = color
+end
+";
+
+/// Client side of the scoping tests. `far` and `home` move the local ped, and
+/// `look` reports the peds in the client's pool, and the vehicle the server
+/// spawned: whether it exists here and the colour its state bag holds. Each
+/// report starts with a look count, so a test can tell a fresh report from an
+/// old one.
+const SCOPE_CLIENT: &str = r"
+local looks = 0
+local vehicle_id
+
+RegisterNetEvent('scope:vehicle', function(id)
+    vehicle_id = id
+end)
+
+RegisterCommand('far', function()
+    SetEntityCoords(PlayerPedId(), 1000.0, 0.0, 0.0)
+end, false)
+
+RegisterCommand('home', function()
+    SetEntityCoords(PlayerPedId(), 0.0, 0.0, 0.0)
+end, false)
+
+RegisterCommand('look', function()
+    looks = looks + 1
+    local peds = {}
+    for _, ped in ipairs(GetGamePool('CPed')) do
+        peds[#peds + 1] = ped
+    end
+    table.sort(peds)
+    local exists = vehicle_id ~= nil and DoesEntityExist(vehicle_id)
+    local color = 'nil'
+    if vehicle_id ~= nil then
+        color = tostring(Entity(vehicle_id).state.color)
+    end
+    TriggerServerEvent('scope:view', ('%d peds %s vehicle %s %s'):format(
+        looks, table.concat(peds, ','), tostring(exists), color))
+end, false)
+";
+
+/// The view body a client reports for the peds it holds and the vehicle, as
+/// `peds <ids> vehicle <exists> <colour>`, with the ids in ascending order.
+fn view_line(peds: &[u32], vehicle: &str) -> String {
+    let mut sorted = peds.to_vec();
+    sorted.sort_unstable();
+    let list: Vec<String> = sorted.iter().map(u32::to_string).collect();
+    format!("peds {} vehicle {vehicle}", list.join(","))
+}
+
+/// The look count at the start of a view, or zero when there is none.
+fn view_count(view: &str) -> u32 {
+    view.split(' ')
+        .next()
+        .and_then(|count| count.parse().ok())
+        .unwrap_or(0)
+}
+
+/// The view without its look count.
+fn view_body(view: &str) -> &str {
+    view.split_once(' ').map_or("", |(_, body)| body)
+}
+
+impl Harness {
+    /// The latest view `player` reported.
+    fn view(&self, player: u32) -> String {
+        let value = self.call("view", &[Value::Int(i64::from(player))]);
+        value.as_str().unwrap_or_default().to_owned()
+    }
+
+    /// Makes `asked` look until the latest view of `player` is a look made
+    /// after this call, and says `expected`.
+    fn look_until(
+        &self,
+        asked: &ClientRuntime,
+        runtimes: &[&ClientRuntime],
+        player: u32,
+        expected: &str,
+        what: &str,
+    ) {
+        let before = view_count(&self.view(player));
+        self.ask_until(asked, runtimes, "look", what, |_| {
+            let view = self.view(player);
+            view_count(&view) > before && view_body(&view) == expected
+        });
+    }
+
+    /// Creates a vehicle at `position` through the scoping resource.
+    fn spawn_vehicle(&self, position: [f64; 3]) -> u32 {
+        let args: Vec<Value> = position.into_iter().map(Value::Float).collect();
+        self.number("spawn_vehicle", &args)
+    }
+}
+
+/// Sets `sixm_cullRadius` on the server.
+fn set_cull_radius(h: &Harness, radius: u32) {
+    h.fx.server
+        .execute(&format!("set sixm_cullRadius {radius}"));
+}
+
+#[test]
+fn scoping_sends_each_player_the_entities_near_it_and_its_own() {
+    let h = Harness::start(SCOPE_RESOURCE, SCOPE_SERVER, SCOPE_CLIENT, SCOPE_EXPORTS);
+    set_cull_radius(&h, 50);
+    let dir_a = tempfile::tempdir().expect("temp dir");
+    let dir_b = tempfile::tempdir().expect("temp dir");
+    let a = h.connect(&dir_a.path().join("cache"), &dir_a.path().join("data"));
+    let b = h.connect(&dir_b.path().join("cache"), &dir_b.path().join("data"));
+    let both_runtimes = [&*a, &*b];
+    let ped_a = h.number("ped_of", &[Value::Int(1)]);
+    let ped_b = h.number("ped_of", &[Value::Int(2)]);
+
+    // Both peds start at the origin, so each player holds both.
+    let both = view_line(&[ped_a, ped_b], "false nil");
+    h.look_until(&a, &both_runtimes, 1, &both, "a to see both peds");
+    h.look_until(&b, &both_runtimes, 2, &both, "b to see both peds");
+
+    // `a` walks 1000 metres away: `b` no longer holds its ped, and `a` no longer
+    // holds the ped of `b`, but it keeps its own.
+    a.handle(ClientInput::Line("far".to_owned()));
+    h.look_until(
+        &b,
+        &both_runtimes,
+        2,
+        &view_line(&[ped_b], "false nil"),
+        "b to lose a's ped",
+    );
+    h.look_until(
+        &a,
+        &both_runtimes,
+        1,
+        &view_line(&[ped_a], "false nil"),
+        "a to lose b's ped",
+    );
+    assert!(b.entity(ped_a).is_none());
+
+    // A vehicle 10 metres from `a` is held by `a` only.
+    let vehicle = h.spawn_vehicle([1000.0, 10.0, 0.0]);
+    h.look_until(
+        &a,
+        &both_runtimes,
+        1,
+        &view_line(&[ped_a], "true nil"),
+        "a to see the vehicle",
+    );
+    h.look_until(
+        &b,
+        &both_runtimes,
+        2,
+        &view_line(&[ped_b], "false nil"),
+        "b not to see the vehicle",
+    );
+    assert!(b.entity(vehicle).is_none());
+
+    // The colour is a state bag of the vehicle, so only `a` receives it.
+    h.call("paint", &[Value::from("red")]);
+    h.look_until(
+        &a,
+        &both_runtimes,
+        1,
+        &view_line(&[ped_a], "true red"),
+        "a to see the colour",
+    );
+    h.look_until(
+        &b,
+        &both_runtimes,
+        2,
+        &view_line(&[ped_b], "false nil"),
+        "b not to see the colour",
+    );
+
+    // `a` walks back: `b` holds both peds again, and `a` loses the vehicle.
+    a.handle(ClientInput::Line("home".to_owned()));
+    h.look_until(&b, &both_runtimes, 2, &both, "b to see a's ped again");
+    h.look_until(
+        &a,
+        &both_runtimes,
+        1,
+        &view_line(&[ped_a, ped_b], "false nil"),
+        "a to lose the vehicle",
+    );
+    assert!(a.entity(vehicle).is_none());
+    assert_eq!(
+        h.call("ped_of", &[Value::Int(1)]),
+        Value::Int(i64::from(ped_a)),
+        "a keeps its own ped"
+    );
+}
+
+#[test]
+fn a_client_that_joins_far_from_an_entity_is_not_sent_its_state() {
+    let h = Harness::start(SCOPE_RESOURCE, SCOPE_SERVER, SCOPE_CLIENT, SCOPE_EXPORTS);
+    set_cull_radius(&h, 50);
+    let vehicle = h.spawn_vehicle([1000.0, 0.0, 0.0]);
+    h.call("paint", &[Value::from("red")]);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let a = h.connect(&dir.path().join("cache"), &dir.path().join("data"));
+    let ped_a = h.number("ped_of", &[Value::Int(1)]);
+
+    h.look_until(
+        &a,
+        &[&*a],
+        1,
+        &view_line(&[ped_a], "false nil"),
+        "a to report the vehicle it does not hold",
+    );
+    assert!(a.entity(vehicle).is_none());
+}
+
+#[test]
+fn a_radius_of_zero_sends_every_entity_to_every_player() {
+    let h = Harness::start(SCOPE_RESOURCE, SCOPE_SERVER, SCOPE_CLIENT, SCOPE_EXPORTS);
+    set_cull_radius(&h, 0);
+    let dir_a = tempfile::tempdir().expect("temp dir");
+    let dir_b = tempfile::tempdir().expect("temp dir");
+    let a = h.connect(&dir_a.path().join("cache"), &dir_a.path().join("data"));
+    let b = h.connect(&dir_b.path().join("cache"), &dir_b.path().join("data"));
+    let both_runtimes = [&*a, &*b];
+    let ped_a = h.number("ped_of", &[Value::Int(1)]);
+    let ped_b = h.number("ped_of", &[Value::Int(2)]);
+
+    a.handle(ClientInput::Line("far".to_owned()));
+    h.spawn_vehicle([1000.0, 10.0, 0.0]);
+    h.call("paint", &[Value::from("red")]);
+    let everything = view_line(&[ped_a, ped_b], "true red");
+    h.look_until(&a, &both_runtimes, 1, &everything, "a to see everything");
+    h.look_until(&b, &both_runtimes, 2, &everything, "b to see everything");
+    assert!(b.entity(ped_a).is_some());
+}
+
+#[test]
+fn changing_the_radius_brings_every_client_up_to_date() {
+    let h = Harness::start(SCOPE_RESOURCE, SCOPE_SERVER, SCOPE_CLIENT, SCOPE_EXPORTS);
+    set_cull_radius(&h, 50);
+    let dir_a = tempfile::tempdir().expect("temp dir");
+    let dir_b = tempfile::tempdir().expect("temp dir");
+    let a = h.connect(&dir_a.path().join("cache"), &dir_a.path().join("data"));
+    let b = h.connect(&dir_b.path().join("cache"), &dir_b.path().join("data"));
+    let both_runtimes = [&*a, &*b];
+    let ped_a = h.number("ped_of", &[Value::Int(1)]);
+    let ped_b = h.number("ped_of", &[Value::Int(2)]);
+    a.handle(ClientInput::Line("far".to_owned()));
+    h.look_until(
+        &b,
+        &both_runtimes,
+        2,
+        &view_line(&[ped_b], "false nil"),
+        "b to lose a's ped",
+    );
+
+    // Scoping off: `b` is sent what it does not hold yet.
+    set_cull_radius(&h, 0);
+    h.look_until(
+        &b,
+        &both_runtimes,
+        2,
+        &view_line(&[ped_a, ped_b], "false nil"),
+        "b to see a's ped after scoping is turned off",
+    );
+
+    // Scoping on again: `b` loses the ped it is too far from.
+    set_cull_radius(&h, 50);
+    h.look_until(
+        &b,
+        &both_runtimes,
+        2,
+        &view_line(&[ped_b], "false nil"),
+        "b to lose a's ped after scoping is turned on again",
+    );
+}
+
+#[test]
+fn a_frame_with_nothing_moving_sends_no_entity_messages() {
+    let h = Harness::start(SCOPE_RESOURCE, SCOPE_SERVER, SCOPE_CLIENT, SCOPE_EXPORTS);
+    set_cull_radius(&h, 50);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut client = h.connect_client(&dir.path().join("cache"));
+    let vehicle = h.spawn_vehicle([0.0, 0.0, 0.0]);
+
+    // Run frames until the client has the vehicle, so that the creation is not
+    // counted below.
+    let mut seen: Vec<ClientNotice> = Vec::new();
+    let deadline = Instant::now() + TIMEOUT;
+    while !seen
+        .iter()
+        .any(|notice| matches!(notice, ClientNotice::EntityCreated { id, .. } if *id == vehicle))
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the client never got the vehicle"
+        );
+        h.pump_server();
+        h.fx.server.tick(Instant::now());
+        drain_notices(&mut client, &mut seen);
+        thread::sleep(STEP);
+    }
+
+    // Nothing moves from here on, so no frame sends an entity message.
+    let mut quiet: Vec<ClientNotice> = Vec::new();
+    for _ in 0..40 {
+        h.pump_server();
+        h.fx.server.tick(Instant::now());
+        drain_notices(&mut client, &mut quiet);
+        thread::sleep(STEP);
+    }
+    let entity_messages: Vec<&ClientNotice> = quiet
+        .iter()
+        .filter(|notice| {
+            matches!(
+                notice,
+                ClientNotice::EntityCreated { .. }
+                    | ClientNotice::EntityTransforms { .. }
+                    | ClientNotice::EntityDeleted { .. }
+                    | ClientNotice::StateBag { .. }
+                    | ClientNotice::StateBagRemoved { .. }
+            )
+        })
+        .collect();
+    assert!(entity_messages.is_empty(), "{entity_messages:?}");
+}
+
+/// Reads every notice the connection has ready, without waiting.
+fn drain_notices(client: &mut Client, out: &mut Vec<ClientNotice>) {
+    while let Some(notice) = client.poll(Duration::ZERO) {
+        out.push(notice);
+    }
 }

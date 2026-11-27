@@ -424,8 +424,8 @@ Behaviour:
 The server owns every entity, with one exception: each player has a ped, which
 the client of that player moves. An entity id is also its network id and its
 handle on both sides. There is no game yet, so an entity is its kind, model,
-position and rotation. Every client receives every entity: there is no distance
-scoping yet.
+position and rotation. Clients hold the entities in their scope only, see
+[Scoping](#scoping).
 
 | Name | Side | Signature and result |
 |---|---|---|
@@ -462,6 +462,32 @@ scoping yet.
   entity that moved is sent once per server frame with its latest transform.
 - A deleted entity's state bag is removed on the server and on every client.
 - The console command `entities` lists every entity.
+
+### Scoping
+
+Each player holds only some of the entities. This is distance-based scoping,
+and it is controlled by the `sixm_cullRadius` convar (see
+[Convars](server.md#convars)), in metres. The default is `424`, and the largest
+value is `100000`.
+
+- A player's scope is every entity within the radius of its ped, measured in
+  three dimensions, plus every entity the player owns, always. A player without
+  a ped has only its owned entities.
+- An entity that enters a player's scope is created for that player with its
+  current transform and owner, then every replicated key of its state bag is
+  sent. An entity that leaves the scope is removed from the player's state bag
+  and deleted for that player only. The player's scripts see the entity
+  disappear, exactly as they would for a deletion.
+- A player receives transforms only for the entities in its scope. A state bag
+  of an entity, `entity:<id>`, reaches only the players that hold the entity.
+  Every other state bag is still sent to every player.
+- The scope is recomputed once per server frame, so a change of the convar
+  takes effect on the next frame. Setting it to `0` sends every entity to every
+  player, as it did before scoping. Setting it above `0` again removes the
+  entities that are out of range.
+- The owner of an entity is always in scope for it, so a player always sees its
+  own ped.
+
 
 ### Player peds and ownership
 
