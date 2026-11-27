@@ -3,7 +3,7 @@
 //! exports, function references and console commands between them.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
@@ -11,8 +11,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use sixm_core::{
-    ClientHost, ClientTarget, EventContext, EventSource, FuncRef, GLOBAL_BAG, Host, PlayerInfo,
-    ResourceName, ScriptError, ScriptRuntime, ServerHost, Value, player_of_bag,
+    ClientHost, ClientTarget, EntityInfo, EntityKind, EventContext, EventSource, FuncRef,
+    GLOBAL_BAG, Host, PlayerInfo, ResourceName, ScriptError, ScriptRuntime, ServerHost, Value,
+    entity_bag, entity_of_bag, is_finite, player_of_bag,
 };
 use sixm_lua::LuaRuntime;
 use tempfile::TempDir;
@@ -53,6 +54,11 @@ pub struct TestHost {
     pub dropped: RefCell<Vec<(u32, String)>>,
     /// State values by `(bag, key)`.
     pub state: RefCell<HashMap<(String, String), Value>>,
+    /// Entities by id, in id order. On a server they are created and deleted
+    /// through the host; on a client a test fills them in directly.
+    pub entities: RefCell<BTreeMap<u32, EntityInfo>>,
+    /// The last entity id handed out. Ids start at 1.
+    pub last_entity: Cell<u32>,
 }
 
 impl TestHost {
@@ -188,6 +194,19 @@ impl Host for TestHost {
             .cloned()
     }
 
+    fn entity(&self, entity: u32) -> Option<EntityInfo> {
+        self.entities.borrow().get(&entity).copied()
+    }
+
+    fn entities(&self, kind: Option<EntityKind>) -> Vec<u32> {
+        self.entities
+            .borrow()
+            .iter()
+            .filter(|(_, info)| kind.is_none_or(|wanted| info.kind == wanted))
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// Stores the value like the server does, refusing unknown player bags, and
     /// runs the change handlers of every runtime. Replication is not modelled.
     fn state_set(
@@ -203,7 +222,9 @@ impl Host for TestHost {
                 .iter()
                 .any(|(connected, _)| *connected == id)
         });
-        if bag != GLOBAL_BAG && !player_connected {
+        let entity_exists =
+            entity_of_bag(bag).is_some_and(|id| self.entities.borrow().contains_key(&id));
+        if bag != GLOBAL_BAG && !player_connected && !entity_exists {
             return Err(ScriptError::Runtime(format!(
                 "state bag `{bag}` does not exist"
             )));
@@ -258,6 +279,55 @@ impl ServerHost for TestHost {
 
     fn drop_player(&self, player: u32, reason: &str) {
         self.dropped.borrow_mut().push((player, reason.to_owned()));
+    }
+
+    fn create_entity(&self, info: EntityInfo) -> Result<u32, ScriptError> {
+        check_transform(info.position, info.rotation)?;
+        let id = self.last_entity.get() + 1;
+        self.last_entity.set(id);
+        self.entities.borrow_mut().insert(id, info);
+        Ok(id)
+    }
+
+    fn delete_entity(&self, entity: u32) -> bool {
+        let existed = self.entities.borrow_mut().remove(&entity).is_some();
+        let bag = entity_bag(entity);
+        self.state
+            .borrow_mut()
+            .retain(|(owner, _), _| *owner != bag);
+        existed
+    }
+
+    fn set_entity_position(&self, entity: u32, position: [f32; 3]) -> Result<(), ScriptError> {
+        check_transform(position, [0.0; 3])?;
+        self.entity_slot(entity)?.position = position;
+        Ok(())
+    }
+
+    fn set_entity_rotation(&self, entity: u32, rotation: [f32; 3]) -> Result<(), ScriptError> {
+        check_transform([0.0; 3], rotation)?;
+        self.entity_slot(entity)?.rotation = rotation;
+        Ok(())
+    }
+}
+
+impl TestHost {
+    /// Runs `f` on the entity `entity`, or fails when it does not exist.
+    fn entity_slot(&self, entity: u32) -> Result<std::cell::RefMut<'_, EntityInfo>, ScriptError> {
+        let entities = self.entities.borrow_mut();
+        std::cell::RefMut::filter_map(entities, |map| map.get_mut(&entity))
+            .map_err(|_| ScriptError::Runtime(format!("entity {entity} does not exist")))
+    }
+}
+
+/// Fails unless every component of both transforms is finite.
+fn check_transform(position: [f32; 3], rotation: [f32; 3]) -> Result<(), ScriptError> {
+    if is_finite(position) && is_finite(rotation) {
+        Ok(())
+    } else {
+        Err(ScriptError::Runtime(
+            "entity transforms must be finite".to_owned(),
+        ))
     }
 }
 

@@ -38,7 +38,7 @@ separate adapters, starting with GTA VI once a PC version is released.
 | Networking: QUIC transport and protocol (`sixm-net`) | ✅ done |
 | Players, net events and client events (`sixm-server`, `sixm-lua`) | ✅ done |
 | State bags (`sixm-server`, `sixm-lua`, `sixm-net`) | ✅ done |
-| Entity sync | ⏳ planned |
+| Entity sync | ✅ done (server-owned entities, no game yet) |
 | Headless client: resource sync, client scripts (`sixm-client`) | ✅ done |
 | GTA VI game adapter | ⏳ planned (needs a PC release) |
 
@@ -81,8 +81,8 @@ cargo run --release -p sixm-server
 ```
 
 The console accepts `start`, `stop`, `restart`, `ensure`, `refresh`, `set`,
-`exec`, `endpoint_add_udp`, `players`, `state`, `help` and `quit`, plus every
-command registered with `RegisterCommand`.
+`exec`, `endpoint_add_udp`, `players`, `entities`, `state`, `help` and `quit`,
+plus every command registered with `RegisterCommand`.
 
 A test client can connect while the example server runs:
 
@@ -206,6 +206,40 @@ Events sent by players reach only handlers registered with `RegisterNetEvent`.
 Use `TriggerClientEvent(name, id, ...)` to send to one player, or `-1` for
 everyone. Also available: `GetPlayers`, `GetPlayerName`, `GetPlayerEndpoint`
 and `DropPlayer`. The console command `players` lists the connected players.
+
+## Entities
+
+The server owns every entity: a vehicle, a ped or an object, with a model, a
+position and a rotation. Clients keep a copy of each one, so the entity
+natives read the same values on both sides.
+
+- Creating and deleting an entity reaches every client at once. Each entity
+  has a state bag, `entity:<id>`, which replicates like the others.
+- A move is queued and sent once per server frame, with the latest position
+  and rotation, however often the script moved the entity in that frame.
+- A player who joins receives every entity that exists.
+- There is no scoping yet: every client receives every entity.
+
+```lua
+local vehicle = CreateVehicle('adder', 0.0, 0.0, 72.0, 90.0, true, false)
+Entity(vehicle).state.plate = 'SIXM'
+SetEntityCoords(vehicle, 10.0, 0.0, 72.0)
+```
+
+The server raises `entityCreated` and `entityRemoved`, each with the entity id.
+The console command `entities` lists every entity.
+
+Natives, on both sides: `DoesEntityExist`, `GetEntityCoords`,
+`GetEntityHeading`, `GetEntityRotation`, `GetEntityModel`, `GetEntityType`,
+`NetworkGetNetworkIdFromEntity`, `NetworkGetEntityFromNetworkId`,
+`NetworkDoesNetworkIdExist`, `GetEntityFromStateBagName` and `Entity`.
+
+On the server: `CreateVehicle`, `CreateVehicleServerSetter`, `CreatePed`,
+`CreateObject`, `CreateObjectNoOffset`, `DeleteEntity`, `SetEntityCoords`,
+`SetEntityCoordsNoOffset`, `SetEntityHeading`, `SetEntityRotation`,
+`GetAllVehicles`, `GetAllPeds` and `GetAllObjects`.
+
+On the client: `GetGamePool`, with `'CVehicle'`, `'CPed'` or `'CObject'`.
 
 ## Contributing
 

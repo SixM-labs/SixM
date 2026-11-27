@@ -79,7 +79,7 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
 
 /// The server services of `host`. Only server runtimes call the functions that
 /// use this, so a missing service is a broken host rather than a script error.
-fn server(host: &dyn Host) -> mlua::Result<&dyn ServerHost> {
+pub(crate) fn server(host: &dyn Host) -> mlua::Result<&dyn ServerHost> {
     host.server()
         .ok_or_else(|| mlua::Error::runtime("this function needs a server host"))
 }
@@ -109,7 +109,7 @@ pub(crate) fn player_id(value: &LuaValue) -> Option<u32> {
 }
 
 /// Reads an integer, a float with no fraction, or a decimal string as an integer.
-fn whole_number(value: &LuaValue) -> Option<i64> {
+pub(crate) fn whole_number(value: &LuaValue) -> Option<i64> {
     match value {
         LuaValue::Integer(int) => Some(*int),
         LuaValue::Number(float) => whole_float(*float),

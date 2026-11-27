@@ -18,6 +18,7 @@ use sixm_core::Value;
 use tokio::sync::mpsc;
 use tracing::debug;
 
+use crate::entities::EntityEntry;
 use crate::error::NetError;
 use crate::files::{FileHash, MAX_FILE_SIZE, ResourceEntry, hash_hex};
 use crate::identity::Fingerprint;
@@ -52,6 +53,16 @@ pub enum ClientEvent {
     ResourceStarted { entry: ResourceEntry },
     /// A resource stopped.
     ResourceStopped { name: String },
+    /// An entity was created.
+    EntityCreated { entity: EntityEntry },
+    /// New positions and rotations, as `(id, position, rotation)`.
+    EntityTransforms {
+        updates: Vec<(u32, [f32; 3], [f32; 3])>,
+    },
+    /// An entity was deleted.
+    EntityDeleted { id: u32 },
+    /// The entities that existed when the client joined.
+    EntitySnapshot { entities: Vec<EntityEntry> },
     /// The server kicked the client, or shut down, and gave a reason.
     Kicked { reason: String },
     /// The connection ended without a kick.
@@ -361,7 +372,11 @@ async fn establish(
         | ServerMessage::Resources { .. }
         | ServerMessage::ResourceStarted { .. }
         | ServerMessage::ResourceStopped { .. }
-        | ServerMessage::FileUnavailable { .. } => {
+        | ServerMessage::FileUnavailable { .. }
+        | ServerMessage::EntityCreated { .. }
+        | ServerMessage::EntityTransforms { .. }
+        | ServerMessage::EntityDeleted { .. }
+        | ServerMessage::EntitySnapshot { .. } => {
             return Err(NetError::Protocol(
                 "the server sent a message before the welcome".to_owned(),
             ));
@@ -533,6 +548,16 @@ async fn pump_events(
                         }
                     }
                     continue;
+                }
+                Ok(ServerMessage::EntityCreated { entity }) => {
+                    ClientEvent::EntityCreated { entity }
+                }
+                Ok(ServerMessage::EntityTransforms { updates }) => {
+                    ClientEvent::EntityTransforms { updates }
+                }
+                Ok(ServerMessage::EntityDeleted { id }) => ClientEvent::EntityDeleted { id },
+                Ok(ServerMessage::EntitySnapshot { entities }) => {
+                    ClientEvent::EntitySnapshot { entities }
                 }
                 Ok(ServerMessage::Kicked { reason }) => {
                     let _ = events.send(ClientEvent::Kicked { reason });

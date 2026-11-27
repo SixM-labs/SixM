@@ -20,6 +20,7 @@ use tokio::task::{Id, JoinError, JoinSet};
 use tracing::{debug, error, warn};
 
 use crate::connection::{self, Decision, Shared, Ticket};
+use crate::entities::EntityEntry;
 use crate::error::NetError;
 use crate::files::{MAX_RESOURCE_NAME_LEN, PublishedResource, ResourceEntry, check_published};
 use crate::identity::{Credentials, Fingerprint, Identity};
@@ -29,8 +30,9 @@ use crate::protocol::{
 use crate::transfer::Advertised;
 use crate::transport;
 use crate::wire::{
-    encode_event, encode_frame, encode_resources_snapshot, encode_state, encode_state_removed,
-    encode_state_snapshot, validate_length,
+    encode_entity_snapshot, encode_entity_transforms, encode_event, encode_frame,
+    encode_resources_snapshot, encode_state, encode_state_removed, encode_state_snapshot,
+    validate_length,
 };
 
 /// Default UDP port, the one FiveM clients expect.
@@ -322,6 +324,45 @@ impl NetServer {
             self.max_frame,
         )?;
         self.post(Command::Broadcast { frame })
+    }
+
+    /// Tells every accepted player that an entity was created.
+    pub fn broadcast_entity_created(&self, entity: EntityEntry) -> Result<(), NetError> {
+        let frame = encode_frame(&ServerMessage::EntityCreated { entity }, self.max_frame)?;
+        self.post(Command::Broadcast { frame })
+    }
+
+    /// Sends new transforms to every accepted player, as `(id, position,
+    /// rotation)`. The updates are split into as few frames as fit. Nothing is
+    /// sent for an empty list.
+    pub fn broadcast_entity_transforms(
+        &self,
+        updates: &[(u32, [f32; 3], [f32; 3])],
+    ) -> Result<(), NetError> {
+        for frame in encode_entity_transforms(updates, self.max_frame)? {
+            self.post(Command::Broadcast { frame })?;
+        }
+        Ok(())
+    }
+
+    /// Tells every accepted player that the entity `id` was deleted.
+    pub fn broadcast_entity_deleted(&self, id: u32) -> Result<(), NetError> {
+        let frame = encode_frame(&ServerMessage::EntityDeleted { id }, self.max_frame)?;
+        self.post(Command::Broadcast { frame })
+    }
+
+    /// Sends the entities that exist to one player, as the fewest frames that
+    /// fit. Send it right after the player is accepted. Nothing is sent for an
+    /// empty list.
+    pub fn send_entity_snapshot(
+        &self,
+        player: u32,
+        entities: &[EntityEntry],
+    ) -> Result<(), NetError> {
+        for frame in encode_entity_snapshot(entities, self.max_frame)? {
+            self.post(Command::Send { player, frame })?;
+        }
+        Ok(())
     }
 
     /// Sends `Kicked` with `reason`, then closes the player's connection. The

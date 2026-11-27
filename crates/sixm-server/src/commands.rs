@@ -15,9 +15,10 @@ use crate::manager::{ManagerError, ResourceManager};
 const MAX_EXEC_DEPTH: usize = 16;
 
 /// Built-in command names, as listed by `help`.
-const BUILT_IN: [&str; 15] = [
+const BUILT_IN: [&str; 16] = [
     "endpoint_add_tcp",
     "endpoint_add_udp",
+    "entities",
     "ensure",
     "exec",
     "help",
@@ -61,6 +62,7 @@ pub(crate) fn run_words(manager: &ResourceManager, words: &[String], raw: &str, 
         "endpoint_add_udp" => endpoint(manager, args, false),
         "endpoint_add_tcp" => endpoint(manager, args, true),
         "players" => players(manager),
+        "entities" => entities(manager),
         "state" => state(manager, args),
         "quit" => quit(manager, args),
         "exec" => exec(manager, args, depth),
@@ -158,6 +160,20 @@ fn players(manager: &ResourceManager) {
     info!("{} player(s) connected", players.len());
     for (id, player) in players {
         info!("{id:>5}  {}  {}", player.name, player.endpoint);
+    }
+}
+
+/// `entities`: lists every entity with its id, kind, model in hex, position and
+/// heading, in id order.
+fn entities(manager: &ResourceManager) {
+    let entities = manager.entity_list();
+    info!("{} entities", entities.len());
+    for (id, entity) in entities {
+        let [x, y, z] = entity.position;
+        info!(
+            "{id:>6}  {:?}  model 0x{:08x}  position {x:.2} {y:.2} {z:.2}  heading {:.2}",
+            entity.kind, entity.model, entity.rotation[2]
+        );
     }
 }
 

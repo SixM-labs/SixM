@@ -224,6 +224,7 @@ impl ResourceManager {
                 warn!("cannot send the resource list to player {id}: {err}");
             }
         });
+        self.join_entities(id);
         self.join_state(id);
         self.dispatch("playerJoining", EventSource::Player(id), &[]);
         info!("{name} ({id}) joined from {endpoint}");

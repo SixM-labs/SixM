@@ -7,6 +7,7 @@
 
 mod client;
 mod convert;
+mod entities;
 mod events;
 mod exports;
 mod json;

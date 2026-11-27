@@ -8,6 +8,7 @@ mod commands;
 mod config;
 mod console;
 mod convars;
+mod entities;
 mod host_functions;
 mod manager;
 mod network;

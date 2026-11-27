@@ -8,8 +8,8 @@ use std::rc::{Rc, Weak};
 use std::time::Instant;
 
 use sixm_core::{
-    ClientHost, ClientTarget, EventContext, EventSource, FuncRef, Host, PlayerInfo, ResourceName,
-    ScriptError, ScriptRuntime, ServerHost, Value,
+    ClientHost, ClientTarget, EntityInfo, EntityKind, EventContext, EventSource, FuncRef, Host,
+    PlayerInfo, ResourceName, ScriptError, ScriptRuntime, ServerHost, Value,
 };
 use sixm_lua::LuaRuntime;
 use sixm_net::{MAX_EXPORT_NAME_LEN, MAX_EXPORTS, PublishedResource};
@@ -17,6 +17,7 @@ use sixm_resources::{Catalog, DependencyError, ResourceError, ScanIssue};
 use tracing::{error, info, warn};
 
 use crate::convars::Convars;
+use crate::entities::{EntityStore, EntityUpdate};
 use crate::host_functions::{HostFunctions, is_host};
 use crate::network::Network;
 use crate::resource_files::{FileHashes, listing};
@@ -85,6 +86,10 @@ pub struct ResourceManager {
     pub(crate) network: Network,
     /// State bags and their keys.
     pub(crate) state: RefCell<StateStore>,
+    /// Every entity and the transforms queued for the next frame.
+    pub(crate) entities: RefCell<EntityStore>,
+    /// Reused between frames to hold the transforms sent to clients.
+    pub(crate) entity_updates: RefCell<Vec<EntityUpdate>>,
     /// Functions the server offers to scripts, such as `setKickReason`.
     pub(crate) host_functions: RefCell<HostFunctions>,
     /// Client files of the running resources, in start order. Advertised to
@@ -111,6 +116,8 @@ impl ResourceManager {
             quit: Cell::new(false),
             network: Network::default(),
             state: RefCell::default(),
+            entities: RefCell::default(),
+            entity_updates: RefCell::default(),
             host_functions: RefCell::default(),
             advertised: RefCell::default(),
             hashes: RefCell::default(),
@@ -681,6 +688,14 @@ impl Host for ResourceManager {
     ) -> Result<(), ScriptError> {
         self.write_state(bag, key, &value, replicated)
     }
+
+    fn entity(&self, entity: u32) -> Option<EntityInfo> {
+        self.entities.borrow().get(entity)
+    }
+
+    fn entities(&self, kind: Option<EntityKind>) -> Vec<u32> {
+        self.entities.borrow().ids(kind)
+    }
 }
 
 impl ServerHost for ResourceManager {
@@ -703,5 +718,21 @@ impl ServerHost for ResourceManager {
 
     fn drop_player(&self, player: u32, reason: &str) {
         self.queue_drop(player, reason);
+    }
+
+    fn create_entity(&self, info: EntityInfo) -> Result<u32, ScriptError> {
+        self.spawn_entity(info)
+    }
+
+    fn delete_entity(&self, entity: u32) -> bool {
+        self.remove_entity(entity)
+    }
+
+    fn set_entity_position(&self, entity: u32, position: [f32; 3]) -> Result<(), ScriptError> {
+        self.entities.borrow_mut().set_position(entity, position)
+    }
+
+    fn set_entity_rotation(&self, entity: u32, rotation: [f32; 3]) -> Result<(), ScriptError> {
+        self.entities.borrow_mut().set_rotation(entity, rotation)
     }
 }

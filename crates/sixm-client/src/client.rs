@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use sixm_core::Value;
+use sixm_core::{EntityInfo, Value};
 use sixm_net::{
     ClientEvent, FILE_KIND_CLIENT, FILE_KIND_FILE, FILE_KIND_SHARED, FileEntry, Fingerprint,
     NetClient, NetError, ResourceEntry,
@@ -82,6 +82,15 @@ pub enum ClientNotice {
     },
     /// A state bag was removed, because its player left.
     StateBagRemoved { bag: String },
+    /// An entity was created, or was already there when the client joined.
+    EntityCreated { id: u32, info: EntityInfo },
+    /// New positions and rotations, as `(id, position, rotation)`. Entities the
+    /// client does not know are ignored.
+    EntityTransforms {
+        updates: Vec<(u32, [f32; 3], [f32; 3])>,
+    },
+    /// An entity was deleted.
+    EntityDeleted { id: u32 },
     /// The server kicked the client, or shut down.
     Kicked { reason: String },
     /// The connection ended.
@@ -224,6 +233,24 @@ impl Client {
             ClientEvent::Event { name, args } => ClientNotice::Event { name, args },
             ClientEvent::StateBag { bag, key, value } => ClientNotice::StateBag { bag, key, value },
             ClientEvent::StateBagRemoved { bag } => ClientNotice::StateBagRemoved { bag },
+            ClientEvent::EntityCreated { entity } => {
+                // The network decoder already rejects unknown kinds, so this
+                // conversion does not fail for a frame it accepted.
+                let Ok((id, info)) = <(u32, EntityInfo)>::try_from(entity) else {
+                    return None;
+                };
+                ClientNotice::EntityCreated { id, info }
+            }
+            ClientEvent::EntityTransforms { updates } => ClientNotice::EntityTransforms { updates },
+            ClientEvent::EntityDeleted { id } => ClientNotice::EntityDeleted { id },
+            ClientEvent::EntitySnapshot { entities } => {
+                self.backlog.extend(
+                    entities
+                        .into_iter()
+                        .map(|entity| ClientEvent::EntityCreated { entity }),
+                );
+                return None;
+            }
             ClientEvent::Kicked { reason } => ClientNotice::Kicked { reason },
             ClientEvent::Disconnected { reason } => ClientNotice::Disconnected { reason },
         };

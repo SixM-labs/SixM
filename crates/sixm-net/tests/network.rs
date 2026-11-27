@@ -20,7 +20,7 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use sixm_core::{FuncRef, Value};
 use sixm_net::{
-    ClientEvent, ConnectionId, FILE_KIND_CLIENT, FILE_KIND_FILE, FileEntry, FileHash,
+    ClientEvent, ConnectionId, EntityEntry, FILE_KIND_CLIENT, FILE_KIND_FILE, FileEntry, FileHash,
     MAX_EXPORT_NAME_LEN, MAX_FILE_SIZE, NetClient, NetError, NetEvent, NetServer, PROTOCOL_VERSION,
     PublishedFile, PublishedResource, ResourceEntry, ServerConfig,
 };
@@ -958,4 +958,73 @@ fn many_requests_on_one_connection_are_all_served() {
             assert_eq!(body, &contents[index]);
         }
     });
+}
+
+fn vehicle_entry(id: u32) -> EntityEntry {
+    EntityEntry {
+        id,
+        kind: 2,
+        model: 0xB779_A091,
+        position: [1.0, 2.0, 3.0],
+        rotation: [0.0, 0.0, 90.0],
+    }
+}
+
+#[test]
+fn entity_creation_transforms_and_deletion_arrive_in_order() {
+    let server = start();
+    let client = join(&server, "ann", 1);
+    let entry = vehicle_entry(1);
+    let moved = [(1, [4.0, 5.0, 6.0], [0.0, 0.0, 45.0])];
+
+    server
+        .net
+        .broadcast_entity_created(entry)
+        .expect("creation is sent");
+    server
+        .net
+        .broadcast_entity_transforms(&moved)
+        .expect("transforms are sent");
+    server
+        .net
+        .broadcast_entity_deleted(1)
+        .expect("deletion is sent");
+
+    assert_eq!(
+        client_event(&client),
+        ClientEvent::EntityCreated { entity: entry }
+    );
+    assert_eq!(
+        client_event(&client),
+        ClientEvent::EntityTransforms {
+            updates: moved.to_vec()
+        }
+    );
+    assert_eq!(client_event(&client), ClientEvent::EntityDeleted { id: 1 });
+}
+
+#[test]
+fn entity_snapshot_reaches_a_joining_player() {
+    let server = start();
+    let addr = server.net.local_addr();
+    let handle = thread::spawn(move || NetClient::connect(addr, "ann", TIMEOUT));
+    let (connection, _) = expect_connecting(&server);
+    server.net.accept(connection, 1);
+    let client = handle
+        .join()
+        .expect("client thread does not panic")
+        .expect("client connects");
+
+    let entities = [vehicle_entry(1), vehicle_entry(2)];
+    server
+        .net
+        .send_entity_snapshot(1, &entities)
+        .expect("snapshot is sent");
+
+    assert_eq!(
+        client_event(&client),
+        ClientEvent::EntitySnapshot {
+            entities: entities.to_vec()
+        }
+    );
 }

@@ -9,6 +9,7 @@ use mlua::{Function, Lua, LuaString, MultiValue, Table, Value as LuaValue};
 use sixm_core::{EventSource, joaat, normalize_resource_path};
 
 use crate::client;
+use crate::entities;
 use crate::events::handle_table;
 use crate::exports;
 use crate::json;
@@ -24,8 +25,9 @@ static START: OnceLock<Instant> = OnceLock::new();
 
 /// Installs every global function, the `Citizen` table, `exports` and `json`.
 ///
-/// The common globals are installed on both sides. The player functions are
-/// server-only, and the connection functions are client-only.
+/// The common globals are installed on both sides. The player and entity
+/// creation functions are server-only, and the connection and game pool
+/// functions are client-only.
 pub(crate) fn install(runtime: &Rc<LuaRuntime>, helpers: &Helpers) -> mlua::Result<()> {
     START.get_or_init(Instant::now);
     let lua = &runtime.lua;
@@ -39,9 +41,16 @@ pub(crate) fn install(runtime: &Rc<LuaRuntime>, helpers: &Helpers) -> mlua::Resu
     install_scheduling(lua, weak, &globals, helpers)?;
     install_events(lua, weak, &globals)?;
     install_host(lua, weak, &globals, runtime.side)?;
+    entities::install(lua, weak, &globals)?;
     match runtime.side {
-        Side::Server => players::install(lua, weak, &globals)?,
-        Side::Client { local_player } => client::install(runtime, &globals, local_player)?,
+        Side::Server => {
+            players::install(lua, weak, &globals)?;
+            entities::install_server(lua, weak, &globals)?;
+        }
+        Side::Client { local_player } => {
+            client::install(runtime, &globals, local_player)?;
+            entities::install_client(lua, weak, &globals)?;
+        }
     }
     state::install(lua, weak, &globals)?;
     vector::install(lua, &globals, helpers.type_fn.clone())?;
