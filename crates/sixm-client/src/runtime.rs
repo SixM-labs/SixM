@@ -3,7 +3,7 @@
 //! the frame loop around them.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -49,6 +49,9 @@ pub(crate) struct ClientEntity {
     pub(crate) position_dirty: bool,
     /// The rotation was moved since the last frame.
     pub(crate) rotation_dirty: bool,
+    /// The client created the entity and the server has not confirmed it yet.
+    /// Its moves wait until it is confirmed, since the server does not know it.
+    pub(crate) pending: bool,
 }
 
 impl ClientEntity {
@@ -113,6 +116,12 @@ pub struct ClientRuntime {
     pub(crate) state: RefCell<StateMirror>,
     /// The entities the server has created and not yet deleted, by id.
     pub(crate) entities: RefCell<BTreeMap<u32, ClientEntity>>,
+    /// The id blocks the server leased to this client, in the order they are
+    /// used, each `(next, end)` as in the server.
+    pub(crate) leases: RefCell<VecDeque<(u32, u32)>>,
+    /// The entities this client created that still exist, confirmed or not.
+    /// Their number is the client's own limit, `sixm_maxClientEntities`.
+    pub(crate) own_created: RefCell<BTreeSet<u32>>,
     /// The local player's ped, once the server has created it.
     pub(crate) local_ped: Cell<Option<u32>>,
     /// Owned entities this client moved since the last frame, each listed
@@ -152,6 +161,8 @@ impl ClientRuntime {
             queued: RefCell::default(),
             state: RefCell::default(),
             entities: RefCell::default(),
+            leases: RefCell::default(),
+            own_created: RefCell::default(),
             local_ped: Cell::default(),
             owned_moves: RefCell::default(),
             owned_updates: RefCell::default(),
@@ -210,16 +221,22 @@ impl ClientRuntime {
             return;
         }
         let mut updates = std::mem::take(&mut *self.owned_updates.borrow_mut());
+        let mut waiting = Vec::new();
         {
             let mut moved = self.owned_moves.borrow_mut();
             let mut entities = self.entities.borrow_mut();
             for id in moved.drain(..) {
-                // A move listed twice is sent once, because the first one clears the flags.
-                if let Some(slot) = entities.get_mut(&id).filter(|slot| slot.is_dirty()) {
-                    updates.push(slot.take_update(id));
+                match entities.get_mut(&id) {
+                    // Not confirmed yet: the server would ignore the move, so it
+                    // stays queued until the entity is confirmed.
+                    Some(slot) if slot.pending => waiting.push(id),
+                    // A move listed twice is sent once, because the first one clears the flags.
+                    Some(slot) if slot.is_dirty() => updates.push(slot.take_update(id)),
+                    _ => {}
                 }
             }
         }
+        self.owned_moves.borrow_mut().extend(waiting);
         if !updates.is_empty()
             && let Err(err) = self.client.borrow().send_entity_transforms(&updates)
         {
@@ -229,20 +246,32 @@ impl ClientRuntime {
         *self.owned_updates.borrow_mut() = updates;
     }
 
-    /// Records a created entity, and the local player's ped when it is one.
+    /// Records a created entity, and the local player's ped when it is one. An
+    /// entity this client created and was waiting for is confirmed: it keeps
+    /// the local transform, which is the newer one, and takes the epoch.
     fn create_entity(&self, id: u32, info: EntityInfo, epoch: u32) {
         if info.kind == EntityKind::Ped && info.owner == Some(self.local_player) {
             self.local_ped.set(Some(id));
         }
-        self.entities.borrow_mut().insert(
-            id,
-            ClientEntity {
-                info,
-                epoch,
-                position_dirty: false,
-                rotation_dirty: false,
-            },
-        );
+        let mut entities = self.entities.borrow_mut();
+        match entities.get_mut(&id) {
+            Some(slot) if slot.pending => {
+                slot.pending = false;
+                slot.epoch = epoch;
+            }
+            _ => {
+                entities.insert(
+                    id,
+                    ClientEntity {
+                        info,
+                        epoch,
+                        position_dirty: false,
+                        rotation_dirty: false,
+                        pending: false,
+                    },
+                );
+            }
+        }
     }
 
     /// Forgets a deleted entity, and the local ped when it was that one.
@@ -250,7 +279,55 @@ impl ClientRuntime {
         if self.local_ped.get() == Some(id) {
             self.local_ped.set(None);
         }
+        self.own_created.borrow_mut().remove(&id);
         self.entities.borrow_mut().remove(&id);
+    }
+
+    /// Takes the next id of the leases, and drops a block once it is used up.
+    /// `None` when no id is leased yet.
+    pub(crate) fn take_leased_id(&self) -> Option<u32> {
+        let mut leases = self.leases.borrow_mut();
+        let front = leases.front_mut()?;
+        let id = front.0;
+        front.0 += 1;
+        if front.0 == front.1 {
+            leases.pop_front();
+        }
+        Some(id)
+    }
+
+    /// Adds a block of ids the server leased to this client.
+    fn lease_ids(&self, first: u32, count: u32) {
+        if let Some(end) = first.checked_add(count) {
+            self.leases.borrow_mut().push_back((first, end));
+        }
+    }
+
+    /// Removes an entity the server refused, which this client had created
+    /// provisionally, and logs why.
+    fn refuse_entity(&self, id: u32, reason: &str) {
+        warn!("the server refused entity {id}: {reason}");
+        self.state
+            .borrow_mut()
+            .remove_bag(&sixm_core::entity_bag(id));
+        self.delete_entity(id);
+    }
+
+    /// Applies a change of owner from the server. The new owner takes the given
+    /// transform and starts from `epoch`, the entity's current teleport epoch,
+    /// and any local move of this client that was not sent is dropped, since
+    /// the server's transform is the one that counts now.
+    fn apply_owner(&self, id: u32, owner: u32, epoch: u32, position: [f32; 3], rotation: [f32; 3]) {
+        let mut entities = self.entities.borrow_mut();
+        let Some(slot) = entities.get_mut(&id) else {
+            return;
+        };
+        slot.info.owner = (owner != 0).then_some(owner);
+        slot.info.position = position;
+        slot.info.rotation = rotation;
+        slot.epoch = epoch;
+        slot.position_dirty = false;
+        slot.rotation_dirty = false;
     }
 
     /// Applies the transforms the server sent. An update with the epoch the
@@ -391,6 +468,15 @@ impl ClientRuntime {
             }
             ClientNotice::EntityTransforms { updates } => self.apply_transforms(&updates),
             ClientNotice::EntityDeleted { id } => self.delete_entity(id),
+            ClientNotice::EntityIdLease { first, count } => self.lease_ids(first, count),
+            ClientNotice::EntityCreateRefused { id, reason } => self.refuse_entity(id, &reason),
+            ClientNotice::EntityOwner {
+                id,
+                owner,
+                epoch,
+                position,
+                rotation,
+            } => self.apply_owner(id, owner, epoch, position, rotation),
             ClientNotice::Convars { entries } => {
                 self.convars.borrow_mut().apply_replicated(entries);
             }

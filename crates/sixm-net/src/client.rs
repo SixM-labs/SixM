@@ -67,6 +67,18 @@ pub enum ClientEvent {
     EntityTransforms { updates: Vec<EntityTransform> },
     /// An entity was deleted.
     EntityDeleted { id: u32 },
+    /// A block of entity ids this client may create entities with.
+    EntityIdLease { first: u32, count: u32 },
+    /// The server refused the entity `id` the client asked for.
+    EntityCreateRefused { id: u32, reason: String },
+    /// An entity has a new owner, `0` for the server.
+    EntityOwner {
+        id: u32,
+        owner: u32,
+        epoch: u32,
+        position: [f32; 3],
+        rotation: [f32; 3],
+    },
     /// The entities that existed when the client joined.
     EntitySnapshot { entities: Vec<EntityEntry> },
     /// Replicated convars, as `(name, value)`. A `None` value means the convar
@@ -284,6 +296,42 @@ impl NetClient {
             commands.send(frame).map_err(|_| NetError::Closed)?;
         }
         Ok(())
+    }
+
+    /// Asks the server to create an entity owned by this client, with the id
+    /// `id` from its lease. The server answers with an `EntityCreated` for the
+    /// id, or an `EntityCreateRefused`.
+    pub fn send_create_entity(
+        &self,
+        id: u32,
+        kind: u8,
+        model: u32,
+        position: [f32; 3],
+        rotation: [f32; 3],
+    ) -> Result<(), NetError> {
+        let frame = encode_frame(
+            &ClientMessage::CreateEntity {
+                id,
+                kind,
+                model,
+                position,
+                rotation,
+            },
+            MAX_FRAME,
+        )?;
+        self.send_frame(frame)
+    }
+
+    /// Asks the server for control of the entity `id`, which no player owns.
+    pub fn send_request_entity_control(&self, id: u32) -> Result<(), NetError> {
+        let frame = encode_frame(&ClientMessage::RequestEntityControl { id }, MAX_FRAME)?;
+        self.send_frame(frame)
+    }
+
+    /// Queues one encoded frame for the connection.
+    fn send_frame(&self, frame: Arc<[u8]>) -> Result<(), NetError> {
+        let commands = self.commands.as_ref().ok_or(NetError::Closed)?;
+        commands.send(frame).map_err(|_| NetError::Closed)
     }
 
     /// Waits up to `timeout` for the next event from the server. Returns `None`
@@ -537,6 +585,9 @@ async fn greet(
             | ServerMessage::EntityTransforms { .. }
             | ServerMessage::EntityDeleted { .. }
             | ServerMessage::EntitySnapshot { .. }
+            | ServerMessage::EntityIdLease { .. }
+            | ServerMessage::EntityCreateRefused { .. }
+            | ServerMessage::EntityOwner { .. }
             | ServerMessage::Convars { .. } => {
                 return Err(NetError::Protocol(
                     "the server sent a message before the welcome".to_owned(),
@@ -754,67 +805,12 @@ async fn pump_events(
     pending: Pending,
 ) {
     loop {
-        let event = match read_frame(&mut recv, MAX_FRAME).await {
+        match read_frame(&mut recv, MAX_FRAME).await {
             Ok(Some(payload)) => match decode_server_message(&payload) {
-                Ok(ServerMessage::Event { name, args }) => {
-                    ClientEvent::Event { name, args: args.0 }
-                }
-                Ok(ServerMessage::StateBag { bag, key, value }) => ClientEvent::StateBag {
-                    bag,
-                    key,
-                    value: value.0,
-                },
-                Ok(ServerMessage::StateBagRemoved { bag }) => ClientEvent::StateBagRemoved { bag },
-                Ok(ServerMessage::Resources { entries }) => ClientEvent::Resources { entries },
-                Ok(ServerMessage::ResourceStarted { entry }) => {
-                    ClientEvent::ResourceStarted { entry }
-                }
-                Ok(ServerMessage::ResourceStopped { name }) => {
-                    ClientEvent::ResourceStopped { name }
-                }
-                Ok(ServerMessage::FileUnavailable { hash }) => {
-                    let waiters = lock(&pending).remove(&hash).unwrap_or_default();
-                    for waiter in waiters {
-                        let _ = waiter.send(None);
+                Ok(message) => {
+                    if !dispatch_server_message(message, &connection, &events, &pending) {
+                        return;
                     }
-                    continue;
-                }
-                Ok(ServerMessage::StateSnapshot { entries }) => {
-                    for (bag, key, value) in entries {
-                        let event = ClientEvent::StateBag {
-                            bag,
-                            key,
-                            value: value.0,
-                        };
-                        if events.send(event).is_err() {
-                            debug!("the client handle was dropped, stopping the event reader");
-                            return;
-                        }
-                    }
-                    continue;
-                }
-                Ok(ServerMessage::EntityCreated { entity }) => {
-                    ClientEvent::EntityCreated { entity }
-                }
-                Ok(ServerMessage::EntityTransforms { updates }) => {
-                    ClientEvent::EntityTransforms { updates }
-                }
-                Ok(ServerMessage::EntityDeleted { id }) => ClientEvent::EntityDeleted { id },
-                Ok(ServerMessage::EntitySnapshot { entities }) => {
-                    ClientEvent::EntitySnapshot { entities }
-                }
-                Ok(ServerMessage::Convars { entries }) => ClientEvent::Convars { entries },
-                Ok(ServerMessage::Kicked { reason }) => {
-                    let _ = events.send(ClientEvent::Kicked { reason });
-                    return;
-                }
-                Ok(
-                    ServerMessage::Welcome { .. }
-                    | ServerMessage::Rejected { .. }
-                    | ServerMessage::Deferral { .. },
-                ) => {
-                    protocol_violation(&connection, &events, "unexpected handshake message");
-                    return;
                 }
                 Err(err) => {
                     protocol_violation(&connection, &events, &err.to_string());
@@ -830,12 +826,90 @@ async fn pump_events(
                 protocol_violation(&connection, &events, &err.to_string());
                 return;
             }
-        };
-        if events.send(event).is_err() {
-            debug!("the client handle was dropped, stopping the event reader");
-            return;
         }
     }
+}
+
+/// Handles one decoded [`ServerMessage`]. Returns `false` when the reader
+/// loop should stop.
+fn dispatch_server_message(
+    message: ServerMessage,
+    connection: &Connection,
+    events: &Sender<ClientEvent>,
+    pending: &Pending,
+) -> bool {
+    let event = match message {
+        ServerMessage::Event { name, args } => ClientEvent::Event { name, args: args.0 },
+        ServerMessage::StateBag { bag, key, value } => ClientEvent::StateBag {
+            bag,
+            key,
+            value: value.0,
+        },
+        ServerMessage::StateBagRemoved { bag } => ClientEvent::StateBagRemoved { bag },
+        ServerMessage::Resources { entries } => ClientEvent::Resources { entries },
+        ServerMessage::ResourceStarted { entry } => ClientEvent::ResourceStarted { entry },
+        ServerMessage::ResourceStopped { name } => ClientEvent::ResourceStopped { name },
+        ServerMessage::FileUnavailable { hash } => {
+            let waiters = lock(pending).remove(&hash).unwrap_or_default();
+            for waiter in waiters {
+                let _ = waiter.send(None);
+            }
+            return true;
+        }
+        ServerMessage::StateSnapshot { entries } => {
+            for (bag, key, value) in entries {
+                let event = ClientEvent::StateBag {
+                    bag,
+                    key,
+                    value: value.0,
+                };
+                if events.send(event).is_err() {
+                    debug!("the client handle was dropped, stopping the event reader");
+                    return false;
+                }
+            }
+            return true;
+        }
+        ServerMessage::EntityCreated { entity } => ClientEvent::EntityCreated { entity },
+        ServerMessage::EntityTransforms { updates } => ClientEvent::EntityTransforms { updates },
+        ServerMessage::EntityDeleted { id } => ClientEvent::EntityDeleted { id },
+        ServerMessage::EntityIdLease { first, count } => {
+            ClientEvent::EntityIdLease { first, count }
+        }
+        ServerMessage::EntityCreateRefused { id, reason } => {
+            ClientEvent::EntityCreateRefused { id, reason }
+        }
+        ServerMessage::EntityOwner {
+            id,
+            owner,
+            epoch,
+            position,
+            rotation,
+        } => ClientEvent::EntityOwner {
+            id,
+            owner,
+            epoch,
+            position,
+            rotation,
+        },
+        ServerMessage::EntitySnapshot { entities } => ClientEvent::EntitySnapshot { entities },
+        ServerMessage::Convars { entries } => ClientEvent::Convars { entries },
+        ServerMessage::Kicked { reason } => {
+            let _ = events.send(ClientEvent::Kicked { reason });
+            return false;
+        }
+        ServerMessage::Welcome { .. }
+        | ServerMessage::Rejected { .. }
+        | ServerMessage::Deferral { .. } => {
+            protocol_violation(connection, events, "unexpected handshake message");
+            return false;
+        }
+    };
+    if events.send(event).is_err() {
+        debug!("the client handle was dropped, stopping the event reader");
+        return false;
+    }
+    true
 }
 
 fn protocol_violation(connection: &Connection, events: &Sender<ClientEvent>, reason: &str) {

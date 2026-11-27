@@ -260,7 +260,9 @@ async fn read_hello(
         ClientMessage::Event { .. }
         | ClientMessage::RequestFile { .. }
         | ClientMessage::Command { .. }
-        | ClientMessage::EntityTransforms { .. } => Err(NetError::Protocol(
+        | ClientMessage::EntityTransforms { .. }
+        | ClientMessage::CreateEntity { .. }
+        | ClientMessage::RequestEntityControl { .. } => Err(NetError::Protocol(
             "the first message must be Hello".to_owned(),
         )),
     }
@@ -476,6 +478,20 @@ async fn read_loop(
             Ok(ClientMessage::EntityTransforms { updates }) => {
                 Inbound::EntityTransforms { updates }
             }
+            Ok(ClientMessage::CreateEntity {
+                id,
+                kind,
+                model,
+                position,
+                rotation,
+            }) => Inbound::CreateEntity {
+                id,
+                kind,
+                model,
+                position,
+                rotation,
+            },
+            Ok(ClientMessage::RequestEntityControl { id }) => Inbound::RequestEntityControl { id },
             Ok(ClientMessage::RequestFile { hash }) => {
                 if let Err(reason) = requests.request(hash) {
                     return Stop::Kick(reason.to_owned());
@@ -498,6 +514,23 @@ async fn read_loop(
                 Inbound::Command { line } => NetEvent::Command { player, line },
                 Inbound::EntityTransforms { updates } => {
                     NetEvent::EntityTransforms { player, updates }
+                }
+                Inbound::CreateEntity {
+                    id,
+                    kind,
+                    model,
+                    position,
+                    rotation,
+                } => NetEvent::CreateEntity {
+                    player,
+                    id,
+                    kind,
+                    model,
+                    position,
+                    rotation,
+                },
+                Inbound::RequestEntityControl { id } => {
+                    NetEvent::RequestEntityControl { player, id }
                 }
             }),
             Verdict::Drop => {
@@ -603,9 +636,26 @@ async fn receive_latent_stream(
 
 /// A decoded message from a player that is delivered if the rate limit admits it.
 enum Inbound {
-    Event { name: String, args: Vec<Value> },
-    Command { line: String },
-    EntityTransforms { updates: Vec<EntityTransform> },
+    Event {
+        name: String,
+        args: Vec<Value>,
+    },
+    Command {
+        line: String,
+    },
+    EntityTransforms {
+        updates: Vec<EntityTransform>,
+    },
+    CreateEntity {
+        id: u32,
+        kind: u8,
+        model: u32,
+        position: [f32; 3],
+        rotation: [f32; 3],
+    },
+    RequestEntityControl {
+        id: u32,
+    },
 }
 
 /// Everything the writer task owns.

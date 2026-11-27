@@ -35,6 +35,17 @@ const PLAYER_MODEL: &str = "sixm_playerModel";
 /// reading it does not allocate.
 const CULL_RADIUS: &str = "sixm_cullradius";
 
+/// Most entities one client may create at once. Replicated, so the client
+/// refuses at the same limit without asking.
+const MAX_CLIENT_ENTITIES: &str = "sixm_maxClientEntities";
+/// The limit when `sixm_maxClientEntities` is not set, and the largest one.
+const DEFAULT_MAX_CLIENT_ENTITIES: i64 = 64;
+const MAX_CLIENT_ENTITIES_LIMIT: i64 = 4096;
+/// Global entity creation lockdown mode (`inactive`, `relaxed`, `strict`),
+/// overridable per routing bucket.
+const ENTITY_LOCKDOWN: &str = "sv_entityLockdown";
+const DEFAULT_ENTITY_LOCKDOWN: &str = "inactive";
+
 /// Certificate file when `sixm_identityFile` is not set.
 const DEFAULT_IDENTITY_FILE: &str = "cache/server-identity.bin";
 /// Listen address when `endpoint_add_udp` is not set.
@@ -117,6 +128,12 @@ impl Convars {
             &DEFAULT_CULL_RADIUS.to_string(),
             ConvarKind::Plain,
         );
+        convars.set(
+            MAX_CLIENT_ENTITIES,
+            &DEFAULT_MAX_CLIENT_ENTITIES.to_string(),
+            ConvarKind::Replicated,
+        );
+        convars.set(ENTITY_LOCKDOWN, DEFAULT_ENTITY_LOCKDOWN, ConvarKind::Plain);
         convars
     }
 
@@ -250,6 +267,27 @@ impl Convars {
             .clamp(0.0, MAX_CULL_RADIUS)
     }
 
+    /// The most entities one client may create at once, from
+    /// `sixm_maxClientEntities`. Clamped to `0..=4096`; a value that is not a
+    /// number means the default of 64.
+    pub(crate) fn max_client_entities(&self) -> usize {
+        let value = self
+            .get(MAX_CLIENT_ENTITIES)
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(DEFAULT_MAX_CLIENT_ENTITIES);
+        usize::try_from(value.clamp(0, MAX_CLIENT_ENTITIES_LIMIT)).unwrap_or(0)
+    }
+
+    /// The global entity lockdown mode, from `sv_entityLockdown`: `inactive`,
+    /// `relaxed` or `strict`. Any other value falls back to `inactive`.
+    pub(crate) fn entity_lockdown(&self) -> &str {
+        match self.get(ENTITY_LOCKDOWN).map(str::trim) {
+            Some("relaxed") => "relaxed",
+            Some("strict") => "strict",
+            _ => DEFAULT_ENTITY_LOCKDOWN,
+        }
+    }
+
     /// The most players accepted at once. Clamped to `1..=1024`; a value that
     /// is not a number means the default of 32.
     pub(crate) fn max_clients(&self) -> usize {
@@ -276,10 +314,13 @@ mod tests {
     }
 
     #[test]
-    fn built_in_convars_are_plain() {
+    fn built_in_convars_are_plain_but_the_client_entity_limit() {
         let convars = Convars::new();
         assert_eq!(convars.kind(SERVER_NAME), Some(ConvarKind::Plain));
-        assert_eq!(convars.replicated(), Vec::new());
+        assert_eq!(
+            convars.replicated(),
+            vec![(MAX_CLIENT_ENTITIES.to_ascii_lowercase(), "64".to_owned())]
+        );
     }
 
     #[test]
@@ -327,15 +368,35 @@ mod tests {
         convars.set("d", "4", ConvarKind::Replicated);
         convars.set("c", "3", ConvarKind::Replicated);
         convars.set("c", "5", ConvarKind::Replicated);
+        let default_replicated = (MAX_CLIENT_ENTITIES.to_ascii_lowercase(), "64".to_owned());
         assert_eq!(
             convars.replicated(),
             [
                 ("c".to_owned(), "5".to_owned()),
                 ("d".to_owned(), "4".to_owned()),
+                default_replicated.clone(),
             ]
         );
 
         convars.set("c", "gone", ConvarKind::Plain);
-        assert_eq!(convars.replicated(), [("d".to_owned(), "4".to_owned())]);
+        assert_eq!(
+            convars.replicated(),
+            [("d".to_owned(), "4".to_owned()), default_replicated]
+        );
+    }
+
+    #[test]
+    fn entity_lockdown_accepts_known_modes_and_falls_back_to_inactive() {
+        let mut convars = Convars::new();
+        assert_eq!(convars.entity_lockdown(), "inactive");
+        for (value, expected) in [
+            ("relaxed", "relaxed"),
+            ("strict", "strict"),
+            ("bogus", "inactive"),
+            ("inactive", "inactive"),
+        ] {
+            convars.set(ENTITY_LOCKDOWN, value, ConvarKind::Plain);
+            assert_eq!(convars.entity_lockdown(), expected, "{value}");
+        }
     }
 }

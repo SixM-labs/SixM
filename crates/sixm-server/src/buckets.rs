@@ -56,11 +56,10 @@ impl BucketSettings {
         Ok(())
     }
 
-    /// The lockdown mode of `bucket`, `inactive` unless one was set.
-    pub(crate) fn lockdown_mode(&self, bucket: u32) -> &str {
-        self.lockdown
-            .get(&bucket)
-            .map_or(DEFAULT_LOCKDOWN, String::as_str)
+    /// The lockdown mode explicitly stored for `bucket`, or `None` when the
+    /// bucket falls back to `sv_entityLockdown`.
+    pub(crate) fn lockdown_mode(&self, bucket: u32) -> Option<&str> {
+        self.lockdown.get(&bucket).map(String::as_str)
     }
 }
 
@@ -92,6 +91,7 @@ impl ResourceManager {
                 entities.set_bucket(ped, bucket);
             }
         });
+        self.settle_owned_by_bucket(player);
         true
     }
 
@@ -108,6 +108,7 @@ impl ResourceManager {
             return false;
         }
         self.rebucket(|entities, _| entities.set_bucket(entity, bucket));
+        self.settle_owner_of_entity(entity);
         true
     }
 

@@ -280,6 +280,17 @@ impl ResourceManager {
             NetEvent::EntityTransforms { player, updates } => {
                 self.player_transforms(player, &updates);
             }
+            NetEvent::CreateEntity {
+                player,
+                id,
+                kind,
+                model,
+                position,
+                rotation,
+            } => self.client_create_entity(player, id, kind, model, position, rotation),
+            NetEvent::RequestEntityControl { player, id } => {
+                self.client_request_control(player, id);
+            }
             NetEvent::Disconnected { player, reason } => self.player_dropped(player, &reason),
             NetEvent::Abandoned { connection } => self.abandoned(connection),
         }
@@ -529,6 +540,7 @@ impl ResourceManager {
             player.ped = ped;
         }
         self.with_server(|server| server.accept(connection, id));
+        self.top_up_entity_ids(id);
         // The resource list goes last: a client waits for its end before it
         // starts any script, so the convars, entities and state sent before it
         // are already applied when the scripts load.
@@ -692,6 +704,7 @@ impl ResourceManager {
         if let Some(ped) = ped {
             self.remove_entity(ped);
         }
+        self.release_entities_of(player);
         self.leave_scope(player);
         self.network.players.borrow_mut().remove(player);
         self.leave_state(player);

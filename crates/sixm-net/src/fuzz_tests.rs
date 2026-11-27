@@ -282,7 +282,10 @@ fn check_input(data: &[u8]) -> usize {
             ClientMessage::EntityTransforms { updates } => {
                 assert!(updates.len() <= MAX_TRANSFORMS_PER_MESSAGE);
             }
-            ClientMessage::Hello { .. } | ClientMessage::RequestFile { .. } => {}
+            ClientMessage::Hello { .. }
+            | ClientMessage::RequestFile { .. }
+            | ClientMessage::CreateEntity { .. }
+            | ClientMessage::RequestEntityControl { .. } => {}
         }
     }
     if let Ok(message) = decode_server_message(data) {

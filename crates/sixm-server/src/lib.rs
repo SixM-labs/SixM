@@ -6,6 +6,7 @@
 
 mod access;
 mod buckets;
+mod client_entities;
 mod commands;
 mod config;
 mod console;

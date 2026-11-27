@@ -9,7 +9,7 @@ use crate::files::{FileHash, ResourceEntry};
 use crate::wire::{Args, StateValue};
 
 /// Version of the wire protocol. A client must send it in its `Hello`.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// Application protocol identifier negotiated during the TLS handshake.
 pub(crate) const ALPN: &[u8] = b"sixm/1";
@@ -43,6 +43,9 @@ pub const MAX_CONVAR_VALUE_LEN: usize = 4096;
 /// Longest progress message of a deferral, in bytes. Longer messages are cut
 /// on a character boundary when they are sent.
 pub(crate) const MAX_DEFERRAL_MESSAGE_LEN: usize = 4096;
+
+/// Most bytes of the reason in an [`ServerMessage::EntityCreateRefused`].
+pub(crate) const MAX_REFUSAL_REASON_LEN: usize = 256;
 
 /// Time a connection may stay silent before QUIC closes it.
 pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -150,6 +153,22 @@ pub(crate) enum ClientMessage {
     EntityTransforms {
         updates: Vec<EntityTransform>,
     },
+    /// Asks the server to create an entity owned by this client. `id` is the
+    /// next id of the client's lease (see [`ServerMessage::EntityIdLease`]),
+    /// and the server answers with [`ServerMessage::EntityCreated`] or
+    /// [`ServerMessage::EntityCreateRefused`].
+    CreateEntity {
+        id: u32,
+        kind: u8,
+        model: u32,
+        position: [f32; 3],
+        rotation: [f32; 3],
+    },
+    /// Asks the server to give this client the entity `id`, which no player
+    /// owns. The server grants it when the entity is in the client's scope.
+    RequestEntityControl {
+        id: u32,
+    },
 }
 
 impl ClientMessage {
@@ -163,6 +182,10 @@ impl ClientMessage {
     pub(crate) const COMMAND_TAG: u32 = 3;
     /// Variant index of [`ClientMessage::EntityTransforms`] on the wire.
     pub(crate) const ENTITY_TRANSFORMS_TAG: u32 = 4;
+    /// Variant index of [`ClientMessage::CreateEntity`] on the wire.
+    pub(crate) const CREATE_ENTITY_TAG: u32 = 5;
+    /// Variant index of [`ClientMessage::RequestEntityControl`] on the wire.
+    pub(crate) const REQUEST_ENTITY_CONTROL_TAG: u32 = 6;
 }
 
 /// Messages the server sends on the stream. Decoding is done by the wire
@@ -252,6 +275,30 @@ pub(crate) enum ServerMessage {
     Deferral {
         message: String,
     },
+    /// A block of entity ids this client may use for [`ClientMessage::CreateEntity`],
+    /// the ids `first` up to `first + count` (not included). Blocks arrive in
+    /// the order they are to be used, and the client takes ids from them in
+    /// ascending order.
+    EntityIdLease {
+        first: u32,
+        count: u32,
+    },
+    /// The server refused an entity the client asked for. The client removes
+    /// its provisional entity `id` and logs the reason.
+    EntityCreateRefused {
+        id: u32,
+        reason: String,
+    },
+    /// An entity changed owner. `owner` is 0 when the server owns it now. The
+    /// new owner takes the given transform and starts from `epoch`, which is
+    /// the entity's current teleport epoch.
+    EntityOwner {
+        id: u32,
+        owner: u32,
+        epoch: u32,
+        position: [f32; 3],
+        rotation: [f32; 3],
+    },
 }
 
 impl ServerMessage {
@@ -289,4 +336,10 @@ impl ServerMessage {
     pub(crate) const CONVARS_TAG: u32 = 15;
     /// Variant index of [`ServerMessage::Deferral`] on the wire.
     pub(crate) const DEFERRAL_TAG: u32 = 16;
+    /// Variant index of [`ServerMessage::EntityIdLease`] on the wire.
+    pub(crate) const ENTITY_ID_LEASE_TAG: u32 = 17;
+    /// Variant index of [`ServerMessage::EntityCreateRefused`] on the wire.
+    pub(crate) const ENTITY_CREATE_REFUSED_TAG: u32 = 18;
+    /// Variant index of [`ServerMessage::EntityOwner`] on the wire.
+    pub(crate) const ENTITY_OWNER_TAG: u32 = 19;
 }

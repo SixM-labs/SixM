@@ -1121,10 +1121,18 @@ impl ServerHost for ResourceManager {
         self.bucket_settings.borrow_mut().set_lockdown(bucket, mode)
     }
 
+    fn set_entity_owner(&self, entity: u32, owner: u32) -> bool {
+        self.script_set_owner(entity, owner)
+    }
+
+    fn set_entity_orphan_mode(&self, entity: u32, mode: &str) -> Result<(), ScriptError> {
+        self.script_set_orphan_mode(entity, mode)
+    }
+
     fn routing_bucket_entity_lockdown_mode(&self, bucket: u32) -> String {
-        self.bucket_settings
-            .borrow()
-            .lockdown_mode(bucket)
-            .to_owned()
+        if let Some(mode) = self.bucket_settings.borrow().lockdown_mode(bucket) {
+            return mode.to_owned();
+        }
+        self.convars.borrow().entity_lockdown().to_owned()
     }
 }
