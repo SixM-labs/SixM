@@ -127,6 +127,15 @@ pub trait Host {
     /// Root folder of a known resource (running or not).
     fn resource_path(&self, resource: &str) -> Option<PathBuf>;
 
+    /// Contents of the file `path` of resource `resource`, or `None` when the
+    /// resource is unknown or the file cannot be read. `path` is normalized
+    /// (see [`normalize_resource_path`](crate::normalize_resource_path)).
+    fn load_resource_file(&self, resource: &str, path: &str) -> Option<Vec<u8>>;
+
+    /// Writes `data` to the file `path` of resource `resource`, creating its
+    /// folders, and returns whether it was written. `path` is normalized.
+    fn save_resource_file(&self, resource: &str, path: &str, data: &[u8]) -> bool;
+
     /// Value stored under `key` in state bag `bag`, or `None` when the bag or
     /// the key is not set.
     fn state_get(&self, bag: &str, key: &str) -> Option<Value>;

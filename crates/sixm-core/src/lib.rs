@@ -14,11 +14,13 @@
 //! `RefCell` borrow across a call into a runtime or the host.
 
 mod console;
+mod files;
 mod runtime;
 mod state;
 mod value;
 
 pub use console::{TokenError, tokenize};
+pub use files::normalize_resource_path;
 pub use runtime::{
     ClientHost, ClientTarget, EventContext, EventSource, Host, PlayerInfo, ScriptError,
     ScriptRuntime, ServerHost,

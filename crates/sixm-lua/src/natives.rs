@@ -1,12 +1,12 @@
 //! Globals and the `Citizen` table that scripts see.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::sync::OnceLock;
 use std::time::Instant;
 
 use mlua::{Function, Lua, LuaString, MultiValue, Table, Value as LuaValue};
-use sixm_core::EventSource;
+use sixm_core::{EventSource, normalize_resource_path};
 
 use crate::client;
 use crate::events::handle_table;
@@ -154,15 +154,12 @@ fn install_host(
         Ok(resource_root(rt, &name)?.map(|path| path.to_string_lossy().into_owned()))
     })?;
     let load_resource_file = bind_fn(lua, weak, |rt, (resource, path): (String, String)| {
-        let Some(root) = resource_root(rt, &resource)? else {
+        let Some(path) = normalize_resource_path(&path) else {
             return Ok(None);
         };
-        let Some(full) = safe_join(&root, &path) else {
-            return Ok(None);
-        };
-        match std::fs::read(full) {
-            Ok(bytes) => Ok(Some(rt.lua.create_string(&bytes)?)),
-            Err(_) => Ok(None),
+        match rt.host()?.load_resource_file(&resource, &path) {
+            Some(bytes) => Ok(Some(rt.lua.create_string(&bytes)?)),
+            None => Ok(None),
         }
     })?;
     let save_resource_file = bind_fn(
@@ -172,15 +169,12 @@ fn install_host(
             if resource != rt.resource.as_ref() {
                 return Ok(false);
             }
-            let Some(full) = safe_join(&rt.root, &path) else {
+            let Some(path) = normalize_resource_path(&path) else {
                 return Ok(false);
             };
-            if let Some(parent) = full.parent() {
-                if std::fs::create_dir_all(parent).is_err() {
-                    return Ok(false);
-                }
-            }
-            Ok(std::fs::write(full, data.as_bytes().as_ref()).is_ok())
+            Ok(rt
+                .host()?
+                .save_resource_file(&resource, &path, data.as_bytes().as_ref()))
         },
     )?;
     let get_convar = bind_fn(
@@ -263,13 +257,4 @@ fn resource_root(rt: &LuaRuntime, name: &str) -> mlua::Result<Option<PathBuf>> {
         return Ok(Some(rt.root.clone()));
     }
     Ok(rt.host()?.resource_path(name))
-}
-
-/// Joins a relative path onto `root`, rejecting absolute paths and `..`.
-fn safe_join(root: &Path, relative: &str) -> Option<PathBuf> {
-    let path = Path::new(relative);
-    let plain = path
-        .components()
-        .all(|component| matches!(component, Component::Normal(_) | Component::CurDir));
-    plain.then(|| root.join(path))
 }

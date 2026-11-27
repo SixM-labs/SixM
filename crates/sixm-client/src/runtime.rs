@@ -3,7 +3,7 @@
 //! the frame loop around them.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -72,6 +72,9 @@ pub struct ClientRuntime {
     pub(crate) queued: RefCell<VecDeque<String>>,
     /// Replicated state and local writes.
     pub(crate) state: RefCell<StateMirror>,
+    /// The synced files of each running resource: file name (as the manifest
+    /// names it) to its path in the cache.
+    pub(crate) files: RefCell<HashMap<String, HashMap<String, PathBuf>>>,
     pub(crate) quit: Cell<bool>,
 }
 
@@ -93,6 +96,7 @@ impl ClientRuntime {
             commands: RefCell::default(),
             queued: RefCell::default(),
             state: RefCell::default(),
+            files: RefCell::default(),
             quit: Cell::new(false),
         })
     }
@@ -290,6 +294,14 @@ impl ClientRuntime {
 
         self.running.borrow_mut().push(Rc::clone(&runtime));
         self.rebuild_snapshot();
+        let synced: HashMap<String, PathBuf> = resource
+            .files
+            .iter()
+            .map(|file| (file.name.clone(), file.path.clone()))
+            .collect();
+        self.files
+            .borrow_mut()
+            .insert(resource.name.clone(), synced);
         for file in resource
             .files
             .iter()
@@ -329,6 +341,7 @@ impl ClientRuntime {
         self.dispatch_local("onClientResourceStop", &name);
         self.dispatch_local("onResourceStop", &name);
         self.release_commands_of(&name);
+        self.files.borrow_mut().remove(&*name);
         self.running
             .borrow_mut()
             .retain(|candidate| !Rc::ptr_eq(candidate, runtime));
@@ -354,23 +367,27 @@ impl ClientRuntime {
         }
     }
 
-    /// The data folder of `name`, created if needed. The name must be one plain
-    /// folder name, so that a server cannot make the client write outside its
-    /// data folder.
+    /// The data folder of `name`, created if needed.
     fn resource_dir(&self, name: &str) -> io::Result<PathBuf> {
-        let mut parts = Path::new(name).components();
-        match (parts.next(), parts.next()) {
-            (Some(Component::Normal(_)), None) => {}
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("`{name}` is not a plain folder name"),
-                ));
-            }
-        }
-        let dir = self.data_dir.join(name);
+        let dir = self.data_path(name).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("`{name}` is not a plain folder name"),
+            )
+        })?;
         fs::create_dir_all(&dir)?;
         Ok(dir)
+    }
+
+    /// The data folder of `resource`, without creating it. `None` unless
+    /// `resource` is one plain folder name, so that a server cannot make the
+    /// client reach outside its data folder.
+    pub(crate) fn data_path(&self, resource: &str) -> Option<PathBuf> {
+        let mut parts = Path::new(resource).components();
+        match (parts.next(), parts.next()) {
+            (Some(Component::Normal(_)), None) => Some(self.data_dir.join(resource)),
+            _ => None,
+        }
     }
 
     /// Whether a runtime for `name` is running.

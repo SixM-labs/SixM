@@ -37,6 +37,5 @@ pinning, file transfer), `sixm-server`, `sixm-client`. Example server in
 
 ## Known gaps
 
-- `LoadResourceFile` on the client only sees the resource's own data folder.
 - Client exports are not declared yet.
 - No game adapter yet; the client is headless.
