@@ -31,7 +31,7 @@ pub(crate) fn encode_body(name: &str, args: &[Value]) -> Result<Vec<u8>, NetErro
 }
 
 /// Bytes after the kind byte: the sequence number and the body length.
-const HEADER_LEN: usize = 8 + 4;
+pub(crate) const HEADER_LEN: usize = 8 + 4;
 /// Smallest number of bytes written at once. Slower rates write this much.
 const MIN_CHUNK_LEN: u64 = 1024;
 /// Largest number of bytes written at once.
@@ -128,6 +128,19 @@ fn due_after(sent: usize, rate: u64) -> Duration {
     Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
 }
 
+/// Splits the header of a latent stream, which follows its kind byte, into the
+/// event's sequence number and the length of its body.
+pub(crate) fn parse_latent_header(header: &[u8; HEADER_LEN]) -> (u64, usize) {
+    let mut seq = [0_u8; 8];
+    seq.copy_from_slice(&header[..8]);
+    let mut len = [0_u8; 4];
+    len.copy_from_slice(&header[8..]);
+    (
+        u64::from_le_bytes(seq),
+        usize::try_from(u32::from_le_bytes(len)).unwrap_or(usize::MAX),
+    )
+}
+
 /// Reads the kind byte of a unidirectional stream. `None` when the stream ends
 /// or fails before it.
 pub(crate) async fn read_kind(recv: &mut RecvStream) -> Option<u8> {
@@ -171,9 +184,7 @@ pub(crate) async fn receive(
         Ok(Ok(())) => {}
         _ => return None,
     }
-    let mut seq_bytes = [0_u8; 8];
-    seq_bytes.copy_from_slice(&header[..8]);
-    let seq = u64::from_le_bytes(seq_bytes);
+    let (seq, len) = parse_latent_header(&header);
     if let Some(traffic) = &traffic {
         traffic.received_stream(1 + HEADER_LEN);
     }
@@ -182,10 +193,6 @@ pub(crate) async fn receive(
         let _ = recv.stop(VarInt::from_u32(LATENT_REFUSED));
         return Some(Arrival { seq, event: None });
     };
-    let mut len_bytes = [0_u8; 4];
-    len_bytes.copy_from_slice(&header[8..]);
-    let len = usize::try_from(u32::from_le_bytes(len_bytes)).unwrap_or(usize::MAX);
-
     let event = match read_body(&mut recv, len, traffic.as_deref())
         .await
         .and_then(|body| decode_latent_body(&body))

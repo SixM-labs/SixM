@@ -1,0 +1,37 @@
+name: Fuzz
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - decode_client_message
+          - decode_server_message
+          - latent_event
+          - file_stream_header
+          - manifest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo install cargo-fuzz --locked
+      - run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=300
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: crashes-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}

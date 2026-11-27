@@ -27,7 +27,7 @@ use crate::latent::{self, LatentJob};
 use crate::protocol::{
     ClientMessage, MAX_FRAME, MAX_PLAYER_NAME_LEN, PROTOCOL_VERSION, SERVER_NAME, ServerMessage,
 };
-use crate::transfer::HEADER_LEN;
+use crate::transfer::{HEADER_LEN, parse_file_header};
 use crate::transport::{ServerVerifier, Trust, client_config, close_connection, closing_reason};
 use crate::wire::{
     decode_server_message, encode_client_transforms, encode_command, encode_event, encode_frame,
@@ -704,11 +704,7 @@ async fn receive_file(mut recv: RecvStream, pending: Pending) {
     if recv.read_exact(&mut header).await.is_err() {
         return;
     }
-    let mut hash = [0_u8; 32];
-    hash.copy_from_slice(&header[..32]);
-    let mut size_bytes = [0_u8; 8];
-    size_bytes.copy_from_slice(&header[32..]);
-    let size = u64::from_le_bytes(size_bytes);
+    let (hash, size) = parse_file_header(&header);
 
     let waiters = lock(&pending).remove(&hash);
     let Some(waiters) = waiters else {

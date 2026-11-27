@@ -16,6 +16,8 @@ mod connection;
 mod entities;
 mod error;
 mod files;
+#[doc(hidden)]
+pub mod fuzzing;
 mod identity;
 mod latent;
 mod protocol;
@@ -25,6 +27,9 @@ mod traffic;
 mod transfer;
 mod transport;
 mod wire;
+
+#[cfg(test)]
+mod fuzz_tests;
 
 pub use client::{ClientEvent, NetClient};
 pub use entities::EntityEntry;
