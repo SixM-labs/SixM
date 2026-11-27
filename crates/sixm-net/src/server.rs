@@ -20,7 +20,7 @@ use tokio::task::{Id, JoinError, JoinSet};
 use tracing::{debug, error, warn};
 
 use crate::connection::{self, Decision, Instruction, Shared, Ticket};
-use crate::entities::EntityEntry;
+use crate::entities::{EntityEntry, EntityTransform};
 use crate::error::NetError;
 use crate::files::{MAX_RESOURCE_NAME_LEN, PublishedResource, ResourceEntry, check_published};
 use crate::identity::{Credentials, Fingerprint, Identity};
@@ -107,7 +107,7 @@ pub enum NetEvent {
     /// The network does not check them; the server checks ownership and values.
     EntityTransforms {
         player: u32,
-        updates: Vec<(u32, [f32; 3], [f32; 3], u32)>,
+        updates: Vec<EntityTransform>,
     },
     /// An accepted player disconnected, was kicked, or broke the protocol.
     Disconnected { player: u32, reason: String },
@@ -427,12 +427,10 @@ impl NetServer {
     }
 
     /// Sends new transforms to every accepted player, as `(id, position,
-    /// rotation, epoch)`. The updates are split into as few frames as fit.
+    /// rotation, epoch)`, where a part is present only when it changed. The
+    /// updates are split into as few frames as fit.
     /// Nothing is sent for an empty list.
-    pub fn broadcast_entity_transforms(
-        &self,
-        updates: &[(u32, [f32; 3], [f32; 3], u32)],
-    ) -> Result<(), NetError> {
+    pub fn broadcast_entity_transforms(&self, updates: &[EntityTransform]) -> Result<(), NetError> {
         for frame in encode_entity_transforms(updates, self.max_frame)? {
             self.post(Command::Broadcast { frame })?;
         }
@@ -457,7 +455,7 @@ impl NetServer {
     pub fn send_entity_transforms(
         &self,
         player: u32,
-        updates: &[(u32, [f32; 3], [f32; 3], u32)],
+        updates: &[EntityTransform],
     ) -> Result<(), NetError> {
         for frame in encode_entity_transforms(updates, self.max_frame)? {
             self.post(Command::Send { player, frame })?;
@@ -552,10 +550,10 @@ impl NetServer {
 impl Drop for NetServer {
     fn drop(&mut self) {
         drop(self.commands.take());
-        if let Some(thread) = self.thread.take() {
-            if thread.join().is_err() {
-                error!("the network thread panicked");
-            }
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            error!("the network thread panicked");
         }
     }
 }
@@ -687,12 +685,12 @@ impl Supervisor {
                     None => self.players.values().copied().collect(),
                 };
                 for id in ids {
-                    if let Some(entry) = self.connections.get(&id) {
-                        if entry.latent.try_send(job.clone()).is_err() {
-                            entry.kick.send_replace(Some(Arc::from(
-                                crate::protocol::LATENT_QUEUE_OVERFLOW,
-                            )));
-                        }
+                    if let Some(entry) = self.connections.get(&id)
+                        && entry.latent.try_send(job.clone()).is_err()
+                    {
+                        entry
+                            .kick
+                            .send_replace(Some(Arc::from(crate::protocol::LATENT_QUEUE_OVERFLOW)));
                     }
                 }
             }
@@ -825,12 +823,11 @@ impl Supervisor {
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&id);
-        if let Some(entry) = self.connections.remove(&id) {
-            if let Some(player) = entry.player {
-                if self.players.get(&player) == Some(&id) {
-                    self.players.remove(&player);
-                }
-            }
+        if let Some(entry) = self.connections.remove(&id)
+            && let Some(player) = entry.player
+            && self.players.get(&player) == Some(&id)
+        {
+            self.players.remove(&player);
         }
     }
 

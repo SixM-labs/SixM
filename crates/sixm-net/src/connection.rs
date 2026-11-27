@@ -12,6 +12,7 @@ use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
 use tracing::{debug, warn};
 
+use crate::entities::EntityTransform;
 use crate::error::NetError;
 use crate::files::FileHash;
 use crate::identity::Fingerprint;
@@ -282,10 +283,10 @@ async fn refuse(connection: &Connection, mut send: SendStream, reason: &str, sha
 /// acknowledge it, so that the frame is not lost when the connection closes.
 async fn finish(send: &mut SendStream, last: Option<&[u8]>, traffic: &Counters) {
     let flush = async {
-        if let Some(bytes) = last {
-            if send.write_all(bytes).await.is_ok() {
-                traffic.sent(bytes.len());
-            }
+        if let Some(bytes) = last
+            && send.write_all(bytes).await.is_ok()
+        {
+            traffic.sent(bytes.len());
         }
         let _ = send.finish();
         let _ = send.stopped().await;
@@ -602,16 +603,9 @@ async fn receive_latent_stream(
 
 /// A decoded message from a player that is delivered if the rate limit admits it.
 enum Inbound {
-    Event {
-        name: String,
-        args: Vec<Value>,
-    },
-    Command {
-        line: String,
-    },
-    EntityTransforms {
-        updates: Vec<(u32, [f32; 3], [f32; 3], u32)>,
-    },
+    Event { name: String, args: Vec<Value> },
+    Command { line: String },
+    EntityTransforms { updates: Vec<EntityTransform> },
 }
 
 /// Everything the writer task owns.

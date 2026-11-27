@@ -155,10 +155,10 @@ impl Harness {
     fn expect_states(&self, client: &NetClient, wanted: &[(&str, &str)]) -> Vec<Value> {
         let mut found: Vec<Option<Value>> = vec![None; wanted.len()];
         self.wait_for("the expected state changes", || {
-            if let Some(ClientEvent::StateBag { bag, key, value }) = client.recv_timeout(STEP) {
-                if let Some(index) = wanted.iter().position(|(b, k)| *b == bag && *k == key) {
-                    found[index] = Some(value);
-                }
+            if let Some(ClientEvent::StateBag { bag, key, value }) = client.recv_timeout(STEP)
+                && let Some(index) = wanted.iter().position(|(b, k)| *b == bag && *k == key)
+            {
+                found[index] = Some(value);
             }
             found.iter().all(Option::is_some).then_some(())
         });

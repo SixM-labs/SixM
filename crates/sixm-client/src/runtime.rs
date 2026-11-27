@@ -19,6 +19,7 @@ use sixm_core::{
 };
 use sixm_kvp::KvpStore;
 use sixm_lua::LuaRuntime;
+use sixm_net::EntityTransform;
 use sixm_resources::ClientFileKind;
 use tracing::{error, info, warn};
 
@@ -35,20 +36,36 @@ pub enum Input {
     Quit(String),
 }
 
-/// An entity transform as the client sends it: the entity id, position and rotation.
-type OwnedTransform = (u32, [f32; 3], [f32; 3], u32);
-
 /// An entity as this client keeps it: the server's last state, the teleport
-/// epoch of that state, and whether this client has moved it since the last
+/// epoch of that state, and which parts this client has moved since the last
 /// frame and must tell the server.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ClientEntity {
     pub(crate) info: EntityInfo,
     /// The latest epoch the server sent for the entity. Owner updates carry it.
     pub(crate) epoch: u32,
-    /// Queued for the server at the end of the frame. Only an owned entity is
+    /// The position was moved since the last frame. Only an owned entity is
     /// ever queued.
-    pub(crate) dirty: bool,
+    pub(crate) position_dirty: bool,
+    /// The rotation was moved since the last frame.
+    pub(crate) rotation_dirty: bool,
+}
+
+impl ClientEntity {
+    /// Whether a part was moved since the last frame, so the entity is queued.
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.position_dirty || self.rotation_dirty
+    }
+
+    /// Takes the parts moved since the last frame as an update for the server,
+    /// clearing their flags.
+    fn take_update(&mut self, id: u32) -> EntityTransform {
+        let position = self.position_dirty.then_some(self.info.position);
+        let rotation = self.rotation_dirty.then_some(self.info.rotation);
+        self.position_dirty = false;
+        self.rotation_dirty = false;
+        (id, position, rotation, self.epoch)
+    }
 }
 
 /// A console command registered by a script with `RegisterCommand`.
@@ -102,7 +119,7 @@ pub struct ClientRuntime {
     /// once per move. Reused between frames.
     pub(crate) owned_moves: RefCell<Vec<u32>>,
     /// The transforms sent at the end of a frame. Reused between frames.
-    owned_updates: RefCell<Vec<OwnedTransform>>,
+    owned_updates: RefCell<Vec<EntityTransform>>,
     /// The synced files of each running resource: file name (as the manifest
     /// names it) to its path in the cache.
     pub(crate) files: RefCell<HashMap<String, HashMap<String, PathBuf>>>,
@@ -197,17 +214,16 @@ impl ClientRuntime {
             let mut moved = self.owned_moves.borrow_mut();
             let mut entities = self.entities.borrow_mut();
             for id in moved.drain(..) {
-                // A move listed twice is sent once, because the first one clears the flag.
-                if let Some(slot) = entities.get_mut(&id).filter(|slot| slot.dirty) {
-                    slot.dirty = false;
-                    updates.push((id, slot.info.position, slot.info.rotation, slot.epoch));
+                // A move listed twice is sent once, because the first one clears the flags.
+                if let Some(slot) = entities.get_mut(&id).filter(|slot| slot.is_dirty()) {
+                    updates.push(slot.take_update(id));
                 }
             }
         }
-        if !updates.is_empty() {
-            if let Err(err) = self.client.borrow().send_entity_transforms(&updates) {
-                warn!("cannot send the entity transforms: {err}");
-            }
+        if !updates.is_empty()
+            && let Err(err) = self.client.borrow().send_entity_transforms(&updates)
+        {
+            warn!("cannot send the entity transforms: {err}");
         }
         updates.clear();
         *self.owned_updates.borrow_mut() = updates;
@@ -223,7 +239,8 @@ impl ClientRuntime {
             ClientEntity {
                 info,
                 epoch,
-                dirty: false,
+                position_dirty: false,
+                rotation_dirty: false,
             },
         );
     }
@@ -238,10 +255,12 @@ impl ClientRuntime {
 
     /// Applies the transforms the server sent. An update with the epoch the
     /// client already knows for an entity it owns is its own move echoed back,
-    /// and is skipped. Any other update is a server move, which replaces the
-    /// transform, takes the new epoch and drops a local move not yet sent.
-    /// Unknown entities are ignored.
-    fn apply_transforms(&self, updates: &[(u32, [f32; 3], [f32; 3], u32)]) {
+    /// and is skipped. Any other update is a server move: each part it carries
+    /// replaces the client's part and drops a local move of that part not yet
+    /// sent, and the new epoch is taken. A part it does not carry keeps the
+    /// client's value, and a local move of it is still sent. Unknown entities
+    /// are ignored.
+    fn apply_transforms(&self, updates: &[EntityTransform]) {
         let mut entities = self.entities.borrow_mut();
         for &(id, position, rotation, epoch) in updates {
             let Some(slot) = entities.get_mut(&id) else {
@@ -250,10 +269,15 @@ impl ClientRuntime {
             if slot.info.owner == Some(self.local_player) && slot.epoch == epoch {
                 continue;
             }
-            slot.info.position = position;
-            slot.info.rotation = rotation;
+            if let Some(position) = position {
+                slot.info.position = position;
+                slot.position_dirty = false;
+            }
+            if let Some(rotation) = rotation {
+                slot.info.rotation = rotation;
+                slot.rotation_dirty = false;
+            }
             slot.epoch = epoch;
-            slot.dirty = false;
         }
     }
 
@@ -592,10 +616,10 @@ impl ClientRuntime {
             EventContext::invoked_by(name.clone())
         });
         for runtime in snapshot.iter() {
-            if runtime.handles_event(event) {
-                if let Err(err) = runtime.deliver_event(event, source, args, &ctx) {
-                    error!(target: "sixm::script", "[{}] {event}: {err}", runtime.resource());
-                }
+            if runtime.handles_event(event)
+                && let Err(err) = runtime.deliver_event(event, source, args, &ctx)
+            {
+                error!(target: "sixm::script", "[{}] {event}: {err}", runtime.resource());
             }
         }
         ctx.is_canceled()

@@ -151,10 +151,10 @@ impl Host for ClientRuntime {
             return false;
         };
         let full = dir.join(path);
-        if let Some(parent) = full.parent() {
-            if fs::create_dir_all(parent).is_err() {
-                return false;
-            }
+        if let Some(parent) = full.parent()
+            && fs::create_dir_all(parent).is_err()
+        {
+            return false;
         }
         fs::write(full, data).is_ok()
     }
@@ -297,14 +297,16 @@ impl ClientHost for ClientRuntime {
                 "entity {entity} is not owned by this client"
             )));
         }
+        let queued = slot.is_dirty();
         if let Some(position) = position {
             slot.info.position = position;
+            slot.position_dirty = true;
         }
         if let Some(rotation) = rotation {
             slot.info.rotation = rotation;
+            slot.rotation_dirty = true;
         }
-        if !slot.dirty {
-            slot.dirty = true;
+        if !queued && slot.is_dirty() {
             self.owned_moves.borrow_mut().push(entity);
         }
         Ok(())
