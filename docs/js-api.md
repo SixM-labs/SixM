@@ -166,11 +166,13 @@ All core utility, command, convar, resource, and KVP functions match
 - **General & Commands:** `GetHashKey`, `RegisterCommand`,
   `GetRegisteredCommands`, `ExecuteCommand`, `GetConvar`, `GetConvarInt`,
   `GetConvarFloat`, `GetConvarBool`, `SetConvar`, `SetConvarReplicated`,
-  `SetConvarServerInfo`, `AddConvarChangeListener`, `RemoveConvarChangeListener`.
+  `SetConvarServerInfo`, `SetGameType` and `SetMapName` (server, set the
+  `gametype` / `mapname` server-info convars), `GetGameName`, `GetGameBuildNumber`,
+  `GetInstanceId`, `AddConvarChangeListener`, `RemoveConvarChangeListener`.
 - **Resources:** `GetCurrentResourceName`, `GetInvokingResource` (returns `null`
   when called without a resource invoker), `GetResourceState`, `GetNumResources`,
   `GetResourceByFindIndex`, `GetResourceMetadata`, `GetNumResourceMetadata`,
-  `GetResourcePath`, `LoadResourceFile` (returns `null` if missing),
+  `GetResourceCommands`, `GetResourcePath`, `LoadResourceFile` (returns `null` if missing),
   `SaveResourceFile`, `StartResource` (server, ACE-gated),
   `StopResource` (server, ACE-gated), `RestartResource` (server, ACE-gated).
 - **KVP:** `GetResourceKvpString`, `GetResourceKvpInt`, `GetResourceKvpFloat`,
@@ -187,7 +189,9 @@ All core utility, command, convar, resource, and KVP functions match
   `GetPlayerLastMsg`, `GetPlayerPed`, `GetPlayerIdentifiers`,
   `GetNumPlayerIdentifiers`, `GetPlayerIdentifier`,
   `GetPlayerIdentifierByType`, `GetNumPlayerTokens`, `GetPlayerToken`,
-  `DropPlayer`, `IsPlayerAceAllowed`, `IsPrincipalAceAllowed`.
+  `GetPlayerGuid`, `GetPlayerTimeOnline`, `GetPlayerFromIndex`, `GetHostId`
+  (these return `undefined` for nil), `DropPlayer`, `IsAceAllowed`,
+  `IsPlayerAceAllowed`, `IsPrincipalAceAllowed`.
 - **Client identity & pool:** `PlayerId()` (`0`), `GetPlayerServerId`,
   `PlayerPedId`, `GetGamePool`, `IsDuplicityVersion()`.
 - **Entities (server & shared readers):** `DoesEntityExist`, `GetEntityCoords`,

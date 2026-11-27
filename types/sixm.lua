@@ -369,6 +369,11 @@ function GetResourceMetadata(resource, key, index) end
 ---@return integer
 function GetNumResourceMetadata(resource, key) end
 
+--- Returns a sorted array of the console command names `resource` registered, or `{}`.
+---@param resource string
+---@return string[]
+function GetResourceCommands(resource) end
+
 --- Starts resource `name` if allowed by `command.start` ACE permission. (Server only)
 ---@param name string
 ---@return boolean
@@ -509,6 +514,14 @@ function SetConvarReplicated(name, value) end
 ---@param value string
 function SetConvarServerInfo(name, value) end
 
+--- Sets the `gametype` server info convar. (Server only)
+---@param name string
+function SetGameType(name) end
+
+--- Sets the `mapname` server info convar. (Server only)
+---@param name string
+function SetMapName(name) end
+
 --- Registers a listener invoked when convars matching glob `filter` (`nil` or `""` for all) change.
 ---@param filter string?
 ---@param fn fun(convarName: string, reserved: integer)
@@ -532,6 +545,18 @@ function RegisterCommand(name, fn, restricted) end
 --- Returns a sorted array of registered command descriptors `{ name = ... }`.
 ---@return { name: string }[]
 function GetRegisteredCommands() end
+
+--- Returns `'sixm'` on a server and `'headless'` on a client.
+---@return string
+function GetGameName() end
+
+--- Returns the game build number, always `0`.
+---@return integer
+function GetGameBuildNumber() end
+
+--- Returns the process id, stable for the life of the process.
+---@return integer
+function GetInstanceId() end
 
 -- =============================================================================
 -- Players (server and client)
@@ -575,6 +600,25 @@ function GetNumPlayerIdentifiers(player) end
 ---@param index integer
 ---@return string?
 function GetPlayerIdentifier(player, index) end
+
+--- Returns the hex part of the player's `license:` identifier, or `nil`. (Server only)
+---@param player integer | string
+---@return string?
+function GetPlayerGuid(player) end
+
+--- Returns whole seconds since the player was admitted, or `nil`. (Server only)
+---@param player integer | string
+---@return integer?
+function GetPlayerTimeOnline(player) end
+
+--- Returns the player at 0-based `index` of the join-order player list as a string, or `nil`. (Server only)
+---@param index integer
+---@return string?
+function GetPlayerFromIndex(index) end
+
+--- Returns the lowest connected player id as a string, or `nil` when nobody is connected. (Server only)
+---@return string?
+function GetHostId() end
 
 --- Returns the first identifier whose prefix before `:` equals `kind`, or `nil`. (Server only)
 ---@param player integer | string
@@ -624,6 +668,11 @@ function IsPlayerAceAllowed(player, object) end
 ---@param object string
 ---@return boolean
 function IsPrincipalAceAllowed(principal, object) end
+
+--- Returns whether the calling resource (`resource.<name>`) is allowed ACE `object`. (Server only)
+---@param object string
+---@return boolean
+function IsAceAllowed(object) end
 
 --- Returns the local client player handle (`0`). (Client only)
 ---@return integer

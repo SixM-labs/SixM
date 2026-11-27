@@ -229,6 +229,7 @@ The rules that follow from these:
 | `GetResourceByFindIndex` | both | `GetResourceByFindIndex(index)`. Returns the name at the 0-based `index` of the resource list, or `nil`. |
 | `GetResourceMetadata` | both | `GetResourceMetadata(resource, key, index)`. Returns the value at the 0-based `index` of the metadata `key` of `resource`, or `nil`. |
 | `GetNumResourceMetadata` | both | `GetNumResourceMetadata(resource, key)`. Returns how many values the metadata `key` of `resource` has. |
+| `GetResourceCommands` | both | `GetResourceCommands(resource)`. Returns a sorted array of the names of the console commands `resource` registered, in lowercase, or an empty table for an unknown resource. |
 | `StartResource` | server | `StartResource(name)`. Starts `name` if allowed (`command.start` ACE permission for `resource.<caller>`), returning whether it was started. |
 | `StopResource` | server | `StopResource(name)`. Stops `name` if allowed (`command.stop` ACE permission for `resource.<caller>`), returning whether it was stopped. |
 | `RestartResource` | server | `RestartResource(name)`. Restarts `name` (and any running dependents, in dependency order; starts `name` if stopped) if allowed (`command.restart` ACE permission for `resource.<caller>`), returning a boolean. Resolves `provide` aliases. |
@@ -353,11 +354,16 @@ plain names, because every write is batched (see below).
 | `SetConvar` | server | `SetConvar(name, value)`. Stores a plain convar, which only the server keeps. |
 | `SetConvarReplicated` | server | `SetConvarReplicated(name, value)`. Stores a replicated convar. Every connected player gets it at once, and players who join later get it too. Fails, and changes nothing, when the name is longer than 256 bytes or the value longer than 4096 bytes. |
 | `SetConvarServerInfo` | server | `SetConvarServerInfo(name, value)`. Stores a convar marked as server information. Nothing sends it anywhere yet. |
+| `SetGameType` | server | `SetGameType(name)`. Sets the `gametype` server-info convar, shown in `/info.json` `vars`. Errors as `SetConvar` does. |
+| `SetMapName` | server | `SetMapName(name)`. Sets the `mapname` server-info convar, shown in `/info.json` `vars`. Errors as `SetConvar` does. |
 | `AddConvarChangeListener` | both | `AddConvarChangeListener(filter, fn)`. Calls `fn(convarName, reserved)` when a matching convar changes (`*`/`?` globs, case-insensitive, `nil` or `""` matches all). Returns a numeric cookie. |
 | `RemoveConvarChangeListener` | both | `RemoveConvarChangeListener(cookie)`. Removes the listener returned by `AddConvarChangeListener`. |
 | `ExecuteCommand` | both | `ExecuteCommand(line)`. Queues a console line. It runs after the current script call returns. On a server it runs with the rights of the calling resource, as its principal `resource.<name>`. On a client it runs locally, as a typed console line. |
 | `RegisterCommand` | both | `RegisterCommand(name, fn [, restricted])`. Registers a console command. `fn` is called as `fn(source, args, raw)`, where `source` is the player's id or `0` (the console), `args` is an array of strings and `raw` is the line. |
 | `GetRegisteredCommands` | both | `GetRegisteredCommands()`. Returns a sorted array of `{ name = ... }` tables for built-in and script commands. |
+| `GetGameName` | both | `GetGameName()`. Returns `sixm` on a server and `headless` on a client. Constant. |
+| `GetGameBuildNumber` | both | `GetGameBuildNumber()`. Returns `0`. Constant. |
+| `GetInstanceId` | both | `GetInstanceId()`. Returns the process id as an integer, stable for the life of the process. |
 
 - Convar names are case-insensitive.
 - The setters take effect at once, not after the current call, and follow the
@@ -396,10 +402,15 @@ plain names, because every write is batched (see below).
 | `GetNumPlayerIdentifiers` | `GetNumPlayerIdentifiers(player)`. Returns the number of identifiers as an integer, `0` for an unknown player. |
 | `GetPlayerIdentifier` | `GetPlayerIdentifier(player, index)`. Returns the identifier at the 0-based `index`, or `nil`. |
 | `GetPlayerIdentifierByType` | `GetPlayerIdentifierByType(player, kind)`. Returns the first identifier whose text before `:` is `kind`, whole, for example `license:<hex>`, or `nil`. |
+| `GetPlayerGuid` | `GetPlayerGuid(player)`. Returns the hex part of the player's `license:` identifier (the text after `license:`), or `nil` for an unknown player or one without a license. |
+| `GetPlayerTimeOnline` | `GetPlayerTimeOnline(player)`. Returns whole seconds since the server admitted the player (after `playerConnecting` and deferrals), or `nil` for an unknown or still-connecting player. |
+| `GetPlayerFromIndex` | `GetPlayerFromIndex(index)`. Returns the player at the 0-based `index` of the connected-player list (join order), as a decimal string like `GetPlayers`, or `nil` when `index` is out of range or not a non-negative whole number. |
+| `GetHostId` | `GetHostId()`. Returns the lowest connected player id as a string, or `nil` when nobody is connected. |
 | `GetPlayerLastMsg` | `GetPlayerLastMsg(player)`. Returns milliseconds since the last message from the player, or `-1`. |
 | `GetNumPlayerTokens` | `GetNumPlayerTokens(player)`. Returns the number of client identity tokens (`1` for a connected player, `0` when unknown). |
 | `GetPlayerToken` | `GetPlayerToken(player, index)`. Returns the token at 0-based `index` (`0:<fingerprint>`), or `nil`. |
 | `DropPlayer` | `DropPlayer(player [, reason])`. Disconnects the player after the current call. The default reason is `Dropped by server`. |
+| `IsAceAllowed` | `IsAceAllowed(object)`. Returns whether the calling resource, as the principal `resource.<name>`, may use `object`. |
 | `IsPlayerAceAllowed` | `IsPlayerAceAllowed(player, object)`. Returns whether the player may use `object`, as the principal `player.<id>` with the identifiers it has. `false` for an id that is not connected. See [server.md](server.md#permissions). |
 | `IsPrincipalAceAllowed` | `IsPrincipalAceAllowed(principal, object)`. Returns whether the principal, such as `group.admin`, may use `object`. Names are case-insensitive. |
 | `Player` | `Player(id)`. Returns a table with a `state` field: the player's state bag. Raises an error when the id is not a number or a numeric string. |

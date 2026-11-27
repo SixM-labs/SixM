@@ -9,7 +9,8 @@ use crate::players::server;
 use crate::runtime::{LuaRuntime, bind_fn};
 
 /// Installs `GetInvokingResource`, `GetResourceState`, `GetNumResources`,
-/// `GetResourceByFindIndex`, `GetResourceMetadata` and `GetNumResourceMetadata`.
+/// `GetResourceByFindIndex`, `GetResourceMetadata`, `GetNumResourceMetadata` and
+/// `GetResourceCommands`.
 pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::Result<()> {
     let invoking = bind_fn(lua, weak, |rt, (): ()| match rt.current_invoker() {
         Some(name) => Ok(Some(rt.lua.create_string(name.as_bytes())?)),
@@ -43,6 +44,11 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
         i64::try_from(count).map_err(mlua::Error::runtime)
     })?;
 
+    let resource_commands = bind_fn(lua, weak, |rt, (resource,): (String,)| {
+        let names = rt.host()?.resource_commands(&resource);
+        rt.lua.create_sequence_from(names)
+    })?;
+
     let functions = [
         ("GetInvokingResource", invoking),
         ("GetResourceState", state),
@@ -50,6 +56,7 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
         ("GetResourceByFindIndex", find_index),
         ("GetResourceMetadata", metadata),
         ("GetNumResourceMetadata", num_metadata),
+        ("GetResourceCommands", resource_commands),
     ];
     for (name, function) in functions {
         globals.raw_set(name, function)?;

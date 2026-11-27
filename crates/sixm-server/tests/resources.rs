@@ -1,5 +1,6 @@
 //! Resource natives on the server: lifecycle states seen from scripts, the
-//! sorted resource list and manifest metadata.
+//! sorted resource list, manifest metadata and the command, game type and
+//! instance natives.
 
 mod common;
 
@@ -367,4 +368,44 @@ fn restart_resource_native_checks_ace_and_supports_aliases() {
         )
         .expect("call export");
     assert_eq!(missing, vec![Value::Bool(false)]);
+}
+
+#[test]
+fn resource_commands_game_type_and_instance_id_work_on_the_real_manager() {
+    let fx = Fixture::new();
+    fx.add_resource(
+        "info",
+        &manifest(&["server.lua"], &["commands", "setup", "instance"], &[]),
+        &[(
+            "server.lua",
+            "RegisterCommand('alpha', function() end, false)\n\
+             exports('commands', function() return GetResourceCommands('info') end)\n\
+             exports('setup', function()\n\
+                 SetGameType('race')\n\
+                 SetMapName('m')\n\
+             end)\n\
+             exports('instance', function() return GetInstanceId() end)\n",
+        )],
+    );
+
+    fx.manager().start("info").expect("info starts");
+    assert_eq!(
+        fx.manager()
+            .call_export("info", "commands", &[], None)
+            .expect("call export"),
+        vec![Value::Array(vec![Value::from("alpha")])]
+    );
+
+    fx.manager()
+        .call_export("info", "setup", &[], None)
+        .expect("call export");
+    assert_eq!(fx.manager().get_convar("gametype"), Some("race".to_owned()));
+    assert_eq!(fx.manager().get_convar("mapname"), Some("m".to_owned()));
+
+    assert_eq!(
+        fx.manager()
+            .call_export("info", "instance", &[], None)
+            .expect("call export"),
+        vec![Value::Int(i64::from(std::process::id()))]
+    );
 }

@@ -318,6 +318,18 @@ fn install_convar_listeners(
     globals.raw_set("AddConvarChangeListener", add_convar_listener)?;
     globals.raw_set("RemoveConvarChangeListener", remove_convar_listener)?;
     globals.raw_set("GetRegisteredCommands", registered_commands)?;
+    let game_name = bind_fn(lua, weak, |rt, (): ()| {
+        Ok(if rt.host()?.server().is_some() {
+            "sixm"
+        } else {
+            "headless"
+        })
+    })?;
+    let game_build_number = bind_fn(lua, weak, |_, (): ()| Ok(0_i64))?;
+    let instance_id = bind_fn(lua, weak, |_, (): ()| Ok(i64::from(std::process::id())))?;
+    globals.raw_set("GetGameName", game_name)?;
+    globals.raw_set("GetGameBuildNumber", game_build_number)?;
+    globals.raw_set("GetInstanceId", instance_id)?;
     Ok(())
 }
 
@@ -334,6 +346,15 @@ fn install_server_convars(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -
         let setter = bind_fn(lua, weak, move |rt, (convar, value): (String, String)| {
             players::server(&*rt.host()?)?
                 .set_convar_for_resource(&rt.resource, &convar, &value, kind)
+                .map_err(lua_err)
+        })?;
+        globals.raw_set(name, setter)?;
+    }
+    let server_info_setters = [("SetGameType", "gametype"), ("SetMapName", "mapname")];
+    for (name, convar) in server_info_setters {
+        let setter = bind_fn(lua, weak, move |rt, (value,): (String,)| {
+            players::server(&*rt.host()?)?
+                .set_convar_for_resource(&rt.resource, convar, &value, ConvarKind::ServerInfo)
                 .map_err(lua_err)
         })?;
         globals.raw_set(name, setter)?;

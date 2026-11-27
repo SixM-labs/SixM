@@ -10,7 +10,7 @@ use sixm_core::{EventContext, EventSource, GLOBAL_BAG, Host, ScriptRuntime, Valu
 use sixm_lua::LuaRuntime;
 
 /// Globals that exist only on servers.
-const SERVER_ONLY: [&str; 7] = [
+const SERVER_ONLY: [&str; 14] = [
     "TriggerClientEvent",
     "TriggerLatentClientEvent",
     "GetPlayers",
@@ -18,6 +18,13 @@ const SERVER_ONLY: [&str; 7] = [
     "GetPlayerName",
     "GetPlayerPing",
     "DropPlayer",
+    "IsAceAllowed",
+    "GetPlayerGuid",
+    "GetPlayerTimeOnline",
+    "GetPlayerFromIndex",
+    "GetHostId",
+    "SetGameType",
+    "SetMapName",
 ];
 
 /// Globals that exist only on clients.
@@ -292,5 +299,31 @@ fn citizen_trace_accepts_text_on_both_sides() {
 
         assert_eq!(first(&runtime, "kind"), Value::from("function"));
         assert_eq!(first(&runtime, "raises"), Value::Bool(false));
+    }
+}
+
+#[test]
+fn info_natives_answer_per_side() {
+    let script = "exports('name', function() return GetGameName() end)\n\
+                  exports('build', function() return GetGameBuildNumber() end)\n\
+                  exports('instance', function() return GetInstanceId() end)\n\
+                  exports('ace', function() return type(IsAceAllowed) end)\n";
+    let exports = ["name", "build", "instance", "ace"];
+
+    let server_host = new_host();
+    let server = start(&server_host, "info", &exports, &[("main.lua", script)]);
+    assert_eq!(first(&server, "name"), Value::from("sixm"));
+
+    let client_host = new_client_host(1);
+    let client = start(&client_host, "info", &exports, &[("main.lua", script)]);
+    assert_eq!(first(&client, "name"), Value::from("headless"));
+    assert_eq!(first(&client, "ace"), Value::from("nil"));
+
+    for runtime in [&server, &client] {
+        assert_eq!(first(runtime, "build"), Value::Int(0));
+        assert_eq!(
+            first(runtime, "instance"),
+            Value::Int(i64::from(std::process::id()))
+        );
     }
 }

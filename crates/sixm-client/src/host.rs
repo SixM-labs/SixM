@@ -282,6 +282,15 @@ impl Host for ClientRuntime {
         names
     }
 
+    fn resource_commands(&self, resource: &str) -> Vec<String> {
+        self.commands
+            .borrow()
+            .iter()
+            .filter(|(_, command)| command.handler.owner.as_ref() == resource)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     fn entity_script(&self, entity: u32) -> Option<String> {
         self.entity_scripts.borrow().get(&entity).cloned()
     }

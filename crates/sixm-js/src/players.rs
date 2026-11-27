@@ -1,7 +1,8 @@
 //! Server-only player functions: `emitNet` / `TriggerClientEvent`,
 //! `TriggerLatentClientEvent`, `getPlayers` / `GetPlayers`, `GetNumPlayerIndices`,
 //! `DoesPlayerExist`, `GetPlayerName`, `GetPlayerPing`, `GetPlayerPed`,
-//! `GetPlayerEndpoint`, identifier natives, `DropPlayer`, ACE checks, and `Player(id)`.
+//! `GetPlayerEndpoint`, identifier natives, `GetPlayerGuid`, `GetPlayerTimeOnline`,
+//! `GetPlayerFromIndex`, `GetHostId`, `DropPlayer`, ACE checks, and `Player(id)`.
 
 use std::rc::Weak;
 
@@ -20,6 +21,7 @@ pub(crate) fn install(ctx: &Ctx<'_>, weak: &Weak<JsRuntime>) -> rquickjs::Result
     install_event_senders(ctx, weak)?;
     install_roster(ctx, weak)?;
     install_identifiers(ctx, weak)?;
+    install_connection_info(ctx, weak)?;
     install_tokens_and_last_msg(ctx, weak)?;
     install_acl_and_player(ctx, weak)?;
     Ok(())
@@ -177,11 +179,81 @@ fn install_identifiers<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs:
             },
         )?
     };
+    let get_player_guid = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, player: JsValue<'js>| -> rquickjs::Result<Option<String>> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                let identifiers = identifiers_of_player(&rt, &ctx, &player)?;
+                Ok(identifiers
+                    .iter()
+                    .find(|identifier| identifier_kind(identifier) == Some("license"))
+                    .and_then(|identifier| identifier.split_once(':'))
+                    .map(|(_, guid)| guid.to_owned()))
+            },
+        )?
+    };
     for (name, func) in [
         ("GetPlayerIdentifiers", get_player_identifiers),
         ("GetNumPlayerIdentifiers", get_num_player_identifiers),
         ("GetPlayerIdentifier", get_player_identifier),
         ("GetPlayerIdentifierByType", get_player_identifier_by_type),
+        ("GetPlayerGuid", get_player_guid),
+    ] {
+        globals.set(name, func)?;
+    }
+    Ok(())
+}
+
+fn install_connection_info<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::Result<()> {
+    let globals = ctx.globals();
+    let get_player_time_online = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, player: JsValue<'js>| -> rquickjs::Result<Option<i64>> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                let Some(id) = player_id(&player) else {
+                    return Ok(None);
+                };
+                let online = server(&ctx, &*rt.host(&ctx)?)?.player_time_online(id);
+                online
+                    .map(|d| {
+                        i64::try_from(d.as_secs())
+                            .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))
+                    })
+                    .transpose()
+            },
+        )?
+    };
+    let get_player_from_index = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, index: JsValue<'js>| -> rquickjs::Result<Option<String>> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                let players = server(&ctx, &*rt.host(&ctx)?)?.players();
+                let index = whole_number(&index).and_then(|i| usize::try_from(i).ok());
+                Ok(index.and_then(|i| players.get(i).map(u32::to_string)))
+            },
+        )?
+    };
+    let get_host_id = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>| -> rquickjs::Result<Option<String>> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                let players = server(&ctx, &*rt.host(&ctx)?)?.players();
+                Ok(players.iter().min().map(u32::to_string))
+            },
+        )?
+    };
+    for (name, func) in [
+        ("GetPlayerTimeOnline", get_player_time_online),
+        ("GetPlayerFromIndex", get_player_from_index),
+        ("GetHostId", get_host_id),
     ] {
         globals.set(name, func)?;
     }
@@ -268,6 +340,17 @@ fn install_acl_and_player<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquick
             },
         )?
     };
+    let is_ace_allowed = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, object: String| -> rquickjs::Result<bool> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                let principal = format!("resource.{}", rt.resource);
+                Ok(server(&ctx, &*rt.host(&ctx)?)?.is_ace_allowed(&principal, &object))
+            },
+        )?
+    };
     let is_player_ace_allowed = {
         let weak = weak.clone();
         Function::new(
@@ -311,6 +394,7 @@ fn install_acl_and_player<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquick
     };
     for (name, func) in [
         ("DropPlayer", drop_player),
+        ("IsAceAllowed", is_ace_allowed),
         ("IsPlayerAceAllowed", is_player_ace_allowed),
         ("IsPrincipalAceAllowed", is_principal_ace_allowed),
         ("Player", player),

@@ -9,6 +9,9 @@ may change the protocol and the API.
 
 ### Added
 
+- ACE and info natives: `IsAceAllowed`, `GetGameName`, `GetGameBuildNumber`,
+  `GetInstanceId`, `GetPlayerGuid`, `GetPlayerTimeOnline`, `GetPlayerFromIndex`, `GetHostId`, `SetGameType`,
+  `SetMapName`, `GetResourceCommands`; new `Host::resource_commands` and `ServerHost::player_time_online`.
 - State bag natives `GetStateBagValue`, `SetStateBagValue`, `StateBagHasKey`,
   `GetStateBagKeys` and `EnsureEntityStateBag` (Lua and JavaScript); new `Host::state_keys`.
 - Lua `Citizen.Trace` and `PerformHttpRequestAwait`; JS `addEventListener`,

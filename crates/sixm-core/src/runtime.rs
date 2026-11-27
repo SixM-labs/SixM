@@ -368,6 +368,11 @@ pub trait Host {
         Vec::new()
     }
 
+    /// Names of the console commands that `resource` registered, sorted ascending.
+    fn resource_commands(&self, _resource: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Name of the resource that created `entity`, when known by the host.
     fn entity_script(&self, _entity: u32) -> Option<String> {
         None
@@ -603,6 +608,12 @@ pub trait ServerHost {
     /// Deterministic tokens proving a player's client certificate identity.
     fn player_tokens(&self, _player: u32) -> Vec<String> {
         Vec::new()
+    }
+
+    /// How long `player` has been connected, counted from when the server accepted the
+    /// connection. `None` for an unknown player.
+    fn player_time_online(&self, _player: u32) -> Option<Duration> {
+        None
     }
 }
 

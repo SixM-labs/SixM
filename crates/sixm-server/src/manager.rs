@@ -1326,6 +1326,15 @@ impl Host for ResourceManager {
         names
     }
 
+    fn resource_commands(&self, resource: &str) -> Vec<String> {
+        self.commands
+            .borrow()
+            .iter()
+            .filter(|(_, command)| command.handler.owner.as_ref() == resource)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     fn entity_script(&self, entity: u32) -> Option<String> {
         self.entities.borrow().script(entity)
     }
@@ -1607,6 +1616,10 @@ impl ServerHost for ResourceManager {
 
     fn player_tokens(&self, player: u32) -> Vec<String> {
         self.player_tokens_of(player)
+    }
+
+    fn player_time_online(&self, player: u32) -> Option<std::time::Duration> {
+        self.player_online_for(player)
     }
 
     fn routing_bucket_entity_lockdown_mode(&self, bucket: u32) -> String {

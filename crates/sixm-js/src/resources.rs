@@ -1,7 +1,7 @@
 //! Resource natives: `GetInvokingResource`, `GetResourceState`,
 //! `GetNumResources`, `GetResourceByFindIndex`, `GetResourceMetadata`,
-//! `GetNumResourceMetadata`, `StartResource`, `StopResource`, and
-//! `RestartResource`.
+//! `GetNumResourceMetadata`, `GetResourceCommands`, `StartResource`, `StopResource`,
+//! and `RestartResource`.
 
 use std::rc::Weak;
 
@@ -106,8 +106,23 @@ pub(crate) fn install<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::
             )?,
         )?;
     }
+    install_commands(ctx, weak)
+}
 
-    Ok(())
+/// Installs `GetResourceCommands`, the console commands a resource registered.
+fn install_commands<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::Result<()> {
+    let globals = ctx.globals();
+    let weak = weak.clone();
+    globals.set(
+        "GetResourceCommands",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, resource: String| -> rquickjs::Result<Vec<String>> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                Ok(rt.host(&ctx)?.resource_commands(&resource))
+            },
+        )?,
+    )
 }
 
 pub(crate) fn install_server(ctx: &Ctx<'_>, weak: &Weak<JsRuntime>) -> rquickjs::Result<()> {

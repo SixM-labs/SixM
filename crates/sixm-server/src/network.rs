@@ -127,6 +127,9 @@ pub(crate) struct Player {
     /// The player's own ped, created when it is admitted and deleted when it
     /// leaves.
     ped: Option<u32>,
+    /// When the server accepted this player's connection. Set again at admission,
+    /// so time spent in `playerConnecting` and deferrals does not count.
+    connected_at: Instant,
     /// When the last message arrived from this player.
     last_msg: Instant,
     /// Deterministic client tokens derived from the player's TLS certificate fingerprint.
@@ -161,6 +164,7 @@ impl Player {
             deferral: None,
             functions: Vec::new(),
             ped: None,
+            connected_at: Instant::now(),
             last_msg: Instant::now(),
             tokens,
             event_bucket: None,
@@ -663,6 +667,7 @@ impl ResourceManager {
             let mut players = self.network.players.borrow_mut();
             players.get_mut(id).map(|player| {
                 player.admitted = true;
+                player.connected_at = Instant::now();
                 player.deferral = None;
                 (
                     player.connection,
@@ -966,6 +971,16 @@ impl ResourceManager {
             .borrow()
             .get(player)
             .map(|found| Instant::now().saturating_duration_since(found.last_msg))
+    }
+
+    /// Time since `player` was admitted; `None` for an unknown or still pending player.
+    pub(crate) fn player_online_for(&self, player: u32) -> Option<Duration> {
+        self.network
+            .players
+            .borrow()
+            .get(player)
+            .filter(|found| found.admitted)
+            .map(|found| Instant::now().saturating_duration_since(found.connected_at))
     }
 
     pub(crate) fn player_tokens_of(&self, player: u32) -> Vec<String> {

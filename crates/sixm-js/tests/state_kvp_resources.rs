@@ -3,6 +3,14 @@ mod common;
 use common::{call, first, new_client_host, new_host, start, text};
 use sixm_core::{EntityInfo, EntityKind, Host, PlayerInfo, Value};
 
+/// Exports that report the resource command list and the info natives.
+const INFO_SCRIPT: &str = r#"
+    exports("list", (name) => GetResourceCommands(name));
+    exports("info", () => [
+        GetGameName(), GetGameBuildNumber(), GetInstanceId(), typeof IsAceAllowed
+    ]);
+"#;
+
 #[test]
 fn state_bags_proxy_and_change_handlers_work_across_resources() {
     let host = new_host();
@@ -411,6 +419,56 @@ fn set_state_bag_value_decodes_msgpack_bytes_up_to_the_length() {
             Value::from("kept"),
             Value::Bool(true),
             Value::Bool(true),
+        ])]
+    );
+}
+
+#[test]
+fn resource_commands_and_info_natives_answer_per_side() {
+    let instance = Value::Int(i64::from(std::process::id()));
+
+    let srv_host = new_host();
+    srv_host.command_owners.borrow_mut().extend([
+        ("r".to_owned(), "zeta".to_owned()),
+        ("r".to_owned(), "alpha".to_owned()),
+        ("o".to_owned(), "beta".to_owned()),
+    ]);
+    let srv = start(
+        &srv_host,
+        "r",
+        &["list", "info"],
+        &[("index.js", INFO_SCRIPT)],
+    );
+    assert_eq!(
+        call(&srv, "list", &[Value::from("r")]),
+        vec![Value::Array(vec![
+            Value::from("alpha"),
+            Value::from("zeta")
+        ])]
+    );
+    assert_eq!(
+        call(&srv, "list", &[Value::from("none")]),
+        vec![Value::Array(Vec::new())]
+    );
+    assert_eq!(
+        call(&srv, "info", &[]),
+        vec![Value::Array(vec![
+            Value::from("sixm"),
+            Value::Int(0),
+            instance.clone(),
+            Value::from("function"),
+        ])]
+    );
+
+    let client_host = new_client_host(1);
+    let client = start(&client_host, "r", &["info"], &[("index.js", INFO_SCRIPT)]);
+    assert_eq!(
+        call(&client, "info", &[]),
+        vec![Value::Array(vec![
+            Value::from("headless"),
+            Value::Int(0),
+            instance,
+            Value::from("undefined"),
         ])]
     );
 }

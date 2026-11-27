@@ -8,7 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use sixm_core::{
     ClientHost, ClientTarget, ConvarKind, EntityAttachment, EntityInfo, EntityKind, EntityState,
@@ -110,6 +110,10 @@ pub struct TestHost {
     pub grants: RefCell<Vec<(String, String)>>,
     /// Resource lifecycle calls recorded as `(action, caller, resource)`.
     pub resource_actions: RefCell<Vec<(&'static str, String, String)>>,
+    /// Console commands owned by a resource, as `(resource, command)`. Tests set this directly.
+    pub command_owners: RefCell<Vec<(String, String)>>,
+    /// How long each player has been connected, by player id. Tests set this directly.
+    pub time_online: RefCell<HashMap<u32, Duration>>,
 }
 
 impl TestHost {
@@ -401,6 +405,17 @@ impl Host for TestHost {
         }
         Ok(())
     }
+    fn resource_commands(&self, resource: &str) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .command_owners
+            .borrow()
+            .iter()
+            .filter(|(owner, _)| owner == resource)
+            .map(|(_, name)| name.clone())
+            .collect();
+        names.sort_unstable();
+        names
+    }
 }
 
 impl ServerHost for TestHost {
@@ -457,6 +472,10 @@ impl ServerHost for TestHost {
 
     fn drop_player(&self, player: u32, reason: &str) {
         self.dropped.borrow_mut().push((player, reason.to_owned()));
+    }
+
+    fn player_time_online(&self, player: u32) -> Option<Duration> {
+        self.time_online.borrow().get(&player).copied()
     }
 
     fn is_ace_allowed(&self, principal: &str, object: &str) -> bool {

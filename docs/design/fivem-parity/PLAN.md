@@ -289,7 +289,7 @@ equivalent / no effect / absent".
 | A1 | done | Claude (Haiku impl, Sonnet review) | `git log --grep "^A1:"` |
 | A2 | done | Claude (Haiku impl, Sonnet review) | `git log --grep "^A2:"` |
 | A3 | done | Claude (Haiku impl, Sonnet review) | `git log --grep "^A3:"` |
-| A4 | todo | | |
+| A4 | done | Claude (Haiku impl, Sonnet review) | `git log --grep "^A4:"` |
 | A5 | todo | | |
 | A6 | todo | | |
 | A7 | todo | | |
@@ -328,3 +328,10 @@ what is next, anything surprising.
 
 - 2026-11-27, Claude (Opus): research done, plan written. Branch
   `feat/fivem-parity-a` created from `main` (a752a53). Next: A1.
+- 2026-11-28, Claude (Opus, main) with Sonnet (specs, review) and Haiku
+  (implementation): A1–A4 done on `feat/fivem-parity-a`, each its own commit,
+  full checks green on Linux. Specs for A1–A4 are in `specs/`. Notes:
+  `SetStateBagValue` also accepts the FiveM msgpack form
+  `(bag, key, data, length, replicated)`; `GetPlayerTimeOnline` counts from
+  admission (after deferrals) and is nil while pending. Next: write specs
+  A5–A7 (same format as `specs/A1.md`), implement, then A8 (PR).
