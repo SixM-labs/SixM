@@ -76,7 +76,8 @@ impl Host for ClientRuntime {
         }
     }
 
-    fn execute_command(&self, line: &str) {
+    /// The client runs every line itself, so `_invoker` does not change how it runs.
+    fn execute_command(&self, line: &str, _invoker: Option<&ResourceName>) {
         self.queued.borrow_mut().push_back(line.to_owned());
     }
 
@@ -276,14 +277,16 @@ impl ClientHost for ClientRuntime {
                 "entity {entity} is not owned by this client"
             )));
         }
+        let queued = slot.is_dirty();
         if let Some(position) = position {
             slot.info.position = position;
+            slot.position_dirty = true;
         }
         if let Some(rotation) = rotation {
             slot.info.rotation = rotation;
+            slot.rotation_dirty = true;
         }
-        if !slot.dirty {
-            slot.dirty = true;
+        if !queued && slot.is_dirty() {
             self.owned_moves.borrow_mut().push(entity);
         }
         Ok(())

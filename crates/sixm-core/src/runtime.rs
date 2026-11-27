@@ -208,7 +208,10 @@ pub trait Host {
 
     /// Queues a console command. It runs after the current script call
     /// returns, never re-entrantly, so a script can safely stop itself.
-    fn execute_command(&self, line: &str);
+    /// `invoker` is the resource whose script called it: the line runs with
+    /// that resource's rights, as its principal `resource.<name>`. `None` runs
+    /// it with console rights, which only the host itself uses.
+    fn execute_command(&self, line: &str, invoker: Option<&ResourceName>);
 
     /// Registers a console command handled by a script function. A command
     /// registered by a resource is removed when that resource stops.

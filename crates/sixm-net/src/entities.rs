@@ -5,6 +5,11 @@ use sixm_core::{EntityInfo, EntityKind};
 
 use crate::error::NetError;
 
+/// One entity transform as the wire carries it: `(id, position, rotation,
+/// epoch)`. A part is `None` when it did not change, and at least one part is
+/// present in every transform that is sent.
+pub type EntityTransform = (u32, Option<[f32; 3]>, Option<[f32; 3]>, u32);
+
 /// One entity as the wire carries it: its id and its state.
 ///
 /// The id is also the entity's network id. `kind` is the `GetEntityType` code

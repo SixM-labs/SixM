@@ -216,7 +216,7 @@ fn install_host(
         Ok(parsed.unwrap_or(default))
     })?;
     let execute_command = bind_fn(lua, weak, |rt, (line,): (String,)| {
-        rt.host()?.execute_command(&line);
+        rt.host()?.execute_command(&line, Some(&rt.resource));
         Ok(())
     })?;
     let register_command = bind_fn(

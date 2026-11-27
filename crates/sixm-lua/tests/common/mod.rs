@@ -219,7 +219,7 @@ impl Host for TestHost {
         }
     }
 
-    fn execute_command(&self, line: &str) {
+    fn execute_command(&self, line: &str, _invoker: Option<&ResourceName>) {
         self.commands.borrow_mut().push(line.to_owned());
     }
 

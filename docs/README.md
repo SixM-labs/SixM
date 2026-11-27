@@ -14,3 +14,6 @@ the code and a page disagree, the code is right.
   console and convars, the cache layout and what client scripts can do.
 - [protocol.md](protocol.md): an overview of the network protocol for tool
   authors. The format may change between protocol versions.
+- [design/game-adapter.md](design/game-adapter.md): a proposed design for
+  game adapters, the contract between the core and one game. Nothing in it is
+  implemented yet.

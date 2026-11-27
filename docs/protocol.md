@@ -107,17 +107,18 @@ Client to server (`ClientMessage`):
 | 1 | `Event` | `name: string`, `args: values` |
 | 2 | `RequestFile` | `hash: 32 bytes` |
 | 3 | `Command` | `line: string`, at most 4096 bytes |
-| 4 | `EntityTransforms` | list of `(id: u32, position: 3 floats, rotation: 3 floats, epoch: u32)`, at most 1024 |
+| 4 | `EntityTransforms` | list of transforms (see [Entity transforms](#entity-transforms)), at most 1024 |
 
 `Command` carries a console line typed on the client that the client does not
 know. The server runs it with the player's permissions, and it shares the
 event rate limit. A line longer than 4096 bytes is a protocol error.
 
 `EntityTransforms` carries the transforms of entities the client owns, such as
-its own ped. `epoch` is the latest epoch the client knows for the entity (see
-[Teleport epochs](#teleport-epochs)). The server applies an update only when the
-entity exists, the player owns it, every value is finite and `epoch` is the
-entity's current epoch. Any other update is ignored. A message counts as one
+its own ped. It carries only the parts that changed, and `epoch` is the latest
+epoch the client knows for the entity (see [Teleport epochs](#teleport-epochs)).
+The server applies an update only when the entity exists, the player owns it,
+every part present is finite and `epoch` is the entity's current epoch. Any
+other update is ignored. A message counts as one
 event for the rate limit, whatever its size, and a message with more than 1024
 updates is a protocol error.
 
@@ -137,7 +138,7 @@ Server to client (`ServerMessage`):
 | 9 | `ResourceStopped` | `name: string` |
 | 10 | `FileUnavailable` | `hash: 32 bytes` |
 | 11 | `EntityCreated` | one entity entry (see below) |
-| 12 | `EntityTransforms` | list of `(id: u32, position: 3 floats, rotation: 3 floats, epoch: u32)` |
+| 12 | `EntityTransforms` | list of transforms (see [Entity transforms](#entity-transforms)) |
 | 13 | `EntityDeleted` | `id: u32` |
 | 14 | `EntitySnapshot` | list of entity entries |
 | 15 | `Convars` | list of `(name: string, value: string or nil)` (see below) |
@@ -153,7 +154,7 @@ decoding budget. A join snapshot may span several frames.
 
 ### Handshake
 
-1. The client sends `Hello` with `protocol = 8` and its player name. The
+1. The client sends `Hello` with `protocol = 11` and its player name. The
    server has already verified the client certificate, so only a client with a
    certificate gets this far.
 2. A different protocol number is refused with `Rejected`, for example
@@ -180,7 +181,9 @@ state and entity messages as they happen. `EntityCreated` and `EntityDeleted`
 are sent at once. Moves are collected, and once per server frame every entity
 that moved is sent once, with its latest transform, in `EntityTransforms`
 frames. Each entity appears at most once per frame, with its latest transform
-and its current epoch.
+and its current epoch. The update carries the position, the rotation or both:
+only the parts that changed since the last frame (see
+[Entity transforms](#entity-transforms)).
 
 #### Teleport epochs
 
@@ -193,12 +196,14 @@ changes it.
   current epoch. An update computed before a server move therefore never
   lands, whenever it arrives, and the server move stands.
 - A client that owns an entity applies a received update only when its epoch
-  differs from the one it knows. That is a server move: the client takes the
-  transform, records the epoch and drops any local move it has not sent yet.
-  An update with the epoch it already knows is its own move echoed back, and
-  is skipped.
-- A client that does not own an entity applies every update and records the
-  epoch.
+  differs from the one it knows. That is a server move: the client takes each
+  part the update carries, records the epoch and drops a local move of that
+  part that it has not sent yet. A part the update does not carry keeps the
+  client's value, and a local move of that part is still sent, with the new
+  epoch. An update with the epoch it already knows is its own move echoed
+  back, and is skipped.
+- A client that does not own an entity applies the parts of every update that
+  carry them, and records the epoch.
 
 ### Resource entries
 
@@ -229,6 +234,32 @@ entities the player holds, and sends:
 
 With scoping off (`sixm_cullRadius 0`) every message is sent to every player, as
 described above. The message formats are the same either way.
+
+### Entity transforms
+
+`EntityTransforms` (client tag 4, server tag 12) is a variant index, a count
+and the updates, each of which is:
+
+| Field | Encoding |
+|---|---|
+| `id` | varint `u32` |
+| `flags` | one byte. Bit 0 set: a position follows. Bit 1 set: a rotation follows. Every other bit must be 0, and at least one of bits 0 and 1 must be set. Any other value rejects the frame. |
+| `position` | if bit 0 is set: three zigzag varints, each an `i32` count of centimetres |
+| `rotation` | if bit 1 is set: three `u16` little-endian counts of angle units |
+| `epoch` | varint `u32` |
+
+A position component is the metres times 100, rounded to the nearest whole
+centimetre and clamped to the `i32` range. A receiver divides by 100, so the
+error is at most 0.5 cm, and coordinates beyond about 21 474 km are clamped.
+
+A rotation angle is normalized to `[0, 360)` first, so `-90` is sent as `270`
+and `450` as `90`. Its count is `round(angle / 360 * 65536) mod 65536`, and a
+receiver decodes `count * 360 / 65536` degrees. The error is at most
+`360 / 65536`, about 0.0055 degrees, and every decoded angle is in `[0, 360)`.
+
+Each update costs one unit of the decoding budget. A client message carries at
+most 1024 updates. Batches longer than that, or longer than one frame, are
+split across frames, as with the other entity messages.
 
 ### Entity entries
 
@@ -289,7 +320,7 @@ resource files can arrive while a latent transfer is in progress.
 
 ## Versioning
 
-- `PROTOCOL_VERSION` is `10`. It is sent in `Hello`. A server refuses any other
+- `PROTOCOL_VERSION` is `11`. It is sent in `Hello`. A server refuses any other
   value.
 - The ALPN string is `sixm/1`. It does not change with the protocol version.
 - Enum order, field order and limits can change between protocol versions.

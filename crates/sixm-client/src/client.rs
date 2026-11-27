@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use sixm_core::{EntityInfo, Value};
 use sixm_net::{
-    ClientEvent, FILE_KIND_CLIENT, FILE_KIND_FILE, FILE_KIND_SHARED, FileEntry, Fingerprint,
-    Identity, NetClient, NetError, ResourceEntry,
+    ClientEvent, EntityTransform, FILE_KIND_CLIENT, FILE_KIND_FILE, FILE_KIND_SHARED, FileEntry,
+    Fingerprint, Identity, NetClient, NetError, ResourceEntry,
 };
 use sixm_resources::ClientFileKind;
 
@@ -92,9 +92,7 @@ pub enum ClientNotice {
     },
     /// New positions and rotations, as `(id, position, rotation, epoch)`.
     /// Entities the client does not know are ignored.
-    EntityTransforms {
-        updates: Vec<(u32, [f32; 3], [f32; 3], u32)>,
-    },
+    EntityTransforms { updates: Vec<EntityTransform> },
     /// An entity was deleted.
     EntityDeleted { id: u32 },
     /// Replicated convars, as `(name, value)`. A `None` value means the server
@@ -187,11 +185,9 @@ impl Client {
     }
 
     /// Sends the transforms of entities this client owns, as `(id, position,
-    /// rotation)`, in as few messages as possible.
-    pub fn send_entity_transforms(
-        &self,
-        updates: &[(u32, [f32; 3], [f32; 3], u32)],
-    ) -> Result<(), NetError> {
+    /// rotation, epoch)` where a part is present only when it changed, in as
+    /// few messages as possible.
+    pub fn send_entity_transforms(&self, updates: &[EntityTransform]) -> Result<(), NetError> {
         self.net.send_entity_transforms(updates)
     }
 
