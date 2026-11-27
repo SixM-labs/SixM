@@ -1,5 +1,30 @@
 //! Paths of the files a script reads and writes inside a resource.
 
+use std::path::Path;
+
+/// Script file types that the server and client can execute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptLanguage {
+    /// Lua source.
+    Lua,
+    /// JavaScript source.
+    JavaScript,
+}
+
+impl ScriptLanguage {
+    /// Recognizes Lua and JavaScript source extensions without regard to case.
+    pub fn from_path(path: &Path) -> Option<Self> {
+        let extension = path.extension()?.to_str()?;
+        if extension.eq_ignore_ascii_case("lua") {
+            Some(Self::Lua)
+        } else if extension.eq_ignore_ascii_case("js") {
+            Some(Self::JavaScript)
+        } else {
+            None
+        }
+    }
+}
+
 /// Normalizes a resource-relative file name as scripts pass it to
 /// `LoadResourceFile` and `SaveResourceFile`: `/` and `\` both separate
 /// components, empty and `.` components are dropped, and the result is joined

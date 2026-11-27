@@ -5,9 +5,112 @@
 //! provided here on top of mlua's safe stack inspection.
 
 use std::borrow::Cow;
+use std::cell::Cell;
+use std::rc::Rc;
 
 use mlua::debug::Debug;
-use mlua::{Function, Lua, LuaOptions, LuaString, MultiValue, StdLib, Table, Value as LuaValue};
+use mlua::{
+    Function, HookTriggers, Lua, LuaOptions, LuaString, MultiValue, StdLib, Table,
+    Value as LuaValue, VmState,
+};
+
+const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+const HOOK_INTERVAL: u32 = 1_000;
+const INSTRUCTION_LIMIT: u32 = 2_000_000;
+
+/// Shared by all coroutines in one resource, including nested host calls.
+#[derive(Clone, Default)]
+pub(crate) struct Budget(Rc<Cell<Option<u32>>>);
+
+impl Budget {
+    pub(crate) fn run<T>(&self, run: impl FnOnce() -> mlua::Result<T>) -> mlua::Result<T> {
+        self.check()?;
+        if self.0.get().is_some() {
+            return run();
+        }
+        self.0.set(Some(INSTRUCTION_LIMIT / HOOK_INTERVAL));
+        let _reset = ResetBudget(&self.0);
+        let result = run();
+        self.check()?;
+        result
+    }
+
+    fn check(&self) -> mlua::Result<()> {
+        if self.0.get() == Some(0) {
+            return Err(mlua::Error::runtime("Lua instruction limit reached"));
+        }
+        Ok(())
+    }
+
+    fn step(&self) -> mlua::Result<VmState> {
+        if let Some(remaining) = self.0.get() {
+            self.0.set(Some(remaining.saturating_sub(1)));
+        }
+        self.check()?;
+        Ok(VmState::Continue)
+    }
+}
+
+struct ResetBudget<'a>(&'a Cell<Option<u32>>);
+
+impl Drop for ResetBudget<'_> {
+    fn drop(&mut self) {
+        self.0.set(None);
+    }
+}
+
+/// Keep protected calls yieldable and propagate a spent budget to the host.
+const PROTECTED_SOURCE: &str = r"
+local check = ...
+local protect, protect_with = pcall, xpcall
+local pack, unpack = table.pack, table.unpack
+local create, resume, close = coroutine.create, coroutine.resume, coroutine.close
+local assign_metatable, rawget, error, type = setmetatable, rawget, error, type
+
+local function checked(...)
+    check()
+    return ...
+end
+
+function pcall(...)
+    return checked(protect(...))
+end
+
+function xpcall(fn, handler, ...)
+    if type(handler) ~= 'function' then return protect_with(fn, handler, ...) end
+    return checked(protect_with(fn, function(err)
+        check()
+        return handler(err)
+    end, ...))
+end
+
+function coroutine.resume(thread, ...)
+    return checked(resume(thread, ...))
+end
+
+function coroutine.close(thread)
+    return checked(close(thread))
+end
+
+function coroutine.wrap(fn)
+    local thread = create(fn)
+    return function(...)
+        local results = pack(checked(resume(thread, ...)))
+        if not results[1] then
+            local _, failure = checked(close(thread))
+            error(failure or results[2], 2)
+        end
+        return unpack(results, 2, results.n)
+    end
+end
+
+function setmetatable(value, meta)
+    if meta ~= nil and rawget(meta, '__gc') ~= nil then
+        error('table finalizers are disabled', 2)
+    end
+    return assign_metatable(value, meta)
+end
+";
 
 /// Functions captured from the state before the sandbox trims it.
 pub(crate) struct Helpers {
@@ -45,22 +148,37 @@ end
 ";
 
 /// Creates a Lua state that has only the permitted standard libraries.
-pub(crate) fn new_state() -> mlua::Result<Lua> {
+pub(crate) fn new_state(budget: &Budget) -> mlua::Result<Lua> {
     let libs = StdLib::COROUTINE
         | StdLib::TABLE
         | StdLib::STRING
         | StdLib::UTF8
         | StdLib::MATH
         | StdLib::OS;
-    Lua::new_with(libs, LuaOptions::default())
+    let lua = Lua::new_with(libs, LuaOptions::default())?;
+    lua.set_memory_limit(MEMORY_LIMIT)?;
+    let hook_budget = budget.clone();
+    lua.set_global_hook(
+        HookTriggers::new().every_nth_instruction(HOOK_INTERVAL),
+        move |_, _| hook_budget.step(),
+    )?;
+    Ok(lua)
 }
 
 /// Removes the unsafe parts of a fresh state, installs `debug`, and returns the helpers the runtime needs.
-pub(crate) fn prepare(lua: &Lua) -> mlua::Result<Helpers> {
+pub(crate) fn prepare(lua: &Lua, budget: Budget) -> mlua::Result<Helpers> {
     let globals = lua.globals();
     let tostring: Function = globals.raw_get("tostring")?;
     let type_fn: Function = globals.raw_get("type")?;
     let original_load: Function = globals.raw_get("load")?;
+    globals.raw_get::<Table>("coroutine")?.raw_set(
+        "create",
+        lua.create_function(|lua, function: Function| lua.create_thread(function))?,
+    )?;
+    let check = lua.create_function(move |_, ()| budget.check())?;
+    lua.load(PROTECTED_SOURCE)
+        .set_name("=sixm sandbox")
+        .call::<()>(check)?;
 
     let wait: Function = lua.load(WAIT_SOURCE).set_name("=sixm wait").eval()?;
     let handler = lua.create_function(|lua, message: LuaValue| {
@@ -80,7 +198,9 @@ pub(crate) fn prepare(lua: &Lua) -> mlua::Result<Helpers> {
         if let Some(LuaValue::String(chunk)) = args.first() {
             let bytes = chunk.as_bytes();
             let processed = crate::preprocess::lua_backticks(&bytes);
-            args[0] = LuaValue::String(lua.create_string(processed.as_ref())?);
+            if matches!(processed, Cow::Owned(_)) {
+                args[0] = LuaValue::String(lua.create_string(processed.as_ref())?);
+            }
         }
         if args.len() < 3 {
             args.resize(3, LuaValue::Nil);

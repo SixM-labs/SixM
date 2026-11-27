@@ -256,7 +256,9 @@ impl LuaRuntime {
         let outer = self.current_source.replace(source);
         let outer_task = self.current_task.replace(Some((slot, seq)));
         let outer_invoker = std::mem::replace(&mut *self.current_invoker.borrow_mut(), invoker);
-        let result = self.step(slot, thread, source, now, resume_args);
+        let result = self
+            .budget
+            .run(|| self.step(slot, thread, source, now, resume_args));
         *self.current_invoker.borrow_mut() = outer_invoker;
         self.current_task.set(outer_task);
         self.current_source.set(outer);

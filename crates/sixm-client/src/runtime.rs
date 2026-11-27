@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use sixm_core::{
     AdapterError, AdapterSink, EntityAttachment, EntityInfo, EntityKind, EntityState, EventContext,
     EventSource, FuncRef, GameAdapter, Host, MirrorChange, NativeRegistry, ResourceName,
-    ResourceState, ScriptRuntime, Value, is_finite,
+    ResourceState, ScriptLanguage, ScriptRuntime, Value, is_finite,
 };
 use sixm_js::JsRuntime;
 use sixm_kvp::KvpStore;
@@ -835,13 +835,21 @@ impl ClientRuntime {
             .files
             .iter()
             .filter(|file| file.kind != ClientFileKind::File)
+            // Cached paths are extensionless content hashes.
+            .filter_map(|file| {
+                let Some(language) = ScriptLanguage::from_path(Path::new(&file.name)) else {
+                    warn!("[{name}] skipping unsupported script type: {}", file.name);
+                    return None;
+                };
+                Some((file, language))
+            })
             .collect();
 
         let (runtimes, lua_rt, js_rt) = match self.create_runtimes(
             &name,
             &root,
             &resource.exports,
-            scripts.iter().map(|file| Path::new(&file.name)),
+            scripts.iter().map(|(_, language)| *language),
         ) {
             Ok(created) => created,
             Err(err) => {
@@ -867,12 +875,10 @@ impl ClientRuntime {
             .borrow_mut()
             .insert(resource.name.clone(), resource.metadata.clone());
         self.set_transition(&name, ResourceState::Starting);
-        for file in scripts {
-            // Check `file.name` (the cache stores files under extensionless content hashes).
-            let result = if is_js_script(Path::new(&file.name)) {
-                js_rt.as_ref().map(|rt| rt.load_script(&file.path))
-            } else {
-                lua_rt.as_ref().map(|rt| rt.load_script(&file.path))
+        for (file, language) in scripts {
+            let result = match language {
+                ScriptLanguage::JavaScript => js_rt.as_ref().map(|rt| rt.load_script(&file.path)),
+                ScriptLanguage::Lua => lua_rt.as_ref().map(|rt| rt.load_script(&file.path)),
             };
             if let Some(Err(err)) = result {
                 error!("[{name}] cannot load {}: {err}", file.name);
@@ -885,15 +891,14 @@ impl ClientRuntime {
         info!("Started resource {name}");
     }
 
-    /// Creates up to one Lua runtime and one JS runtime matching the extensions
-    /// present in `scripts`, in order of first appearance.
+    /// Creates one runtime per language, in order of first appearance.
     #[expect(clippy::type_complexity)]
-    fn create_runtimes<'a>(
+    fn create_runtimes(
         &self,
         name: &ResourceName,
         root: &Path,
         exports: &[String],
-        scripts: impl IntoIterator<Item = &'a Path>,
+        languages: impl IntoIterator<Item = ScriptLanguage>,
     ) -> Result<
         (
             Vec<Rc<dyn ScriptRuntime>>,
@@ -906,8 +911,8 @@ impl ClientRuntime {
         let mut lua_rt: Option<Rc<LuaRuntime>> = None;
         let mut js_rt: Option<Rc<JsRuntime>> = None;
 
-        for path in scripts {
-            if is_js_script(path) {
+        for language in languages {
+            if language == ScriptLanguage::JavaScript {
                 if js_rt.is_none() {
                     let instance = self.next_instance.get();
                     self.next_instance.set(instance + 1);
@@ -1185,12 +1190,6 @@ impl ClientRuntime {
 fn advance(scheduled: Instant, now: Instant, period: Duration) -> Instant {
     let next = scheduled + period;
     if next > now { next } else { now + period }
-}
-
-fn is_js_script(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("js"))
 }
 
 fn vec_bits_differ(a: [f32; 3], b: [f32; 3]) -> bool {

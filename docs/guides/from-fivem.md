@@ -253,9 +253,9 @@ following FiveM areas are missing:
   weather/time, world queries, blips, markers, audio) do not exist yet.
 - **No UI / NUI:** There is no embedded browser, `SendNUIMessage`,
   `RegisterNUICallback`, DUI, or scaleform/HUD API.
-- **No built-in default resources:** There is no bundled `chat`,
-  `spawnmanager`, `sessionmanager`, or `mapmanager`. See `examples/server-data/`
-  for minimal example resources (`greeter`, `hello`, `queue`, `garage`).
+- **Default resources:** The example server includes a console-only `chat`
+  resource with a `say` command. `spawnmanager`, `sessionmanager`, and
+  `mapmanager` are not bundled.
 - **No server browser / master list:** `sets` / `SetConvarServerInfo` marks
   convars as server info (exposed on `/info.json`), but nothing publishes them
   to a master list yet.

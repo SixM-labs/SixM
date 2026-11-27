@@ -64,9 +64,20 @@ pub(crate) fn new_context(rt: &Runtime) -> Result<Context, ScriptError> {
         let fn_ctor: rquickjs::Object<'_> = globals.get("Function")?;
         let fn_proto: Value<'_> = fn_ctor.get("prototype")?;
         blocked.set("prototype", fn_proto.clone())?;
-        if let Some(proto_obj) = fn_proto.as_object() {
-            proto_obj.set("constructor", blocked.clone())?;
-        }
+        let seal_constructors: Function = ctx.eval(
+            r"(blocked) => {
+                const prototypes = [
+                    Function.prototype,
+                    Object.getPrototypeOf(async function () {}),
+                    Object.getPrototypeOf(function* () {}),
+                    Object.getPrototypeOf(async function* () {}),
+                ];
+                for (const prototype of prototypes) {
+                    Object.defineProperty(prototype, 'constructor', { value: blocked });
+                }
+            }",
+        )?;
+        seal_constructors.call::<_, ()>((blocked.clone(),))?;
         globals.set("Function", blocked)?;
         Ok::<(), rquickjs::Error>(())
     })

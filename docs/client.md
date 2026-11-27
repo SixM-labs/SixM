@@ -19,6 +19,7 @@ sixm-client <addr> <name> [--fingerprint HEX] [--cache DIR] [--identity FILE] [-
 | `--identity FILE` | The client certificate. Default `identity.bin` in the cache folder. The file is created on first use. See [Identity](#identity). |
 | `--sim` | Attach the built-in simulated [`GameAdapter`](design/game-adapter.md) (`SimAdapter`) for velocity integration, `TaskGoStraightToCoord`, and `InvokeNative` testing. |
 | `+command args...` | A console command, run after the client connects. |
+| `--version` | Prints the client version and exits. Use it on its own. |
 
 - The two positional arguments and the options can come in any order before
   the first `+command`.
@@ -78,6 +79,9 @@ not know, so the client does not report an unknown name itself.
 
 The client keeps `help`, `quit`, `set`, `sets` and `setr` for itself, so the
 server never sees those lines.
+
+On the example server, type `say Hello` to send a message to the connected
+clients. The `chat` resource displays the sender and message in the client log.
 
 ### Convars
 

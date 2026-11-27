@@ -138,7 +138,7 @@ impl LuaRuntime {
         let function = self.find_export(export)?;
         let lua_args = self.to_lua_multi(args).into_script()?;
         let outer = self.current_invoker.replace(invoker.cloned());
-        let outcome: mlua::Result<MultiValue> = function.call(lua_args);
+        let outcome: mlua::Result<MultiValue> = self.budget.run(|| function.call(lua_args));
         *self.current_invoker.borrow_mut() = outer;
         self.multi_to_values(outcome.into_script()?)
     }

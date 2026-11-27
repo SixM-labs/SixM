@@ -189,13 +189,16 @@ or exhaust memory:
 |---|---|---|
 | Memory | 16 MiB | The Lua allocation fails and the manifest is an error. |
 | Instructions | 10,000,000 | Checked every 10,000 instructions. The manifest is aborted. |
+| Directive output | 8,192 entries and 1 MiB of combined keys and values | Evaluation fails when either limit is exceeded. |
 
 The limits are constants in `manifest.rs` and are not configurable.
 
 The manifest state has the `table`, `string` and `math` libraries and the Lua
 base functions. These globals read as `nil`: `coroutine`, `debug`, `dofile`,
-`io`, `load`, `loadfile`, `os`, `package`, `pcall`, `require`, `utf8` and
-`xpcall`. `pcall` is removed so that the instruction limit cannot be caught.
+`io`, `load`, `loadfile`, `os`, `package`, `pcall`, `require`, `setmetatable`,
+`utf8` and `xpcall`. The manifest can declare files and scripts using metadata.
+The server and client run only `.lua` and `.js` script files. Other extensions
+can be declared as data in `files`, where the runtime leaves them as data.
 
 A manifest that fails to parse or run is reported and skipped during the scan.
 Other resources are not affected.

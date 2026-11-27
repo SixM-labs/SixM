@@ -28,7 +28,7 @@ pub use entity::{
     DEFAULT_ENTITY_HEALTH, EntityAttachment, EntityInfo, EntityKind, EntityState, MAX_ENTITIES,
     entity_bag, entity_of_bag, euler_to_quat, is_finite, quat_to_euler,
 };
-pub use files::normalize_resource_path;
+pub use files::{ScriptLanguage, normalize_resource_path};
 pub use hash::joaat;
 pub use runtime::{
     ClientHost, ClientTarget, ConvarKind, EventContext, EventSource, Host, HttpRequest, PlayerInfo,
