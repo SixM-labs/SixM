@@ -11,6 +11,7 @@ mod console;
 mod convars;
 mod entities;
 mod host_functions;
+mod http;
 mod manager;
 mod network;
 mod perf;

@@ -12,6 +12,7 @@ use crate::client;
 use crate::entities;
 use crate::events::handle_table;
 use crate::exports;
+use crate::http;
 use crate::json;
 use crate::kvp;
 use crate::players;
@@ -51,6 +52,7 @@ pub(crate) fn install(runtime: &Rc<LuaRuntime>, helpers: &Helpers) -> mlua::Resu
         Side::Server => {
             players::install(lua, weak, &globals)?;
             entities::install_server(lua, weak, &globals)?;
+            http::install(lua, weak, &globals)?;
             install_server_convars(lua, weak, &globals)?;
         }
         Side::Client { local_player } => {

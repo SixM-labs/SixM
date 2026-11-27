@@ -22,6 +22,12 @@ const MAX_CLIENTS: &str = "sv_maxclients";
 const SERVER_NAME: &str = "sv_hostname";
 /// Convar naming how many seconds a deferred connection may wait for `done`.
 const DEFERRAL_TIMEOUT: &str = "sixm_deferralTimeout";
+/// Convar naming how many seconds an HTTP request from `PerformHttpRequest`
+/// may take, unless its options give another timeout.
+const HTTP_TIMEOUT: &str = "sixm_httpTimeout";
+/// Convar naming how many threads run the HTTP requests of
+/// `PerformHttpRequest`. Read when the first request starts.
+const HTTP_WORKERS: &str = "sixm_httpWorkers";
 /// Convar naming the model of the ped created for each player.
 const PLAYER_MODEL: &str = "sixm_playerModel";
 /// Convar naming the distance in metres within which a player is sent
@@ -42,6 +48,15 @@ const MAX_CLIENTS_LIMIT: i64 = 1024;
 const DEFAULT_SERVER_NAME: &str = "SixM Server";
 /// Deferral timeout in seconds when `sixm_deferralTimeout` is not set.
 const DEFAULT_DEFERRAL_TIMEOUT: i64 = 120;
+/// HTTP request timeout in seconds when `sixm_httpTimeout` is not set.
+const DEFAULT_HTTP_TIMEOUT: i64 = 30;
+/// Smallest and largest HTTP timeout in seconds the server honours.
+const MIN_HTTP_TIMEOUT: i64 = 1;
+const MAX_HTTP_TIMEOUT: i64 = 600;
+/// HTTP worker threads when `sixm_httpWorkers` is not set, and the clamp.
+const DEFAULT_HTTP_WORKERS: i64 = 8;
+const MIN_HTTP_WORKERS: i64 = 1;
+const MAX_HTTP_WORKERS: i64 = 64;
 /// Model name of a player's ped when `sixm_playerModel` is not set.
 const DEFAULT_PLAYER_MODEL: &str = "player";
 /// Scoping radius in metres when `sixm_cullRadius` is not set, and the largest
@@ -84,6 +99,16 @@ impl Convars {
         convars.set(
             DEFERRAL_TIMEOUT,
             &DEFAULT_DEFERRAL_TIMEOUT.to_string(),
+            ConvarKind::Plain,
+        );
+        convars.set(
+            HTTP_TIMEOUT,
+            &DEFAULT_HTTP_TIMEOUT.to_string(),
+            ConvarKind::Plain,
+        );
+        convars.set(
+            HTTP_WORKERS,
+            &DEFAULT_HTTP_WORKERS.to_string(),
             ConvarKind::Plain,
         );
         convars.set(PLAYER_MODEL, DEFAULT_PLAYER_MODEL, ConvarKind::Plain);
@@ -184,6 +209,30 @@ impl Convars {
         )
     }
 
+    /// The default timeout of an HTTP request, from `sixm_httpTimeout`. Clamped
+    /// to `1` to `600` seconds; a value that is not a number means 30.
+    pub(crate) fn http_timeout(&self) -> Duration {
+        let seconds = self
+            .get(HTTP_TIMEOUT)
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(DEFAULT_HTTP_TIMEOUT);
+        Duration::from_secs(
+            seconds
+                .clamp(MIN_HTTP_TIMEOUT, MAX_HTTP_TIMEOUT)
+                .unsigned_abs(),
+        )
+    }
+
+    /// The number of HTTP worker threads, from `sixm_httpWorkers`. Clamped to
+    /// `1` to `64`; a value that is not a number means 8.
+    pub(crate) fn http_workers(&self) -> usize {
+        let workers = self
+            .get(HTTP_WORKERS)
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(DEFAULT_HTTP_WORKERS);
+        usize::try_from(workers.clamp(MIN_HTTP_WORKERS, MAX_HTTP_WORKERS)).unwrap_or(1)
+    }
+
     /// The model name of each player's ped, from `sixm_playerModel`.
     pub(crate) fn player_model(&self) -> &str {
         self.get(PLAYER_MODEL).unwrap_or(DEFAULT_PLAYER_MODEL)
@@ -215,6 +264,16 @@ impl Convars {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_workers_default_clamp_and_fall_back() {
+        let mut convars = Convars::new();
+        assert_eq!(convars.http_workers(), 8);
+        for (value, expected) in [("3", 3), ("0", 1), ("1000", 64), ("many", 8)] {
+            convars.set(HTTP_WORKERS, value, ConvarKind::Plain);
+            assert_eq!(convars.http_workers(), expected, "{value}");
+        }
+    }
 
     #[test]
     fn built_in_convars_are_plain() {
