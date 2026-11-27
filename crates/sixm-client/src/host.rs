@@ -5,8 +5,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use sixm_core::{
-    ClientHost, EntityInfo, EntityKind, EventSource, FuncRef, GLOBAL_BAG, Host, ScriptError,
-    ScriptRuntime, ServerHost, Value, entity_of_bag, player_of_bag,
+    ClientHost, EntityInfo, EntityKind, EventSource, FuncRef, GLOBAL_BAG, Host, ResourceName,
+    ResourceState, ScriptError, ScriptRuntime, ServerHost, Value, entity_of_bag, player_of_bag,
 };
 use tracing::warn;
 
@@ -27,8 +27,9 @@ impl Host for ClientRuntime {
         event: &str,
         source: EventSource,
         args: &[Value],
+        invoker: Option<&ResourceName>,
     ) -> Result<bool, ScriptError> {
-        Ok(self.dispatch(event, source, args))
+        Ok(self.dispatch_from(event, source, args, invoker))
     }
 
     fn call_export(
@@ -36,11 +37,24 @@ impl Host for ClientRuntime {
         resource: &str,
         export: &str,
         args: &[Value],
+        invoker: Option<&ResourceName>,
     ) -> Result<Vec<Value>, ScriptError> {
         let runtime = self
             .running_runtime(resource)
             .ok_or_else(|| ScriptError::ResourceNotRunning(resource.to_owned()))?;
-        runtime.call_export(export, args)
+        runtime.call_export(export, args, invoker)
+    }
+
+    fn resource_state(&self, resource: &str) -> ResourceState {
+        self.state_of(resource)
+    }
+
+    fn resource_names(&self) -> Vec<ResourceName> {
+        self.running_names()
+    }
+
+    fn resource_metadata(&self, resource: &str, key: &str) -> Vec<String> {
+        self.metadata_of(resource, key)
     }
 
     fn call_ref(&self, func: &FuncRef, args: &[Value]) -> Result<Vec<Value>, ScriptError> {

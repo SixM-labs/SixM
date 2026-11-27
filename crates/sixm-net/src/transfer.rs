@@ -61,6 +61,7 @@ impl Advertised {
                 name: resource.name,
                 files: entries,
                 exports: resource.exports,
+                metadata: resource.metadata,
             });
         }
         Self {

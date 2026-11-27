@@ -29,7 +29,7 @@ fn shutdown_drops_all_state_and_the_last_rc_frees_the_runtime() {
     host.stop(&rt);
 
     assert!(matches!(
-        rt.call_export("ping", &[]),
+        rt.call_export("ping", &[], None),
         Err(ScriptError::ResourceNotRunning(_))
     ));
     assert!(matches!(
@@ -39,7 +39,7 @@ fn shutdown_drops_all_state_and_the_last_rc_frees_the_runtime() {
     assert!(!rt.handles_event("evt"));
     assert!(rt.next_deadline().is_none());
     assert!(
-        host.trigger_event("evt", EventSource::Local, &[Value::Nil])
+        host.trigger_event("evt", EventSource::Local, &[Value::Nil], None)
             .is_ok()
     );
 

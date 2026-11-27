@@ -149,7 +149,7 @@ impl Harness {
         let values = self
             .fx
             .manager()
-            .call_export(RESOURCE, "spawn", &[])
+            .call_export(RESOURCE, "spawn", &[], None)
             .expect("spawn is exported");
         match values.first() {
             Some(Value::Int(id)) => u32::try_from(*id).expect("ids fit in u32"),

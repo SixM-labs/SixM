@@ -77,6 +77,9 @@ forge a reference into server code.
 | Files in one resource entry | 256 |
 | Export names per resource | 256 |
 | Export name length | 256 bytes |
+| Metadata pairs per resource | 1024 |
+| Metadata key length | 1 to 256 bytes |
+| Metadata value length | 4096 bytes |
 | Resource name length | 256 bytes |
 | Client file name length | 1024 bytes |
 | File size | 64 MiB |
@@ -116,9 +119,9 @@ Server to client (`ServerMessage`):
 
 ### Handshake
 
-1. The client sends `Hello` with `protocol = 4` and its player name.
+1. The client sends `Hello` with `protocol = 5` and its player name.
 2. A different protocol number is refused with `Rejected`, for example
-   `unsupported protocol version 3, server speaks 4`.
+   `unsupported protocol version 4, server speaks 5`.
 3. A name outside 1 to 64 characters is refused.
 4. The server replies `Welcome`, or `Rejected` with a reason.
 5. The server sends a `Resources` snapshot. It may span several frames, which
@@ -135,10 +138,13 @@ frames.
 
 ### Resource entries
 
-A resource entry has the resource name, the list of its client files, and its
-client exports. Each file has its name, its kind (shared script, client script
-or data file), its size and its SHA-256 hash. A client that receives a
-`ResourceStarted` replaces any earlier entry with the same name.
+A resource entry has the resource name, the list of its client files, its
+client exports and its metadata: the `(key, value)` pairs of the manifest, in
+declaration order. Each file has its name, its kind (shared script, client
+script or data file), its size and its SHA-256 hash. A client that receives a
+`ResourceStarted` replaces any earlier entry with the same name. In a
+`Resources` snapshot, the exports and metadata travel once, with the first
+part of the entry.
 
 ### Entity entries
 
@@ -181,7 +187,7 @@ Clients keep each file in a cache under its hash. See [client.md](client.md).
 
 ## Versioning
 
-- `PROTOCOL_VERSION` is `4`. It is sent in `Hello`. A server refuses any other
+- `PROTOCOL_VERSION` is `5`. It is sent in `Hello`. A server refuses any other
   value.
 - The ALPN string is `sixm/1`. It does not change with the protocol version.
 - Enum order, field order and limits can change between protocol versions.

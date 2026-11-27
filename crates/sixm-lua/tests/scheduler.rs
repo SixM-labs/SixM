@@ -141,7 +141,7 @@ fn wait_outside_a_thread_is_an_error() {
         &["bad"],
         &[("main.lua", "exports('bad', function() Wait(10) end)\n")],
     );
-    match rt.call_export("bad", &[]) {
+    match rt.call_export("bad", &[], None) {
         Err(ScriptError::Runtime(message)) => {
             assert!(
                 message.contains("Wait can only be called from a thread"),

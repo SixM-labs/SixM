@@ -119,6 +119,12 @@ The client has no `onResourceStarting`. Clients do not cancel starts.
 | `GetResourcePath` | both | `GetResourcePath(name)`. Server: the folder of any installed resource, running or not. Client: only the resource's own data folder. For any other name it returns `nil`. Returns a string or `nil`. |
 | `LoadResourceFile` | both | `LoadResourceFile(resource, path)`. Returns the file's contents as a string, or `nil`. See below. |
 | `SaveResourceFile` | both | `SaveResourceFile(resource, path, data)`. Writes `data` and returns a boolean. See below. |
+| `GetInvokingResource` | both | `GetInvokingResource()`. Returns the name of the resource whose script started the running code, or `nil`. See below. |
+| `GetResourceState` | both | `GetResourceState(name)`. Returns `missing`, `stopped`, `starting`, `started` or `stopping`. See below. |
+| `GetNumResources` | both | `GetNumResources()`. Returns the number of resources listed by `GetResourceByFindIndex`. |
+| `GetResourceByFindIndex` | both | `GetResourceByFindIndex(index)`. Returns the name at the 0-based `index` of the resource list, or `nil`. |
+| `GetResourceMetadata` | both | `GetResourceMetadata(resource, key, index)`. Returns the value at the 0-based `index` of the metadata `key` of `resource`, or `nil`. |
+| `GetNumResourceMetadata` | both | `GetNumResourceMetadata(resource, key)`. Returns how many values the metadata `key` of `resource` has. |
 
 `path` is normalised first. It must be relative, must not contain `..`, and
 must not contain a colon. Backslashes are accepted as separators.
@@ -139,6 +145,46 @@ must not contain a colon. Backslashes are accepted as separators.
   that the server sent is refused, so a saved file never replaces a synced one.
 
 The client keeps its data folders under the cache. See [client.md](client.md).
+
+### `GetInvokingResource`
+
+Returns the name of the resource that caused the running code to run, so a
+library can tell who called it. It is `nil` when no resource caused it.
+
+- Inside an event handler started by `TriggerEvent`, it is the resource whose
+  script called `TriggerEvent`.
+- Inside an export called as `exports[res]:name(...)`, it is the resource whose
+  script made the call. After the call returns, the caller sees its own value
+  again, also when the export raised an error.
+- A thread started with `CreateThread` or `SetTimeout` inside such a handler
+  keeps the same value, and so does a handler after a `Wait`.
+- It is `nil` for events the host fires: lifecycle events (`onResourceStarting`,
+  `onResourceStart`, `onServerResourceStart`, `onResourceStop`,
+  `onServerResourceStop`, `onClientResourceStart`, `onClientResourceStop`),
+  player events (`playerConnecting`, `playerJoining`, `playerDropped`), entity
+  events (`entityCreated`, `entityRemoved`), events from the network
+  (`TriggerServerEvent` and `TriggerClientEvent`), console commands and state
+  bag change handlers.
+
+### Resource state and list
+
+`GetResourceState` reports the state of a resource:
+
+| State | Server | Client |
+|---|---|---|
+| `missing` | The resource is not installed. | The resource is not running. |
+| `stopped` | Installed, and not running. | Not used. |
+| `starting` | Its scripts are loading. | Its scripts are loading. |
+| `started` | Running. | Running. |
+| `stopping` | Its stop events are running. | Its stop events are running. |
+
+- On the server, `GetNumResources` and `GetResourceByFindIndex` list every
+  installed resource, sorted by name, whether it runs or not.
+- On the client, they list the running resources in start order.
+- The metadata functions read the `version 'x'` style pairs of the manifest.
+  Values come in declaration order. On the server, any installed resource can
+  be read. On the client, only running resources are known, and the metadata
+  is what the server sent with them.
 
 ## Convars and commands
 
