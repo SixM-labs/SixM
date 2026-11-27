@@ -11,11 +11,24 @@ may change the protocol and the API.
 
 - Resource file APIs reject symbolic links, device names, and paths that
   would leave the resource directory on Linux or Windows.
+- `SaveResourceFile` refuses to overwrite resource manifests (`fxmanifest.lua`,
+  `__resource.lua`) and script files (`.lua`, `.js`).
+- `PerformHttpRequest` refuses loopback, link-local, and private IP targets
+  (including across redirects) unless the console-only `sv_httpAllowPrivate`
+  convar is set to `true` or `1`, and strips sensitive headers on cross-origin
+  redirects.
+- Security-critical and bootstrap convars (`rcon_password`,
+  `sv_httpAllowPrivate`, `sv_httpEnabled`, `sv_exposePlayerIdentifiers`,
+  `sixm_identityFile`, `sixm_resourcesPath`, `sixm_kvpPath`,
+  `endpoint_add_udp`) are console-only, and resources without read permission
+  cannot overwrite restricted convars.
 
 ### Added
 
-- `add_convar_permission <resource> read <convar>` restricts access to a
-  plain server convar through both getters and change listeners.
+- `add_convar_permission <resource> read <convar>`,
+  `remove_convar_permission <resource> read <convar>`, and
+  `list_convar_permissions` restrict and inspect access to plain server convars
+  across getters, setters, and change listeners.
 
 ### Fixed
 

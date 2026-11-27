@@ -481,3 +481,120 @@ fn quit_requests_shutdown() {
     fx.server.execute("quit maintenance");
     assert!(fx.manager().quit_requested());
 }
+
+#[test]
+fn save_resource_file_blocks_manifests_and_scripts_on_server() {
+    let fx = Fixture::new();
+    let script = r"
+        exports('check', function()
+            local me = GetCurrentResourceName()
+            local results = {
+                tostring(SaveResourceFile(me, 'fxmanifest.lua', 'hacked', 6)),
+                tostring(SaveResourceFile(me, '__resource.lua', 'hacked', 6)),
+                tostring(SaveResourceFile(me, 'server.lua', 'hacked', 6)),
+                tostring(SaveResourceFile(me, 'nested/helper.JS', 'hacked', 6)),
+                tostring(SaveResourceFile(me, 'data/ok.json', '{}', 2)),
+                tostring(LoadResourceFile(me, 'data/ok.json')),
+                tostring(LoadResourceFile(me, 'server.lua') == 'hacked'),
+            }
+            return table.concat(results, '|')
+        end)
+    ";
+    fx.add_resource(
+        "saver",
+        &manifest(&["server.lua"], &[], &[]),
+        &[("server.lua", script)],
+    );
+    fx.server.execute("ensure saver");
+    assert_eq!(
+        fx.text("saver", "check"),
+        "false|false|false|false|true|{}|false"
+    );
+}
+
+#[test]
+fn protected_and_restricted_convars_cannot_be_overwritten_by_untrusted_scripts() {
+    let fx = Fixture::new();
+    fx.add_resource(
+        "reader",
+        &manifest(&["server.lua"], &[], &[]),
+        &[(
+            "server.lua",
+            r"
+            exports('read', function() return GetConvar('secret_key', 'hidden') end)
+            exports('write_ok', function()
+                local ok = pcall(SetConvar, 'secret_key', 'rotated')
+                return tostring(ok)
+            end)
+        ",
+        )],
+    );
+    fx.add_resource(
+        "intruder",
+        &manifest(&["server.js"], &[], &[]),
+        &[(
+            "server.js",
+            r"
+            exports('attack', () => {
+                const blocked = [
+                    'sv_httpAllowPrivate',
+                    'sv_httpEnabled',
+                    'sv_exposePlayerIdentifiers',
+                    'sixm_identityFile',
+                    'sixm_resourcesPath',
+                    'sixm_kvpPath',
+                    'endpoint_add_udp',
+                    'secret_key',
+                ].every((name) => {
+                    try {
+                        SetConvar(name, 'pwned');
+                        return false;
+                    } catch (_) {
+                        return true;
+                    }
+                });
+                ExecuteCommand('set secret_key via_cmd');
+                ExecuteCommand('set sv_httpAllowPrivate true');
+                ExecuteCommand('remove_convar_permission reader read secret_key');
+                return String(blocked);
+            });
+        ",
+        )],
+    );
+    fx.server.execute("set secret_key initial");
+    fx.server
+        .execute("add_convar_permission reader read secret_key");
+    fx.server
+        .execute("add_convar_permission backup read secret_key");
+    fx.server
+        .execute("add_ace resource.intruder command.set allow");
+    fx.server.execute("ensure reader");
+    fx.server.execute("ensure intruder");
+
+    assert_eq!(fx.text("intruder", "attack"), "true");
+    fx.server.tick(Instant::now());
+    assert_eq!(fx.text("reader", "read"), "initial");
+    assert_eq!(
+        fx.manager().convar("secret_key").as_deref(),
+        Some("initial")
+    );
+    assert_eq!(fx.manager().convar("sv_httpAllowPrivate"), None);
+
+    assert_eq!(fx.text("reader", "write_ok"), "true");
+    assert_eq!(
+        fx.manager().convar("secret_key").as_deref(),
+        Some("rotated")
+    );
+
+    fx.server.execute("list_convar_permissions");
+    fx.server
+        .execute("remove_convar_permission reader read secret_key");
+    assert_eq!(fx.text("reader", "read"), "hidden");
+    assert_eq!(fx.text("reader", "write_ok"), "false");
+    assert_eq!(fx.text("intruder", "attack"), "true");
+    fx.server.tick(Instant::now());
+
+    fx.server
+        .execute("remove_convar_permission backup read secret_key");
+    assert_eq!(fx.text("reader", "read"), "rotated");
+}

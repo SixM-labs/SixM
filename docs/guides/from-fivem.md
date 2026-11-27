@@ -156,11 +156,15 @@ Each resource runs in an isolated **Lua 5.4** state inside `sixm-lua`:
   folder (`nil` for any other resource).
 
 For comparison with the [FiveM sandbox](https://docs.fivem.net/docs/developers/sandbox/),
-SixM uses resource-relative paths through its file natives and refuses symbolic
-links and cross-resource writes. Server operators use
-[`add_convar_permission`](../server.md#private-convar-readers) to restrict
-reads of plain server convars. Neither resource runtime exposes a child-process
-or native-module loader API.
+SixM uses resource-relative paths through its file natives, refuses symbolic
+links, cross-resource writes, and `SaveResourceFile` overwrites of manifests or
+script files (`.lua`/`.js`), and blocks `PerformHttpRequest` access or redirects
+to loopback, link-local, and private addresses unless `sv_httpAllowPrivate` is
+enabled. Server operators use
+[`add_convar_permission`](../server.md#private-convar-readers) and
+`remove_convar_permission` to control access to plain server convars, while
+bootstrap/security convars remain console-only. Neither resource runtime
+exposes a child-process or native-module loader API.
 
 ### 2. `ExecuteCommand` runs with `resource.<name>` permissions
 

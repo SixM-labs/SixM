@@ -312,7 +312,7 @@ fn install_server_convars(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -
     for (name, kind) in setters {
         let setter = bind_fn(lua, weak, move |rt, (convar, value): (String, String)| {
             players::server(&*rt.host()?)?
-                .set_convar(&convar, &value, kind)
+                .set_convar_for_resource(&rt.resource, &convar, &value, kind)
                 .map_err(lua_err)
         })?;
         globals.raw_set(name, setter)?;

@@ -10,6 +10,8 @@ use sixm_net::Identity;
 
 /// Convar naming the folder that is scanned for resources.
 const RESOURCES_PATH: &str = "sixm_resourcesPath";
+/// Convar naming the folder storing server resource key-value files.
+pub(crate) const KVP_PATH: &str = "sixm_kvpPath";
 /// Convar naming the file that keeps the server's certificate. Empty means a
 /// new certificate on every start.
 const IDENTITY_FILE: &str = "sixm_identityFile";
@@ -27,6 +29,22 @@ const EXPOSE_IDENTIFIERS: &str = "sv_exposePlayerIdentifiers";
 pub(crate) const RCON_PASSWORD: &str = "rcon_password";
 /// Whether the HTTP listener runs. On unless set to `false` or `0`.
 const HTTP_ENABLED: &str = "sv_httpEnabled";
+/// Whether `PerformHttpRequest` may connect to loopback, link-local, or private
+/// network addresses. Off unless set to `true` or `1`.
+pub(crate) const HTTP_ALLOW_PRIVATE: &str = "sv_httpAllowPrivate";
+
+/// Security-critical and bootstrap convars writable only from the server
+/// console or `server.cfg`.
+const CONSOLE_ONLY_CONVARS: [&str; 8] = [
+    RCON_PASSWORD,
+    HTTP_ALLOW_PRIVATE,
+    HTTP_ENABLED,
+    EXPOSE_IDENTIFIERS,
+    IDENTITY_FILE,
+    RESOURCES_PATH,
+    KVP_PATH,
+    ENDPOINT,
+];
 /// Convar naming how many seconds a resource's HTTP handler may take to
 /// complete its response.
 const HTTP_HANDLER_TIMEOUT: &str = "sixm_httpHandlerTimeout";
@@ -170,10 +188,21 @@ impl Convars {
             .map(|entry| entry.kind)
     }
 
+    /// Whether `name` is a console-only convar that scripts and remote users
+    /// cannot change.
+    pub(crate) fn is_console_only(name: &str) -> bool {
+        CONSOLE_ONLY_CONVARS
+            .iter()
+            .any(|protected| name.eq_ignore_ascii_case(protected))
+    }
+
     /// Adds a reader of an ordinary convar. Public convars have no private-read policy.
     pub(crate) fn add_reader(&mut self, name: &str, resource: &str) -> Result<(), &'static str> {
         if name.eq_ignore_ascii_case(RCON_PASSWORD) {
             return Err("rcon_password is console-only");
+        }
+        if Self::is_console_only(name) {
+            return Err("console-only convars cannot have script readers");
         }
         if matches!(
             self.kind(name),
@@ -186,6 +215,34 @@ impl Convars {
             .or_default()
             .insert(resource.to_owned());
         Ok(())
+    }
+
+    /// Removes `resource` as a reader of `name`. Returns `(removed, still_restricted)`.
+    pub(crate) fn remove_reader(&mut self, name: &str, resource: &str) -> (bool, bool) {
+        let key = name.to_ascii_lowercase();
+        let Some(readers) = self.readers.get_mut(&key) else {
+            return (false, false);
+        };
+        let removed = readers.remove(resource);
+        let still_restricted = if readers.is_empty() {
+            self.readers.remove(&key);
+            false
+        } else {
+            true
+        };
+        (removed, still_restricted)
+    }
+
+    /// Every `(convar, resource)` reader entry in deterministic order.
+    pub(crate) fn readers(&self) -> Vec<(String, String)> {
+        self.readers
+            .iter()
+            .flat_map(|(convar, resources)| {
+                resources
+                    .iter()
+                    .map(move |resource| (convar.clone(), resource.clone()))
+            })
+            .collect()
     }
 
     /// Whether a convar with this lowercase name has an explicit read policy.
@@ -345,6 +402,15 @@ impl Convars {
     pub(crate) fn expose_player_identifiers(&self) -> bool {
         self.get(EXPOSE_IDENTIFIERS)
             .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+    }
+
+    /// Whether `PerformHttpRequest` may connect to private or loopback
+    /// addresses, from `sv_httpAllowPrivate`. Only `true` or `1` turns it on.
+    pub(crate) fn http_allow_private(&self) -> bool {
+        self.get(HTTP_ALLOW_PRIVATE).is_some_and(|value| {
+            let value = value.trim();
+            value.eq_ignore_ascii_case("true") || value == "1"
+        })
     }
 
     /// Updates the credential outside the convar map exposed to scripts and clients.
@@ -539,5 +605,34 @@ mod tests {
             convars.set(ENTITY_LOCKDOWN, value, ConvarKind::Plain);
             assert_eq!(convars.entity_lockdown(), expected, "{value}");
         }
+    }
+
+    #[test]
+    fn console_only_convars_and_reader_removal_work() {
+        let mut convars = Convars::new();
+        assert!(!convars.http_allow_private());
+        convars.set(HTTP_ALLOW_PRIVATE, "true", ConvarKind::Plain);
+        assert!(convars.http_allow_private());
+        assert!(Convars::is_console_only("SV_HTTPALLOWPRIVATE"));
+        assert!(Convars::is_console_only("sixm_kvpPath"));
+        assert!(!Convars::is_console_only("sv_hostname"));
+        assert!(convars.add_reader("sv_httpAllowPrivate", "app").is_err());
+
+        convars.add_reader("api_key", "a").expect("add a");
+        convars.add_reader("api_key", "b").expect("add b");
+        assert_eq!(
+            convars.readers(),
+            [
+                ("api_key".to_owned(), "a".to_owned()),
+                ("api_key".to_owned(), "b".to_owned()),
+            ]
+        );
+        assert_eq!(convars.remove_reader("API_KEY", "a"), (true, true));
+        assert!(convars.is_restricted("api_key"));
+        assert!(!convars.can_read("api_key", "a"));
+        assert!(convars.can_read("api_key", "b"));
+        assert_eq!(convars.remove_reader("api_key", "b"), (true, false));
+        assert!(!convars.is_restricted("api_key"));
+        assert!(convars.can_read("api_key", "a"));
     }
 }

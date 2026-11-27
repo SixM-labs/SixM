@@ -32,12 +32,16 @@ Scripts run inside a constrained QuickJS runtime per resource:
   `SaveResourceFile`.
 
 The runtime exposes no shell or process API. The server's `PerformHttpRequest`
-passes response data to scripts. `ExecuteCommand` only interprets SixM console
-commands with the resource's permissions.
+blocks loopback, link-local, and private network targets (and redirects to
+them) unless `sv_httpAllowPrivate` is enabled, and passes response data to
+scripts. `ExecuteCommand` only interprets SixM console commands with the
+resource's permissions.
 
 Resource file paths follow the same [file rules](lua-api.md#loadresourcefile)
-as Lua. Server convar getters and listeners respect
-[private convar readers](server.md#private-convar-readers).
+as Lua (`SaveResourceFile` cannot overwrite manifests or scripts). Server
+convar getters, setters, and listeners respect
+[private convar readers](server.md#private-convar-readers) and console-only
+convars.
 
 ## Scheduling, timers, and async
 

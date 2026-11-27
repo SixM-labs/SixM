@@ -107,6 +107,7 @@ fn tick_until(fx: &Fixture, mut done: impl FnMut() -> bool) {
 fn a_resource_gets_status_body_and_headers_in_its_callback() {
     let fx = Fixture::new();
     fx.server.execute("set sixm_httpWorkers 2");
+    fx.server.execute("set sv_httpAllowPrivate true");
     let base = serve(2, Duration::ZERO);
     let script = format!(
         r"
@@ -145,6 +146,7 @@ exports('count', function() return #LOG end)
 #[test]
 fn a_stopped_resource_gets_no_callback() {
     let fx = Fixture::new();
+    fx.server.execute("set sv_httpAllowPrivate true");
     let base = serve(1, Duration::from_millis(300));
     fx.add_resource(
         "observer",
@@ -180,4 +182,38 @@ fn a_stopped_resource_gets_no_callback() {
 
     // The same resource started again works normally.
     fx.manager().start("fetcher").expect("fetcher restarts");
+}
+
+#[test]
+fn private_and_loopback_http_requests_require_explicit_opt_in() {
+    let fx = Fixture::new();
+    let base = serve(1, Duration::ZERO);
+    let script = format!(
+        "OUT = ''\n\
+         exports('fetch', function()\n\
+             PerformHttpRequest('{base}/ok', function(status, body, _, err)\n\
+                 OUT = status .. '|' .. body .. '|' .. tostring(err ~= '')\n\
+             end)\n\
+         end)\n\
+         exports('out', function() return OUT end)\n"
+    );
+    fx.add_resource(
+        "probe",
+        &manifest(&["server.lua"], &["fetch", "out"], &[]),
+        &[("server.lua", &script)],
+    );
+    fx.manager().start("probe").expect("probe starts");
+
+    fx.manager()
+        .call_export("probe", "fetch", &[], None)
+        .expect("fetch");
+    tick_until(&fx, || !log(&fx, "probe", "out").is_empty());
+    assert_eq!(log(&fx, "probe", "out"), "0||true");
+
+    fx.server.execute("set sv_httpAllowPrivate true");
+    fx.manager()
+        .call_export("probe", "fetch", &[], None)
+        .expect("fetch after opt-in");
+    tick_until(&fx, || log(&fx, "probe", "out").starts_with("201|"));
+    assert_eq!(log(&fx, "probe", "out"), "201|GET /ok  |false");
 }

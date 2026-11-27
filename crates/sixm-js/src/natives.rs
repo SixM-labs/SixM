@@ -352,7 +352,7 @@ fn install_server_convars<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquick
             move |ctx: Ctx<'js>, convar: String, value: String| -> rquickjs::Result<()> {
                 let rt = JsRuntime::upgrade(&ctx, &weak)?;
                 server(&ctx, &*rt.host(&ctx)?)?
-                    .set_convar(&convar, &value, kind)
+                    .set_convar_for_resource(&rt.resource, &convar, &value, kind)
                     .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))
             },
         )?;
