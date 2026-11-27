@@ -4,12 +4,12 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::entities::{EntityEntry, EntityTransform};
+use crate::entities::{EntityEntry, EntityStateUpdate, EntityTransform};
 use crate::files::{FileHash, ResourceEntry};
 use crate::wire::{Args, StateValue};
 
 /// Version of the wire protocol. A client must send it in its `Hello`.
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// Application protocol identifier negotiated during the TLS handshake.
 pub(crate) const ALPN: &[u8] = b"sixm/1";
@@ -299,6 +299,11 @@ pub(crate) enum ServerMessage {
         position: [f32; 3],
         rotation: [f32; 3],
     },
+    /// Delta updates of per-entity replicated state for one frame, carrying
+    /// only the fields that changed since the last frame.
+    EntityStates {
+        updates: Vec<EntityStateUpdate>,
+    },
 }
 
 impl ServerMessage {
@@ -342,4 +347,6 @@ impl ServerMessage {
     pub(crate) const ENTITY_CREATE_REFUSED_TAG: u32 = 18;
     /// Variant index of [`ServerMessage::EntityOwner`] on the wire.
     pub(crate) const ENTITY_OWNER_TAG: u32 = 19;
+    /// Variant index of [`ServerMessage::EntityStates`] on the wire.
+    pub(crate) const ENTITY_STATES_TAG: u32 = 20;
 }

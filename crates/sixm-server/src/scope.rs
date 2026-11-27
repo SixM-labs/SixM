@@ -16,7 +16,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 
 use sixm_core::{EntityInfo, ScriptError, Value, entity_bag};
-use sixm_net::{EntityEntry, NetServer};
+use sixm_net::{EntityEntry, EntityStateUpdate, NetServer};
 use tracing::warn;
 
 use crate::entities::{EntityStore, EntityUpdate};
@@ -196,11 +196,12 @@ pub(crate) struct Scopes {
     /// an entry is in bucket 0.
     pub(crate) buckets: BTreeMap<u32, u32>,
     /// Scratch lists reused between frames: the scope being computed, the
-    /// entities that entered and left, and the transforms of one player.
+    /// entities that entered and left, and the per-player update batches.
     next: Vec<u32>,
     entered: Vec<u32>,
     left: Vec<u32>,
     batch: Vec<EntityUpdate>,
+    state_batch: Vec<EntityStateUpdate>,
 }
 
 impl ResourceManager {
@@ -248,7 +249,7 @@ impl ResourceManager {
             return entities
                 .all()
                 .into_iter()
-                .filter(|(id, _, _)| entities.in_bucket(*id, bucket))
+                .filter(|(id, _, _, _)| entities.in_bucket(*id, bucket))
                 .map(EntityEntry::from)
                 .collect();
         }
@@ -262,8 +263,8 @@ impl ResourceManager {
             .iter()
             .filter_map(|&id| {
                 entities
-                    .info_and_epoch(id)
-                    .map(|(info, epoch)| EntityEntry::from((id, info, epoch)))
+                    .info_state_and_epoch(id)
+                    .map(|(info, state, epoch)| EntityEntry::from((id, info, state, epoch)))
             })
             .collect();
         scopes.players.insert(player, scopes.next.clone());
@@ -283,10 +284,11 @@ impl ResourceManager {
     /// the radius of the player's ped. With scoping off, every player of the
     /// bucket is told.
     pub(crate) fn announce_created(&self, id: u32, info: EntityInfo) {
-        let entry = EntityEntry::from((id, info, 0));
         let mut guard = self.scopes.borrow_mut();
         let scopes = &mut *guard;
         let entities = self.entities.borrow();
+        let state = entities.state(id).unwrap_or_default();
+        let entry = EntityEntry::from((id, info, state, 0));
         let bucket = entities.bucket(id);
         if scopes.radius <= 0.0 {
             if bucket == 0 && scopes.buckets.is_empty() {
@@ -506,6 +508,60 @@ impl ResourceManager {
         }
     }
 
+    /// Sends each player the state updates, from `updates`, of the entities it
+    /// holds. Each player gets at most one batch.
+    pub(crate) fn send_scoped_states(&self, updates: &[EntityStateUpdate]) {
+        if updates.is_empty() {
+            return;
+        }
+        let mut guard = self.scopes.borrow_mut();
+        let scopes = &mut *guard;
+        for (&player, scope) in &scopes.players {
+            scopes.state_batch.clear();
+            scopes.state_batch.extend(
+                updates
+                    .iter()
+                    .filter(|update| scope.binary_search(&update.id).is_ok())
+                    .copied(),
+            );
+            if scopes.state_batch.is_empty() {
+                continue;
+            }
+            self.with_server(|server| {
+                if let Err(err) = server.send_entity_states(player, &scopes.state_batch) {
+                    warn!("cannot send the entity states to player {player}: {err}");
+                }
+            });
+        }
+    }
+
+    /// Sends each player the state updates, from `updates`, of the entities of
+    /// its bucket. Used for scoping off while buckets are in use. Each player
+    /// gets at most one batch.
+    pub(crate) fn send_bucketed_states(&self, updates: &[EntityStateUpdate]) {
+        let entities = self.entities.borrow();
+        let mut guard = self.scopes.borrow_mut();
+        let scopes = &mut *guard;
+        for &player in scopes.players.keys() {
+            let bucket = bucket_in(&scopes.buckets, player);
+            scopes.state_batch.clear();
+            scopes.state_batch.extend(
+                updates
+                    .iter()
+                    .filter(|update| entities.in_bucket(update.id, bucket))
+                    .copied(),
+            );
+            if scopes.state_batch.is_empty() {
+                continue;
+            }
+            self.with_server(|server| {
+                if let Err(err) = server.send_entity_states(player, &scopes.state_batch) {
+                    warn!("cannot send the entity states to player {player}: {err}");
+                }
+            });
+        }
+    }
+
     /// Sends each player the transforms, from `updates`, of the entities of its
     /// bucket. Used for scoping off while buckets are in use. Each player gets
     /// at most one batch.
@@ -592,10 +648,10 @@ impl ResourceManager {
     /// Sends `player` the entity `id` as it is now, then every replicated key
     /// of its state bag.
     fn send_entity_to(&self, player: u32, id: u32, entities: &EntityStore) {
-        let Some((info, epoch)) = entities.info_and_epoch(id) else {
+        let Some((info, state, epoch)) = entities.info_state_and_epoch(id) else {
             return;
         };
-        let entry = EntityEntry::from((id, info, epoch));
+        let entry = EntityEntry::from((id, info, state, epoch));
         let bag = entity_bag(id);
         let keys = self.state.borrow().replicated_in(&bag);
         self.with_server(|server| {

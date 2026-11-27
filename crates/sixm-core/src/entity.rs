@@ -8,6 +8,56 @@
 /// Most entities that exist at once on a server.
 pub const MAX_ENTITIES: usize = 65_536;
 
+/// Default health and max health for newly created entities (peds, vehicles, objects).
+pub const DEFAULT_ENTITY_HEALTH: i32 = 200;
+
+/// Attachment of an entity to a parent entity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EntityAttachment {
+    /// Id of the parent entity this entity is attached to.
+    pub parent: u32,
+    /// Bone index on the parent entity.
+    pub bone_index: i32,
+    /// Local position offset from the parent in metres.
+    pub offset: [f32; 3],
+    /// Local rotation offset relative to the parent in degrees: pitch, roll, yaw.
+    pub rotation: [f32; 3],
+}
+
+/// Replicated per-entity state beyond transform and ownership.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EntityState {
+    /// Whether the entity's position is frozen. Frozen entities refuse owner
+    /// transform updates.
+    pub frozen: bool,
+    /// Linear velocity in metres per second.
+    pub velocity: [f32; 3],
+    /// Current health.
+    pub health: i32,
+    /// Maximum health.
+    pub max_health: i32,
+    /// Whether the entity is visible.
+    pub visible: bool,
+    /// Opacity from `0` (transparent) to `255` (opaque).
+    pub alpha: u8,
+    /// Attachment to a parent entity, or `None` when detached.
+    pub attachment: Option<EntityAttachment>,
+}
+
+impl Default for EntityState {
+    fn default() -> Self {
+        Self {
+            frozen: false,
+            velocity: [0.0; 3],
+            health: DEFAULT_ENTITY_HEALTH,
+            max_health: DEFAULT_ENTITY_HEALTH,
+            visible: true,
+            alpha: 255,
+            attachment: None,
+        }
+    }
+}
+
 /// What kind of game object an entity is. The codes are the ones
 /// `GetEntityType` returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -99,5 +149,17 @@ mod tests {
         assert!(is_finite([0.0, -1.5, 1e30]));
         assert!(!is_finite([f32::NAN, 0.0, 0.0]));
         assert!(!is_finite([0.0, f32::INFINITY, 0.0]));
+    }
+
+    #[test]
+    fn default_entity_state_has_expected_values() {
+        let state = EntityState::default();
+        assert!(!state.frozen);
+        assert_eq!(state.velocity, [0.0; 3]);
+        assert_eq!(state.health, DEFAULT_ENTITY_HEALTH);
+        assert_eq!(state.max_health, DEFAULT_ENTITY_HEALTH);
+        assert!(state.visible);
+        assert_eq!(state.alpha, 255);
+        assert_eq!(state.attachment, None);
     }
 }

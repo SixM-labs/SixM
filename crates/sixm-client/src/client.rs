@@ -6,10 +6,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use sixm_core::{EntityInfo, Value};
+use sixm_core::{EntityInfo, EntityState, Value};
 use sixm_net::{
-    ClientEvent, EntityTransform, FILE_KIND_CLIENT, FILE_KIND_FILE, FILE_KIND_SHARED, FileEntry,
-    Fingerprint, Identity, NetClient, NetError, ResourceEntry,
+    ClientEvent, EntityStateUpdate, EntityTransform, FILE_KIND_CLIENT, FILE_KIND_FILE,
+    FILE_KIND_SHARED, FileEntry, Fingerprint, Identity, NetClient, NetError, ResourceEntry,
 };
 use sixm_resources::ClientFileKind;
 
@@ -88,11 +88,14 @@ pub enum ClientNotice {
     EntityCreated {
         id: u32,
         info: EntityInfo,
+        state: EntityState,
         epoch: u32,
     },
     /// New positions and rotations, as `(id, position, rotation, epoch)`.
     /// Entities the client does not know are ignored.
     EntityTransforms { updates: Vec<EntityTransform> },
+    /// Delta updates of per-entity replicated state.
+    EntityStates { updates: Vec<EntityStateUpdate> },
     /// An entity was deleted.
     EntityDeleted { id: u32 },
     /// A block of entity ids this client may create entities with.
@@ -332,12 +335,19 @@ impl Client {
                 let epoch = entity.epoch;
                 // The network decoder already rejects unknown kinds, so this
                 // conversion does not fail for a frame it accepted.
-                let Ok((id, info)) = <(u32, EntityInfo)>::try_from(entity) else {
+                let Ok((id, info, state)) = <(u32, EntityInfo, EntityState)>::try_from(entity)
+                else {
                     return None;
                 };
-                ClientNotice::EntityCreated { id, info, epoch }
+                ClientNotice::EntityCreated {
+                    id,
+                    info,
+                    state,
+                    epoch,
+                }
             }
             ClientEvent::EntityTransforms { updates } => ClientNotice::EntityTransforms { updates },
+            ClientEvent::EntityStates { updates } => ClientNotice::EntityStates { updates },
             ClientEvent::EntityDeleted { id } => ClientNotice::EntityDeleted { id },
             ClientEvent::EntityIdLease { first, count } => {
                 ClientNotice::EntityIdLease { first, count }

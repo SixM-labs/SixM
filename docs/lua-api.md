@@ -506,16 +506,40 @@ see [Scoping](#scoping).
 | `NetworkDoesNetworkIdExist` | both | Returns a boolean. |
 | `GetEntityFromStateBagName` | both | `GetEntityFromStateBagName('entity:5')`. Returns the id of an existing entity, or `0`. |
 | `Entity` | both | `Entity(entity)`. Returns a table with a `state` field: the entity's state bag, named `entity:<id>`. |
+| `FreezeEntityPosition` | server | `FreezeEntityPosition(entity, toggle)`. Freezes or unfreezes an entity. Frozen entities refuse owner transform updates. |
+| `IsEntityPositionFrozen` | both | `IsEntityPositionFrozen(entity)`. Returns a boolean (default `false`). |
+| `SetEntityVelocity` | server | `SetEntityVelocity(entity, x, y, z)`. Sets the entity's velocity in m/s. Components must be finite. |
+| `GetEntityVelocity` | both | `GetEntityVelocity(entity)`. Returns a `vector3` (default `vector3(0, 0, 0)`). |
+| `SetEntityHealth` | server | `SetEntityHealth(entity, health)`. Sets entity health (clamped to `>= 0`). |
+| `GetEntityHealth` | both | `GetEntityHealth(entity)`. Returns an integer (default `200`, `0` when unknown). |
+| `SetEntityMaxHealth` | server | `SetEntityMaxHealth(entity, max)`. Sets maximum health (clamped to `>= 0`). |
+| `GetEntityMaxHealth` | both | `GetEntityMaxHealth(entity)`. Returns an integer (default `200`, `0` when unknown). |
+| `SetEntityVisible` | server | `SetEntityVisible(entity, toggle [, ...])`. Sets whether the entity is visible. |
+| `IsEntityVisible` | both | `IsEntityVisible(entity)`. Returns a boolean (default `true`, `false` when unknown). |
+| `SetEntityAlpha` | server | `SetEntityAlpha(entity, alpha [, ...])`. Sets opacity, clamped to `0..=255`. |
+| `GetEntityAlpha` | both | `GetEntityAlpha(entity)`. Returns an integer in `0..=255` (default `255`, `0` when unknown). |
+| `ResetEntityAlpha` | server | `ResetEntityAlpha(entity)`. Resets opacity to `255`. |
+| `AttachEntityToEntity` | server | `AttachEntityToEntity(entity, target, boneIndex, x, y, z, rx, ry, rz, ...)`. Attaches `entity` to `target` with local offset and rotation. Rejects self-attachment and attachment cycles. |
+| `DetachEntity` | server | `DetachEntity(entity [, ...])`. Detaches `entity` from its parent if attached. |
+| `GetEntityAttachedTo` | both | `GetEntityAttachedTo(entity)`. Returns the parent entity id, or `0` when unattached or unknown. |
+| `IsEntityAttached` | both | `IsEntityAttached(entity)`. Returns a boolean. |
 
 - A model is a hash or a name. A name is hashed like `GetHashKey`, and a
   negative hash names the same model as its unsigned value.
 - Reading an unknown entity gives a neutral value: `vector3(0, 0, 0)`, `0` or
   `false`. Setting one does nothing.
-- Coordinates and angles must be finite. NaN or infinity raises an error, on
-  both sides and whoever owns the entity.
-- The server sends creation and deletion at once. Moves are collected, and each
-  entity that moved is sent once per server frame with its latest transform.
-  Only the part that changed, the position, the rotation or both, is sent.
+- Coordinates, angles, velocities, health and alpha must be finite numbers.
+  NaN or infinity raises an error, on both sides and whoever owns the entity.
+- The server sends creation and deletion at once. Moves and entity state changes
+  are collected once per server frame: transforms travel in `EntityTransforms`,
+  and state deltas (frozen, velocity, health, max health, visibility, alpha,
+  attachment) travel in `EntityStates` with only changed fields encoded.
+- Newly created entities default to unfrozen (`false`), zero velocity, health
+  and max health `200` (all kinds), visible (`true`), alpha `255`, and detached.
+- While frozen or attached, an entity refuses independent owner transform
+  updates. Moving a parent entity (from the server or the parent's owner)
+  recomputes attached children's world transforms and queues updates for them.
+  Deleting a parent automatically detaches its children.
 - Other clients see positions to 1 cm and angles to about 0.0055 degrees, since
   transforms travel quantized. A script's own values stay exact on the server,
   and the owner of an entity keeps the exact values it set on its client.

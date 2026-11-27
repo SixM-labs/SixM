@@ -11,7 +11,9 @@
 use std::rc::Weak;
 
 use mlua::{Function, Lua, Table, Value as LuaValue};
-use sixm_core::{EntityInfo, EntityKind, entity_bag, entity_of_bag, joaat};
+use sixm_core::{
+    EntityAttachment, EntityInfo, EntityKind, EntityState, entity_bag, entity_of_bag, joaat,
+};
 
 use crate::client::client;
 use crate::players::{player_id, server, whole_number};
@@ -79,14 +81,17 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
     for (name, function) in functions {
         globals.raw_set(name, function)?;
     }
-    for (name, function) in owner_functions(lua, weak)? {
+    for (name, function) in owner_functions(lua, weak)?
+        .into_iter()
+        .chain(state_read_functions(lua, weak)?)
+    {
         globals.raw_set(name, function)?;
     }
     Ok(())
 }
 
 /// Installs the functions only a server can use: creation, movement, deletion,
-/// the owners of entities and the lists of entities of each kind.
+/// the owners of entities, replicated entity state and the lists of entities of each kind.
 pub(crate) fn install_server(
     lua: &Lua,
     weak: &Weak<LuaRuntime>,
@@ -96,6 +101,7 @@ pub(crate) fn install_server(
         .into_iter()
         .chain(change_functions(lua, weak)?)
         .chain(server_owner_functions(lua, weak)?)
+        .chain(state_write_functions(lua, weak)?)
         .chain(list_functions(lua, weak)?)
         .chain(bucket_functions(lua, weak)?)
     {
@@ -262,6 +268,189 @@ fn movement_functions(
         ("SetEntityCoordsNoOffset", set_coords_no_offset),
         ("SetEntityHeading", set_heading),
         ("SetEntityRotation", set_rotation_function),
+    ])
+}
+
+/// The functions that read replicated entity state on both sides.
+fn state_read_functions(
+    lua: &Lua,
+    weak: &Weak<LuaRuntime>,
+) -> mlua::Result<Vec<(&'static str, Function)>> {
+    let is_frozen = bind_fn(lua, weak, |rt, (entity,): (LuaValue,)| {
+        Ok(existing_state(rt, &entity)?.is_some_and(|(_, state)| state.frozen))
+    })?;
+    let get_velocity = bind_fn(lua, weak, |rt, (entity,): (LuaValue,)| {
+        let velocity = existing_state(rt, &entity)?.map_or([0.0; 3], |(_, state)| state.velocity);
+        rt.lua.create_userdata(Vector::new(velocity))
+    })?;
+    let get_health = bind_fn(lua, weak, |rt, (entity,): (LuaValue,)| {
+        Ok(existing_state(rt, &entity)?.map_or(0, |(_, state)| i64::from(state.health)))
+    })?;
+    let get_max_health = bind_fn(lua, weak, |rt, (entity,): (LuaValue,)| {
+        Ok(existing_state(rt, &entity)?.map_or(0, |(_, state)| i64::from(state.max_health)))
+    })?;
+    let is_visible = bind_fn(lua, weak, |rt, (entity,): (LuaValue,)| {
+        Ok(existing_state(rt, &entity)?.is_some_and(|(_, state)| state.visible))
+    })?;
+    let get_alpha = bind_fn(lua, weak, |rt, (entity,): (LuaValue,)| {
+        Ok(existing_state(rt, &entity)?.map_or(0, |(_, state)| i64::from(state.alpha)))
+    })?;
+    let get_attached_to = bind_fn(lua, weak, |rt, (entity,): (LuaValue,)| {
+        Ok(existing_state(rt, &entity)?
+            .and_then(|(_, state)| state.attachment)
+            .map_or(0, |att| i64::from(att.parent)))
+    })?;
+    let is_attached = bind_fn(lua, weak, |rt, (entity,): (LuaValue,)| {
+        Ok(existing_state(rt, &entity)?.is_some_and(|(_, state)| state.attachment.is_some()))
+    })?;
+    Ok(vec![
+        ("IsEntityPositionFrozen", is_frozen),
+        ("GetEntityVelocity", get_velocity),
+        ("GetEntityHealth", get_health),
+        ("GetEntityMaxHealth", get_max_health),
+        ("IsEntityVisible", is_visible),
+        ("GetEntityAlpha", get_alpha),
+        ("GetEntityAttachedTo", get_attached_to),
+        ("IsEntityAttached", is_attached),
+    ])
+}
+
+/// The functions that mutate replicated entity state on the server.
+fn state_write_functions(
+    lua: &Lua,
+    weak: &Weak<LuaRuntime>,
+) -> mlua::Result<Vec<(&'static str, Function)>> {
+    let freeze = bind_fn(lua, weak, |rt, (entity, toggle): (LuaValue, bool)| {
+        if let Some(id) = existing_id(rt, &entity)? {
+            server(&*rt.host()?)?
+                .set_entity_frozen(id, toggle)
+                .map_err(lua_err)?;
+        }
+        Ok(())
+    })?;
+    let set_velocity = bind_fn(
+        lua,
+        weak,
+        |rt, (entity, x, y, z): (LuaValue, LuaValue, LuaValue, LuaValue)| {
+            let velocity = coordinates(&x, &y, &z)?;
+            if let Some(id) = existing_id(rt, &entity)? {
+                server(&*rt.host()?)?
+                    .set_entity_velocity(id, velocity)
+                    .map_err(lua_err)?;
+            }
+            Ok(())
+        },
+    )?;
+    let set_health = bind_fn(lua, weak, |rt, (entity, health): (LuaValue, LuaValue)| {
+        let health = non_negative_i32(&health, "health")?;
+        if let Some(id) = existing_id(rt, &entity)? {
+            server(&*rt.host()?)?
+                .set_entity_health(id, health)
+                .map_err(lua_err)?;
+        }
+        Ok(())
+    })?;
+    let set_max_health = bind_fn(lua, weak, |rt, (entity, max): (LuaValue, LuaValue)| {
+        let max = non_negative_i32(&max, "max")?;
+        if let Some(id) = existing_id(rt, &entity)? {
+            server(&*rt.host()?)?
+                .set_entity_max_health(id, max)
+                .map_err(lua_err)?;
+        }
+        Ok(())
+    })?;
+    let set_visible = bind_fn(lua, weak, |rt, (entity, toggle): (LuaValue, bool)| {
+        if let Some(id) = existing_id(rt, &entity)? {
+            server(&*rt.host()?)?
+                .set_entity_visible(id, toggle)
+                .map_err(lua_err)?;
+        }
+        Ok(())
+    })?;
+    let set_alpha = bind_fn(lua, weak, |rt, (entity, alpha): (LuaValue, LuaValue)| {
+        let alpha = clamped_alpha(&alpha)?;
+        if let Some(id) = existing_id(rt, &entity)? {
+            server(&*rt.host()?)?
+                .set_entity_alpha(id, alpha)
+                .map_err(lua_err)?;
+        }
+        Ok(())
+    })?;
+    let reset_alpha = bind_fn(lua, weak, |rt, (entity,): (LuaValue,)| {
+        if let Some(id) = existing_id(rt, &entity)? {
+            server(&*rt.host()?)?
+                .set_entity_alpha(id, 255)
+                .map_err(lua_err)?;
+        }
+        Ok(())
+    })?;
+    let mut functions = vec![
+        ("FreezeEntityPosition", freeze),
+        ("SetEntityVelocity", set_velocity),
+        ("SetEntityHealth", set_health),
+        ("SetEntityMaxHealth", set_max_health),
+        ("SetEntityVisible", set_visible),
+        ("SetEntityAlpha", set_alpha),
+        ("ResetEntityAlpha", reset_alpha),
+    ];
+    functions.extend(attachment_write_functions(lua, weak)?);
+    Ok(functions)
+}
+
+/// The server functions that attach or detach an entity.
+fn attachment_write_functions(
+    lua: &Lua,
+    weak: &Weak<LuaRuntime>,
+) -> mlua::Result<Vec<(&'static str, Function)>> {
+    let attach = bind_fn(
+        lua,
+        weak,
+        |rt,
+         (entity, target, bone_index, x, y, z, rx, ry, rz): (
+            LuaValue,
+            LuaValue,
+            LuaValue,
+            LuaValue,
+            LuaValue,
+            LuaValue,
+            LuaValue,
+            LuaValue,
+            LuaValue,
+        )| {
+            let bone_index = whole_number(&bone_index)
+                .and_then(|n| i32::try_from(n).ok())
+                .ok_or_else(|| {
+                    mlua::Error::runtime("AttachEntityToEntity: boneIndex must be an integer")
+                })?;
+            let offset = coordinates(&x, &y, &z)?;
+            let rotation = [real(&rx, "rx")?, real(&ry, "ry")?, real(&rz, "rz")?];
+            let (Some(id), Some(target_id)) =
+                (existing_id(rt, &entity)?, existing_id(rt, &target)?)
+            else {
+                return Ok(());
+            };
+            server(&*rt.host()?)?
+                .attach_entity_to_entity(
+                    id,
+                    EntityAttachment {
+                        parent: target_id,
+                        bone_index,
+                        offset,
+                        rotation,
+                    },
+                )
+                .map_err(lua_err)
+        },
+    )?;
+    let detach = bind_fn(lua, weak, |rt, (entity,): (LuaValue,)| {
+        if let Some(id) = existing_id(rt, &entity)? {
+            server(&*rt.host()?)?.detach_entity(id).map_err(lua_err)?;
+        }
+        Ok(())
+    })?;
+    Ok(vec![
+        ("AttachEntityToEntity", attach),
+        ("DetachEntity", detach),
     ])
 }
 
@@ -560,6 +749,23 @@ fn existing(rt: &LuaRuntime, value: &LuaValue) -> mlua::Result<Option<(u32, Enti
     Ok(rt.host()?.entity(id).map(|info| (id, info)))
 }
 
+/// The id of the entity `value` names, when it names one that exists.
+fn existing_id(rt: &LuaRuntime, value: &LuaValue) -> mlua::Result<Option<u32>> {
+    let Some(id) = entity_id(value) else {
+        return Ok(None);
+    };
+    Ok(rt.host()?.entity(id).map(|_| id))
+}
+
+/// The id and replicated state of the entity `value` names, when it names one
+/// that exists.
+fn existing_state(rt: &LuaRuntime, value: &LuaValue) -> mlua::Result<Option<(u32, EntityState)>> {
+    let Some(id) = entity_id(value) else {
+        return Ok(None);
+    };
+    Ok(rt.host()?.entity_state(id).map(|state| (id, state)))
+}
+
 /// Creates an entity of `kind` with the given model, position and rotation, and
 /// returns its id.
 fn spawn(
@@ -682,6 +888,41 @@ fn real(value: &LuaValue, what: &str) -> mlua::Result<f32> {
 /// The finite position that `x`, `y` and `z` hold.
 fn coordinates(x: &LuaValue, y: &LuaValue, z: &LuaValue) -> mlua::Result<[f32; 3]> {
     Ok([real(x, "x")?, real(y, "y")?, real(z, "z")?])
+}
+
+/// Reads a finite number and clamps it into `0..=i32::MAX`.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the value is finite and clamped to 0..=i32::MAX first"
+)]
+fn non_negative_i32(value: &LuaValue, what: &str) -> mlua::Result<i32> {
+    match value {
+        LuaValue::Integer(int) => {
+            Ok(i32::try_from((*int).clamp(0, i64::from(i32::MAX))).unwrap_or(i32::MAX))
+        }
+        LuaValue::Number(float) if float.is_finite() => {
+            Ok(float.round().clamp(0.0, f64::from(i32::MAX)) as i32)
+        }
+        LuaValue::Number(_) => Err(mlua::Error::runtime(format!(
+            "{what} must be a finite number"
+        ))),
+        _ => Err(mlua::Error::runtime(format!("{what} must be a number"))),
+    }
+}
+
+/// Reads a finite number and clamps it into `0..=255`.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the value is finite and clamped to 0..=255 first"
+)]
+fn clamped_alpha(value: &LuaValue) -> mlua::Result<u8> {
+    match value {
+        LuaValue::Integer(int) => Ok(u8::try_from((*int).clamp(0, 255)).unwrap_or(255)),
+        LuaValue::Number(float) if float.is_finite() => Ok(float.round().clamp(0.0, 255.0) as u8),
+        LuaValue::Number(_) => Err(mlua::Error::runtime("alpha must be a finite number")),
+        _ => Err(mlua::Error::runtime("alpha must be a number")),
+    }
 }
 
 fn invalid_entity(function: &str) -> mlua::Error {

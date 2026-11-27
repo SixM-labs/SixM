@@ -149,6 +149,7 @@ Server to client (`ServerMessage`):
 | 17 | `EntityIdLease` | `first: u32`, `count: u32` |
 | 18 | `EntityCreateRefused` | `id: u32`, `reason: string`, at most 256 bytes |
 | 19 | `EntityOwner` | `id: u32`, `owner: u32` (`0` for server), `epoch: u32`, `position: [f32; 3]`, `rotation: [f32; 3]` |
+| 20 | `EntityStates` | list of delta state updates (see [Entity states](#entity-states)) |
 
 ### Convars
 
@@ -160,7 +161,7 @@ decoding budget. A join snapshot may span several frames.
 
 ### Handshake
 
-1. The client sends `Hello` with `protocol = 12` and its player name. The
+1. The client sends `Hello` with `protocol = 13` and its player name. The
    server has already verified the client certificate, so only a client with a
    certificate gets this far.
 2. A different protocol number is refused with `Rejected`, for example
@@ -235,6 +236,8 @@ entities the player holds, and sends:
   scope": the client forgets the entity as if it had been deleted.
 - `EntityTransforms`, at most one message per player per frame, with the
   transforms of the entities that player holds.
+- `EntityStates`, at most one batch per player per frame, with delta state
+  updates for the entities that player holds whose state changed.
 - A `StateBag` write to an `entity:<id>` bag reaches only the players that hold
   the entity. Other bags are still sent to every player.
 
@@ -270,12 +273,34 @@ split across frames, as with the other entity messages.
 ### Entity entries
 
 An entity entry is `(id: u32, kind: u8, model: u32, position: 3 floats,
-rotation: 3 floats, owner: u32, epoch: u32)`. The id is also the entity's
-network id. `kind` is 1 for a ped, 2 for a vehicle and 3 for an object, and any
-other value is rejected. The model is the `GetHashKey` hash, and the rotation is
-pitch, roll and yaw in degrees. `owner` is the id of the player whose client
-moves the entity, or `0` when only the server does. `epoch` is the entity's
-[teleport epoch](#teleport-epochs).
+rotation: 3 floats, owner: u32, epoch: u32, state: EntityStateEntry)`. The id is
+also the entity's network id. `kind` is 1 for a ped, 2 for a vehicle and 3 for
+an object, and any other value is rejected. The model is the `GetHashKey` hash,
+and the rotation is pitch, roll and yaw in degrees. `owner` is the id of the
+player whose client moves the entity, or `0` when only the server does.
+`epoch` is the entity's [teleport epoch](#teleport-epochs). `state` carries
+`(frozen: bool, velocity: [f32; 3], health: i32, max_health: i32, visible: bool,
+alpha: u8, attachment: Option<(parent: u32, bone_index: i32, offset: [f32; 3],
+rotation: [f32; 3])>)`.
+
+### Entity states
+
+`EntityStates` (server tag 20) is a variant index, a count and the delta state
+updates, each of which is:
+
+| Field | Encoding |
+|---|---|
+| `id` | varint `u32` |
+| `flags` | one byte bitmask. Bits 0..=6 select `frozen`, `velocity`, `health`, `max_health`, `visible`, `alpha`, `attachment`. Bit 7 must be 0, and at least one bit in `0..=6` must be set. |
+| `frozen` | if bit 0 is set: `bool` |
+| `velocity` | if bit 1 is set: `[f32; 3]` (all components finite) |
+| `health` | if bit 2 is set: zigzag varint `i32` |
+| `max_health` | if bit 3 is set: zigzag varint `i32` |
+| `visible` | if bit 4 is set: `bool` |
+| `alpha` | if bit 5 is set: `u8` |
+| `attachment` | if bit 6 is set: `Option<(parent: u32, bone_index: i32, offset: [f32; 3], rotation: [f32; 3])>` (offsets/rotations finite, `parent != id`) |
+
+Each update costs one unit of the decoding budget.
 
 ## File transfer
 
@@ -344,7 +369,7 @@ are read from the frame, so their size cannot exceed it.
 
 ## Versioning
 
-- `PROTOCOL_VERSION` is `11`. It is sent in `Hello`. A server refuses any other
+- `PROTOCOL_VERSION` is `13`. It is sent in `Hello`. A server refuses any other
   value.
 - The ALPN string is `sixm/1`. It does not change with the protocol version.
 - Enum order, field order and limits can change between protocol versions.

@@ -19,7 +19,7 @@ use sixm_core::Value;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-use crate::entities::{EntityEntry, EntityTransform};
+use crate::entities::{EntityEntry, EntityStateUpdate, EntityTransform};
 use crate::error::NetError;
 use crate::files::{FileHash, MAX_FILE_SIZE, ResourceEntry, hash_hex};
 use crate::identity::{Credentials, Fingerprint, Identity};
@@ -65,6 +65,8 @@ pub enum ClientEvent {
     /// New positions and rotations, as `(id, position, rotation, epoch)`.
     /// `epoch` changes each time the server moves the entity itself.
     EntityTransforms { updates: Vec<EntityTransform> },
+    /// Delta updates of per-entity replicated state.
+    EntityStates { updates: Vec<EntityStateUpdate> },
     /// An entity was deleted.
     EntityDeleted { id: u32 },
     /// A block of entity ids this client may create entities with.
@@ -588,6 +590,7 @@ async fn greet(
             | ServerMessage::EntityIdLease { .. }
             | ServerMessage::EntityCreateRefused { .. }
             | ServerMessage::EntityOwner { .. }
+            | ServerMessage::EntityStates { .. }
             | ServerMessage::Convars { .. } => {
                 return Err(NetError::Protocol(
                     "the server sent a message before the welcome".to_owned(),
@@ -892,6 +895,7 @@ fn dispatch_server_message(
             position,
             rotation,
         },
+        ServerMessage::EntityStates { updates } => ClientEvent::EntityStates { updates },
         ServerMessage::EntitySnapshot { entities } => ClientEvent::EntitySnapshot { entities },
         ServerMessage::Convars { entries } => ClientEvent::Convars { entries },
         ServerMessage::Kicked { reason } => {
