@@ -1,0 +1,17 @@
+[package]
+name = "sixm-kvp"
+description = "Persistent per-resource key-value storage for SixM: an append-only log written by a background thread."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -12,6 +12,7 @@ use sixm_core::{EventContext, EventSource, Host, ResourceName, ScriptError, Scri
 
 use crate::events::Events;
 use crate::exports::Exports;
+use crate::kvp::Finds;
 use crate::natives;
 use crate::promise::Promises;
 use crate::refs::RefTable;
@@ -64,6 +65,8 @@ pub struct LuaRuntime {
     pub(crate) refs: RefCell<RefTable>,
     /// Releases requested while `refs` was borrowed, applied at the next safe point.
     pub(crate) deferred_releases: RefCell<Vec<u32>>,
+    /// Open `StartFindKvp` cursors.
+    pub(crate) kvp_finds: RefCell<Finds>,
 }
 
 impl LuaRuntime {
@@ -105,6 +108,7 @@ impl LuaRuntime {
             exports: RefCell::default(),
             refs: RefCell::default(),
             deferred_releases: RefCell::default(),
+            kvp_finds: RefCell::default(),
         });
         natives::install(&runtime, &helpers).into_script()?;
         Ok(runtime)

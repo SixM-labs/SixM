@@ -11,6 +11,7 @@ mod entities;
 mod events;
 mod exports;
 mod json;
+mod kvp;
 mod natives;
 mod players;
 mod promise;

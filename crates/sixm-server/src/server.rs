@@ -83,6 +83,7 @@ impl Server {
         self.drain_commands();
         self.manager.expire_deferrals(now);
         self.manager.flush_entities();
+        self.manager.flush_kvp_due(now);
         self.manager.frames.borrow_mut().record(started.elapsed());
     }
 
@@ -175,6 +176,7 @@ impl Server {
     /// stop first, and the network closes every connection on the way out.
     pub fn shutdown(&self) {
         self.manager.stop_all();
+        self.manager.shutdown_kvp();
         self.manager.stop_network();
         info!("Server stopped");
     }
