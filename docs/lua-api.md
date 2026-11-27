@@ -576,6 +576,28 @@ Which side moves what:
 
 `NetworkGetEntityOwner` is available on the server only.
 
+### Routing buckets
+
+Routing buckets are separate worlds on one server. Every player and entity is in
+one bucket, bucket 0 by default. A player holds only the entities of its own
+bucket, in scope or not, and an entity reaches only the players of its bucket.
+A player's ped moves with the player. Changing a bucket adds and removes the
+affected entities for the clients in the same call. Server only:
+
+- `SetPlayerRoutingBucket(player, bucket)`, `GetPlayerRoutingBucket(player)`.
+  The ped of the player moves with it. Unknown players are ignored and read as 0.
+- `SetEntityRoutingBucket(entity, bucket)`, `GetEntityRoutingBucket(entity)`.
+- `GetPlayersInRoutingBucket(bucket)`: the connected players of a bucket, in
+  ascending order (a SixM extension).
+- `SetRoutingBucketPopulationEnabled(bucket, enabled)` and
+  `GetRoutingBucketPopulationEnabled(bucket)`: stored per bucket, enabled by
+  default. Nothing acts on it until a game adapter exists.
+- `SetRoutingBucketEntityLockdownMode(bucket, mode)` and
+  `GetRoutingBucketEntityLockdownMode(bucket)`: `inactive` (default), `relaxed`
+  or `strict`. Stored per bucket for the entity creation rules.
+
+Buckets are a bucket number from 0 to 4294967295. Bucket 0 costs nothing extra.
+
 ## HTTP (server only)
 
 `PerformHttpRequest(url, callback, method, data, headers, options)` starts an

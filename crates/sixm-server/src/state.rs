@@ -163,17 +163,24 @@ impl ResourceManager {
         }
     }
 
-    /// Sends a replicated write to every accepted player, or with scoping on
-    /// and an entity bag, to the players that hold the entity. Does nothing
+    /// Sends a replicated write to every accepted player, or for an entity bag
+    /// to the players that hold the entity (with scoping on) or that share its
+    /// routing bucket (with buckets in use). Does nothing
     /// while the network is not running.
     fn broadcast_state(&self, bag: &str, key: &str, value: &Value) -> Result<(), ScriptError> {
         let server = self.network.server.borrow();
         let Some(server) = server.as_ref() else {
             return Ok(());
         };
-        match entity_of_bag(bag).filter(|_| self.scoping()) {
-            Some(entity) => self.send_entity_state(server, entity, bag, key, value),
-            None => server
+        match entity_of_bag(bag) {
+            Some(entity) if self.scoping() => {
+                self.send_entity_state(server, entity, bag, key, value)
+            }
+            Some(entity) if self.buckets_in_use() => {
+                let bucket = self.entities.borrow().bucket(entity);
+                self.send_state_in_bucket(server, bucket, bag, key, value)
+            }
+            _ => server
                 .broadcast_state(bag, key, value)
                 .map_err(|err| ScriptError::Runtime(err.to_string())),
         }
