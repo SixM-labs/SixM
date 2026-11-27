@@ -32,7 +32,8 @@ is SixM-labs/SixM. Read README.md and CONTRIBUTING.md first.
 `crates/sixm-core` (contract: values, Host/ServerHost/ClientHost,
 ScriptRuntime), `sixm-resources` (fxmanifest, globs, dependencies), `sixm-lua`
 (sandboxed Lua 5.4 runtime, FiveM API), `sixm-net` (QUIC transport, protocol,
-pinning, file transfer), `sixm-server`, `sixm-client`. Example server in
+pinning, file transfer), `sixm-kvp` (resource KVP store with a background
+writer thread), `sixm-server`, `sixm-client`. Example server in
 `examples/server-data`.
 
 ## Known gaps

@@ -17,6 +17,7 @@ use sixm_core::{
     EntityInfo, EntityKind, EventContext, EventSource, FuncRef, Host, ResourceName, ResourceState,
     ScriptRuntime, Value,
 };
+use sixm_kvp::KvpStore;
 use sixm_lua::LuaRuntime;
 use sixm_resources::ClientFileKind;
 use tracing::{error, info, warn};
@@ -78,6 +79,8 @@ pub struct ClientRuntime {
     pub(crate) local_player: u32,
     /// Parent of the data folder of each resource.
     data_dir: PathBuf,
+    /// The key-value stores of the resources, one `<resource>.kvp` file each in `data_dir`.
+    pub(crate) kvp: RefCell<KvpStore>,
     pub(crate) convars: RefCell<Convars>,
     /// Running resources in start order.
     running: RefCell<Vec<Rc<LuaRuntime>>>,
@@ -117,11 +120,13 @@ impl ClientRuntime {
     /// Nothing runs until [`start_synced`](Self::start_synced).
     pub fn new(client: Client, data_dir: impl Into<PathBuf>) -> Rc<Self> {
         let local_player = client.player();
+        let data_dir: PathBuf = data_dir.into();
         Rc::new_cyclic(|me| Self {
             me: me.clone(),
             client: RefCell::new(client),
             local_player,
-            data_dir: data_dir.into(),
+            kvp: RefCell::new(KvpStore::new(data_dir.clone())),
+            data_dir,
             convars: RefCell::new(Convars::new()),
             running: RefCell::default(),
             snapshot: RefCell::new(Rc::from(Vec::new())),
@@ -177,6 +182,7 @@ impl ClientRuntime {
         }
         self.drain_commands();
         self.send_owned_moves();
+        self.kvp.borrow_mut().flush_due(now);
     }
 
     /// Sends the latest transform of each owned entity moved since the last
@@ -306,6 +312,7 @@ impl ClientRuntime {
     /// runs while its resource is still up.
     pub fn shutdown(&self) {
         self.stop_all();
+        self.kvp.borrow_mut().shutdown();
         info!("Client stopped");
     }
 

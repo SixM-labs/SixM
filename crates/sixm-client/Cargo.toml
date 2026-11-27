@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 sixm-core.workspace = true
+sixm-kvp.workspace = true
 sixm-lua.workspace = true
 sixm-net.workspace = true
 sixm-resources.workspace = true

@@ -288,6 +288,48 @@ library can tell who called it. It is `nil` when no resource caused it.
   be read. On the client, only running resources are known, and the metadata
   is what the server sent with them.
 
+## Key-value storage
+
+Each resource has its own key-value store, which survives restarts. A resource
+reads and writes only its own keys, under the same names FiveM uses.
+
+| Name | Side | Signature and result |
+|---|---|---|
+| `GetResourceKvpString` | both | `GetResourceKvpString(key)`. Returns the stored text, or `nil`. |
+| `GetResourceKvpInt` | both | `GetResourceKvpInt(key)`. Returns the stored integer, or `0` when unset or not an integer. |
+| `GetResourceKvpFloat` | both | `GetResourceKvpFloat(key)`. Returns the stored float, or `0.0` when unset or not a number. |
+| `SetResourceKvp` | both | `SetResourceKvp(key, value)`. Stores a string. Returns a boolean, `false` when refused. |
+| `SetResourceKvpInt` | both | `SetResourceKvpInt(key, value)`. Stores an integer as decimal text. Returns a boolean. |
+| `SetResourceKvpFloat` | both | `SetResourceKvpFloat(key, value)`. Stores a float as text that reads back exactly. Returns a boolean. |
+| `DeleteResourceKvp` | both | `DeleteResourceKvp(key)`. Returns `true` when the key was set. |
+| `StartFindKvp` | both | `StartFindKvp(prefix)`. Returns a handle to the keys that start with `prefix`, in byte order. |
+| `FindKvp` | both | `FindKvp(handle)`. Returns the next key, or `nil` when there are no more. |
+| `EndFindKvp` | both | `EndFindKvp(handle)`. Closes the handle. |
+| `FlushResourceKvp` | both | `FlushResourceKvp()`. Hands every pending change to the writer thread now. It does not wait for the disk. |
+
+The `NoSync` variants (`SetResourceKvpNoSync`, `SetResourceKvpIntNoSync`,
+`SetResourceKvpFloatNoSync` and `DeleteResourceKvpNoSync`) do the same as their
+plain names, because every write is batched (see below).
+
+- A key is 1 to 256 bytes. A key that is not valid UTF-8 raises an error.
+  A value is at most 64 KiB. A write that breaks a limit is refused: nothing
+  is stored and the function returns `false`.
+- Integers and floats are stored as text, so `GetResourceKvpString` returns
+  `"42"` for a stored integer.
+- Reads and writes only touch memory. A background thread writes the changes
+  to the disk, in batches of at most one per second, so a script never waits
+  for the disk. `FlushResourceKvp` hands the changes over at once, and the
+  server and client write everything on shutdown. A crash can lose the writes
+  of the last second or two.
+- Storage is append-only, and the file is rewritten when it holds much more dead
+  data than live data. A damaged end of a file, such as one cut short by a crash,
+  is dropped, and the records before it are kept.
+- The server keeps each resource in `<sixm_kvpPath>/<resource>.kvp`. The client
+  keeps it in the resource's data folder area, `<cache>/data/<resource>.kvp`,
+  and it is local to that client.
+- A resource name that is not plain (ASCII letters, digits, `-`, `_` and `.`,
+  with no leading dot) has no store: reads find nothing and writes return `false`.
+
 ## Convars and commands
 
 | Name | Side | Signature and result |

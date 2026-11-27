@@ -12,6 +12,7 @@ use sixm_core::{
     FuncRef, Host, PlayerInfo, ResourceName, ResourceState, ScriptError, ScriptRuntime, ServerHost,
     Value,
 };
+use sixm_kvp::KvpStore;
 use sixm_lua::LuaRuntime;
 use sixm_net::{
     MAX_CONVAR_NAME_LEN, MAX_CONVAR_VALUE_LEN, MAX_EXPORT_NAME_LEN, MAX_EXPORTS, MAX_METADATA,
@@ -118,6 +119,8 @@ pub struct ResourceManager {
     /// Lifecycle states that override the running state while a resource
     /// starts or stops, oldest first.
     transitions: RefCell<Vec<(ResourceName, ResourceState)>>,
+    /// The key-value store of the resources, opened on first use in `sixm_kvpPath`.
+    kvp: RefCell<Option<KvpStore>>,
 }
 
 impl ResourceManager {
@@ -147,6 +150,7 @@ impl ResourceManager {
             advertised: RefCell::default(),
             hashes: RefCell::default(),
             transitions: RefCell::default(),
+            kvp: RefCell::default(),
         })
     }
 
@@ -379,6 +383,36 @@ impl ResourceManager {
     fn ensure_scanned(&self) {
         if !self.scanned.get() {
             self.refresh();
+        }
+    }
+
+    /// Runs `f` on the key-value store, opening it on first use. The store is
+    /// rooted at the `sixm_kvpPath` convar, `cache/kvp` by default.
+    fn with_kvp<T>(&self, f: impl FnOnce(&mut KvpStore) -> T) -> T {
+        let mut slot = self.kvp.borrow_mut();
+        let store = slot.get_or_insert_with(|| {
+            let root = self
+                .convar("sixm_kvpPath")
+                .filter(|path| !path.is_empty())
+                .unwrap_or_else(|| "cache/kvp".to_owned());
+            KvpStore::new(root)
+        });
+        f(store)
+    }
+
+    /// Hands the key-value changes that are due to the writer thread. Called
+    /// once per frame; a store that was never used costs nothing.
+    pub(crate) fn flush_kvp_due(&self, now: Instant) {
+        if let Some(store) = self.kvp.borrow_mut().as_mut() {
+            store.flush_due(now);
+        }
+    }
+
+    /// Writes every pending key-value change and stops the writer thread, at
+    /// shutdown.
+    pub(crate) fn shutdown_kvp(&self) {
+        if let Some(store) = self.kvp.borrow_mut().as_mut() {
+            store.shutdown();
         }
     }
 
@@ -870,6 +904,26 @@ impl Host for ResourceManager {
             }
         }
         std::fs::write(full, data).is_ok()
+    }
+
+    fn kvp_get(&self, resource: &str, key: &str) -> Option<Vec<u8>> {
+        self.with_kvp(|store| store.get(resource, key))
+    }
+
+    fn kvp_set(&self, resource: &str, key: &str, value: &[u8]) -> bool {
+        self.with_kvp(|store| store.set(resource, key, value))
+    }
+
+    fn kvp_delete(&self, resource: &str, key: &str) -> bool {
+        self.with_kvp(|store| store.delete(resource, key))
+    }
+
+    fn kvp_keys(&self, resource: &str, prefix: &str) -> Vec<String> {
+        self.with_kvp(|store| store.keys(resource, prefix))
+    }
+
+    fn kvp_flush(&self) {
+        self.with_kvp(KvpStore::flush);
     }
 
     fn state_get(&self, bag: &str, key: &str) -> Option<Value> {
