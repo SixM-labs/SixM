@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use sixm_core::{
     ClientHost, ClientTarget, ConvarKind, EntityInfo, EntityKind, EventContext, EventSource,
-    FuncRef, Host, PlayerInfo, ResourceName, ResourceState, ScriptError, ScriptRuntime, ServerHost,
-    Value,
+    FuncRef, Host, HttpRequest, PlayerInfo, ResourceName, ResourceState, ScriptError,
+    ScriptRuntime, ServerHost, Value,
 };
 use sixm_lua::LuaRuntime;
 use sixm_net::{
@@ -18,13 +18,14 @@ use sixm_net::{
     MAX_METADATA_KEY_LEN, MAX_METADATA_VALUE_LEN, PublishedResource, Traffic,
 };
 use sixm_resources::{Catalog, DependencyError, ResourceError, ScanIssue};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::access::AccessStore;
 use crate::commands::CommandSource;
 use crate::convars::Convars;
 use crate::entities::{EntityStore, EntityUpdate};
 use crate::host_functions::{HostFunctions, is_host};
+use crate::http::{Completion, HttpClient};
 use crate::network::Network;
 use crate::perf::FrameHistory;
 use crate::resource_files::{FileHashes, listing};
@@ -118,6 +119,8 @@ pub struct ResourceManager {
     /// Lifecycle states that override the running state while a resource
     /// starts or stops, oldest first.
     transitions: RefCell<Vec<(ResourceName, ResourceState)>>,
+    /// Outgoing HTTP requests started by the scripts.
+    http: HttpClient,
 }
 
 impl ResourceManager {
@@ -147,6 +150,7 @@ impl ResourceManager {
             advertised: RefCell::default(),
             hashes: RefCell::default(),
             transitions: RefCell::default(),
+            http: HttpClient::default(),
         })
     }
 
@@ -321,6 +325,28 @@ impl ResourceManager {
                 return;
             };
             self.stop_runtime(&runtime);
+        }
+    }
+
+    /// Calls the callbacks of the HTTP requests that finished since the last
+    /// frame. The outcome of a request whose resource has stopped meanwhile is
+    /// dropped without touching the stopped runtime.
+    pub(crate) fn deliver_http(&self) {
+        for Completion {
+            resource,
+            callback,
+            outcome,
+        } in self.http.take_finished()
+        {
+            self.http.finish(&resource, callback.instance);
+            let Some(runtime) = self.runtime_of(&callback) else {
+                debug!("`{resource}` stopped before its HTTP request finished");
+                continue;
+            };
+            if let Err(err) = runtime.call_ref(callback.id, &outcome.into_args()) {
+                warn!("HTTP callback of `{resource}` failed: {err}");
+            }
+            runtime.release_ref(callback.id);
         }
     }
 
@@ -606,6 +632,7 @@ impl ResourceManager {
         self.rebuild_snapshot();
         self.clear_transition(&name);
         self.withdraw(&name);
+        self.http.discard(&name, runtime.instance());
         runtime.shutdown();
         info!("Stopping resource {name}");
     }
@@ -798,6 +825,25 @@ impl Host for ResourceManager {
         }
         self.runtime_of(func)
             .is_some_and(|runtime| runtime.retain_ref(func.id))
+    }
+
+    fn perform_http_request(
+        &self,
+        resource: &ResourceName,
+        request: HttpRequest,
+        callback: FuncRef,
+    ) -> Result<(), ScriptError> {
+        let (timeout, workers) = {
+            let convars = self.convars.borrow();
+            (convars.http_timeout(), convars.http_workers())
+        };
+        let result = self
+            .http
+            .start(resource, request, callback.clone(), timeout, workers);
+        if result.is_err() {
+            self.release_ref(&callback);
+        }
+        result
     }
 
     fn release_ref(&self, func: &FuncRef) {

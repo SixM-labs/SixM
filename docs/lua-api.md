@@ -530,6 +530,39 @@ Which side moves what:
 
 `NetworkGetEntityOwner` is available on the server only.
 
+## HTTP (server only)
+
+`PerformHttpRequest(url, callback, method, data, headers, options)` starts an
+HTTP request and returns at once. `callback(statusCode, body, headers, errorData)`
+runs later, on a frame, with the outcome:
+
+- A response of any status code, including `404` or `500`, is a result:
+  `statusCode` is the status, `body` the response body, and `errorData` is `''`.
+- A request that fails before a response arrives (DNS, connection, TLS, timeout,
+  too many redirects, or a body over 16 MiB) calls the callback with status `0`,
+  an empty body, no headers and the message as `errorData`.
+- `headers` maps lower-case header names to values. Repeated headers are joined with `, `.
+
+Arguments:
+
+- `url`: an absolute `http` or `https` URL. Anything else raises an error.
+- `method`: such as `'GET'` (the default) or `'POST'`. An invalid method raises an error.
+- `data`: the request body, a string. Optional.
+- `headers`: a table of header names to string or number values. Optional.
+- `options.timeout`: the timeout in milliseconds for this request. Optional. The
+  default is the `sixm_httpTimeout` convar. Other keys are ignored.
+
+Redirects are followed up to 5. A resource may have 64 requests in flight at
+once; a 65th raises an error, and so does a request while 256 others wait for a
+worker. A callback whose resource has stopped by the time the response arrives is
+dropped, and requests of a stopped resource that have not begun never run.
+Requests run on a small pool of worker threads (`sixm_httpWorkers`), so they
+never block a frame.
+
+The client does not have `PerformHttpRequest`. A request from a player's
+machine would expose the player's address and could reach hosts the server
+operator never chose. A client asks the server for the data instead.
+
 ## JSON
 
 | Name | Side | Signature and result |

@@ -219,6 +219,8 @@ Convar names are case-insensitive. Scripts read them with `GetConvar` and
 | `endpoint_add_udp` | `0.0.0.0:30120` | Listen address. Read when the network starts. An address that does not parse stops the network. |
 | `sv_maxclients` | `32` | Player limit, clamped to 1 to 1024. A value that is not a number gives 32. |
 | `sixm_deferralTimeout` | `120` | Seconds a connection that `playerConnecting` deferred may wait for `done`, clamped to 1 to 3600. A deferral that runs longer is refused with `connection timed out`. A value that is not a number gives 120. |
+| `sixm_httpTimeout` | `30` | Seconds an HTTP request from `PerformHttpRequest` may take, clamped to 1 to 600, unless its `options.timeout` gives another. A value that is not a number gives 30. See [HTTP](lua-api.md#http-server-only). |
+| `sixm_httpWorkers` | `8` | Threads that run the HTTP requests of `PerformHttpRequest`, clamped to 1 to 64. Read when the first request starts; a later change needs a restart. A value that is not a number gives 8. |
 | `sv_hostname` | `SixM Server` | Server name sent to players when they connect. |
 | `sixm_playerModel` | `player` | Model name of the ped created for each player when it is admitted. The ped is owned by the player and deleted when it leaves. |
 | `sixm_cullRadius` | `424` | Distance in metres within which a player is sent entities, measured from its ped. Entities the player owns are always sent. Clamped to 0 to 100000. `0` turns scoping off, so every player is sent every entity. A value that is not a number gives 424. A change takes effect on the next frame. See [Scoping](lua-api.md#scoping). |

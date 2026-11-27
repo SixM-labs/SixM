@@ -5,9 +5,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use sixm_core::{
-    ClientHost, EntityInfo, EntityKind, EventSource, FuncRef, GLOBAL_BAG, Host, ResourceName,
-    ResourceState, ScriptError, ScriptRuntime, ServerHost, Value, entity_of_bag, is_finite,
-    player_of_bag,
+    ClientHost, EntityInfo, EntityKind, EventSource, FuncRef, GLOBAL_BAG, Host, HttpRequest,
+    ResourceName, ResourceState, ScriptError, ScriptRuntime, ServerHost, Value, entity_of_bag,
+    is_finite, player_of_bag,
 };
 use tracing::warn;
 
@@ -74,6 +74,20 @@ impl Host for ClientRuntime {
         if let Some(runtime) = self.runtime_of(func) {
             runtime.release_ref(func.id);
         }
+    }
+
+    /// Refused: `PerformHttpRequest` is a server function, and the client
+    /// binds no such global. The callback is released at once.
+    fn perform_http_request(
+        &self,
+        _resource: &ResourceName,
+        _request: HttpRequest,
+        callback: FuncRef,
+    ) -> Result<(), ScriptError> {
+        self.release_ref(&callback);
+        Err(ScriptError::Runtime(
+            "PerformHttpRequest is not available on the client".to_owned(),
+        ))
     }
 
     /// The client runs every line itself, so `_invoker` does not change how it runs.

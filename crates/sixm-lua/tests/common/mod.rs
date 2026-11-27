@@ -12,8 +12,8 @@ use std::time::Instant;
 
 use sixm_core::{
     ClientHost, ClientTarget, ConvarKind, EntityInfo, EntityKind, EventContext, EventSource,
-    FuncRef, GLOBAL_BAG, Host, PlayerInfo, ResourceName, ResourceState, ScriptError, ScriptRuntime,
-    ServerHost, Value, entity_bag, entity_of_bag, is_finite, player_of_bag,
+    FuncRef, GLOBAL_BAG, Host, HttpRequest, PlayerInfo, ResourceName, ResourceState, ScriptError,
+    ScriptRuntime, ServerHost, Value, entity_bag, entity_of_bag, is_finite, player_of_bag,
 };
 use sixm_lua::LuaRuntime;
 use tempfile::TempDir;
@@ -80,6 +80,9 @@ pub struct TestHost {
     pub states: RefCell<HashMap<String, ResourceState>>,
     /// Manifest metadata pairs by resource name, in declaration order.
     pub metadata: RefCell<HashMap<String, Vec<(String, String)>>>,
+    /// HTTP requests started by scripts, as `(resource, request, callback)`.
+    /// Nothing performs them: a test delivers the outcome by calling `callback`.
+    pub http_requests: RefCell<Vec<(ResourceName, HttpRequest, FuncRef)>>,
     /// Access grants as `(principal, object)` pairs. A principal has exactly the
     /// objects it is granted: the test host does not model inheritance.
     pub grants: RefCell<Vec<(String, String)>>,
@@ -217,6 +220,18 @@ impl Host for TestHost {
         if let Some(runtime) = self.find_instance(&func.owner, func.instance) {
             runtime.release_ref(func.id);
         }
+    }
+
+    fn perform_http_request(
+        &self,
+        resource: &ResourceName,
+        request: HttpRequest,
+        callback: FuncRef,
+    ) -> Result<(), ScriptError> {
+        self.http_requests
+            .borrow_mut()
+            .push((resource.clone(), request, callback));
+        Ok(())
     }
 
     fn execute_command(&self, line: &str, _invoker: Option<&ResourceName>) {

@@ -79,6 +79,7 @@ impl Server {
     /// sends the entity changes. The frame's duration is recorded for `perf`.
     pub fn tick(&self, now: Instant) {
         let started = Instant::now();
+        self.manager.deliver_http();
         self.manager.tick_all(now);
         self.drain_commands();
         self.manager.expire_deferrals(now);

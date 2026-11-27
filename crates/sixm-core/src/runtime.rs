@@ -122,6 +122,21 @@ pub enum ScriptError {
     Runtime(String),
 }
 
+/// An outgoing HTTP request, as a script starts it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpRequest {
+    /// The absolute `http` or `https` URL.
+    pub url: String,
+    /// The request method, such as `GET`. Validated by the host.
+    pub method: String,
+    /// Request headers, in the order the script gave them.
+    pub headers: Vec<(String, String)>,
+    /// The request body, when the script sent `data`.
+    pub body: Option<Vec<u8>>,
+    /// Overrides the host's default timeout, from `options.timeout`.
+    pub timeout: Option<Duration>,
+}
+
 /// How the server treats a convar's value, decided by the command or function
 /// that stored it last.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,6 +220,17 @@ pub trait Host {
 
     /// Gives back one [`retain_ref`](Self::retain_ref).
     fn release_ref(&self, func: &FuncRef);
+
+    /// Starts an outgoing HTTP request for `resource` (`PerformHttpRequest`).
+    /// The host calls `callback` once with the outcome, from a later frame,
+    /// and releases it afterwards. When the request cannot start, the error is
+    /// returned and the callback is released at once.
+    fn perform_http_request(
+        &self,
+        resource: &ResourceName,
+        request: HttpRequest,
+        callback: FuncRef,
+    ) -> Result<(), ScriptError>;
 
     /// Queues a console command. It runs after the current script call
     /// returns, never re-entrantly, so a script can safely stop itself.

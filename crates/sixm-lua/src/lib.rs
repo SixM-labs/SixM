@@ -10,6 +10,7 @@ mod convert;
 mod entities;
 mod events;
 mod exports;
+mod http;
 mod json;
 mod natives;
 mod players;
