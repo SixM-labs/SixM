@@ -29,6 +29,7 @@ may change the protocol and the API.
 - Official IDE type definitions in `types/sixm.lua` and `types/sixm.d.ts`, plus
   clean-room `[system]/sessionmanager` and `[system]/baseevents` resources in
   `examples/server-data`.
+- Lua vector helpers `vector`, `dot`, `cross`, `norm`, `inv` and `slerp`.
 
 ### Changed
 

@@ -833,6 +833,50 @@ function vec4(x, y, z, w) end
 ---@return quat
 function quat(w, x, y, z) end
 
+--- Builds a vector2, vector3 or vector4 from numbers and vectors, chosen by the total component count.
+---@overload fun(a: number, b: number): vector2
+---@overload fun(a: number, b: number, c: number): vector3
+---@overload fun(a: number, b: number, c: number, d: number): vector4
+---@param ... number | vector2 | vector3 | vector4
+---@return vector2 | vector3 | vector4
+function vector(...) end
+
+--- The sum of the component products of two vectors of the same size.
+---@overload fun(a: vector2, b: vector2): number
+---@overload fun(a: vector3, b: vector3): number
+---@overload fun(a: vector4, b: vector4): number
+---@param a vector2 | vector3 | vector4
+---@param b vector2 | vector3 | vector4
+---@return number
+function dot(a, b) end
+
+--- The cross product of two vector3.
+---@param a vector3
+---@param b vector3
+---@return vector3
+function cross(a, b) end
+
+--- Scales a vector or quat to length 1. A zero vector is returned unchanged.
+---@overload fun(v: vector2): vector2
+---@overload fun(v: vector3): vector3
+---@overload fun(v: vector4): vector4
+---@overload fun(q: quat): quat
+---@param v vector2 | vector3 | vector4 | quat
+---@return vector2 | vector3 | vector4 | quat
+function norm(v) end
+
+--- The inverse of a quat: its conjugate divided by its squared length. Errors for a zero quat.
+---@param q quat
+---@return quat
+function inv(q) end
+
+--- Spherical interpolation between two quats. `t` is not clamped.
+---@param a quat
+---@param b quat
+---@param t number
+---@return quat
+function slerp(a, b, t) end
+
 -- =============================================================================
 -- Entities and routing buckets
 -- =============================================================================

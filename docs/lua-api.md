@@ -471,6 +471,14 @@ Behaviour:
 | `vector3` / `vec3` | both | `vector3(x, y, z)`. Returns a 3D vector. |
 | `vector4` / `vec4` | both | `vector4(x, y, z, w)`. Returns a 4D vector. |
 | `quat` | both | `quat(w, x, y, z)`, `quat(w, vector3)` or `quat(other)`. Returns a quaternion with `.w`, `.x`, `.y`, `.z`, `*` composition/rotation and `json.encode`. |
+| `vector(...)` | both | Flattens numbers and vectors like `vector3(...)`. Returns a vector2, vector3 or vector4 by the total component count. |
+| `dot(a, b)` | both | Sum of the component products of two vectors of the same size. Returns a number. |
+| `cross(a, b)` | both | Cross product of two `vector3`. Returns a `vector3`. |
+| `norm(v)` | both | `v` scaled to length 1, as a vector or quat. A zero vector is returned unchanged. |
+| `inv(q)` | both | Inverse of a quat: its conjugate divided by its squared length. Raises an error for a zero quat. |
+| `slerp(a, b, t)` | both | Spherical interpolation between two quats. `t` is not clamped. Returns a quat. |
+
+- `vector` picks vector2/3/4 from the total component count.
 
 - Arguments can be numbers or vectors, flattened in order:
   `vector3(vector2(1, 2), 3)`. A single number fills every component:

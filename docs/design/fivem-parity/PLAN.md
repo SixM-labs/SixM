@@ -284,9 +284,9 @@ equivalent / no effect / absent".
 
 ## 4. Status
 
-| ID | Status | By | Commit |
+| ID | Status | By | Commit (find with) |
 |---|---|---|---|
-| A1 | todo | | |
+| A1 | done | Claude (Haiku impl, Sonnet review) | `git log --grep "^A1:"` |
 | A2 | todo | | |
 | A3 | todo | | |
 | A4 | todo | | |
