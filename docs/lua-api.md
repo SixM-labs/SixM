@@ -77,6 +77,8 @@ Server (`EventSource::Local` unless noted):
 | `onResourceStop` | `name` | Before the resource stops. |
 | `onServerResourceStop` | `name` | Same time as `onResourceStop`. |
 | `playerConnecting` | `name`, `setKickReason` | `source` is the new player's id, which is assigned before the handlers run. Call `setKickReason(text)` or `CancelEvent()` to refuse. `setKickReason` is valid only during this event. |
+| `entityCreated` | `entity` | Right after a script created an entity. Its state bag already exists. |
+| `entityRemoved` | `entity` | Before an entity is deleted, while it still exists. |
 | `playerJoining` | none | `source` is the player's id. Fired after admission and after the player's state bag exists. |
 | `playerDropped` | `reason` | `source` is the player's id. The player is still listed while the handlers run. |
 
@@ -211,20 +213,90 @@ Behaviour:
   replicated state". A non-replicated write is kept on the client only.
 - Writing to the bag of a player who is not connected is an error.
 
+## Vectors
+
+| Name | Side | Signature and result |
+|---|---|---|
+| `vector2` / `vec2` | both | `vector2(x, y)`. Returns a 2D vector. |
+| `vector3` / `vec3` | both | `vector3(x, y, z)`. Returns a 3D vector. |
+| `vector4` / `vec4` | both | `vector4(x, y, z, w)`. Returns a 4D vector. |
+
+- Arguments can be numbers or vectors, flattened in order:
+  `vector3(vector2(1, 2), 3)`. A single number fills every component:
+  `vector3(0)`. Any other count raises an error.
+- Components are 32-bit floats, as in the games.
+- Read components as `v.x`, `v.y`, `v.z`, `v.w` or `v[1]` to `v[n]`. A
+  component the vector does not have reads as `nil`.
+- Swizzles of 2 to 4 letters return a new vector: `v.xy`, `v.zyx`, `v.xxyy`.
+- Assigning a component changes the vector in place: `v.z = 10`.
+- `+` and `-` work between vectors of the same size, or with a number on either
+  side. `*` and `/` also work component-wise between vectors of the same size.
+  Unary minus negates. Mixing sizes raises an error.
+- `#v` is the length, so `#(a - b)` is the distance between two points.
+- `==` compares size and components. `tostring(v)` gives `vector3(1.0, 2.0, 3.0)`.
+- `type(v)` returns `"vector2"`, `"vector3"` or `"vector4"`.
+- Vectors cross exports, events, state bags and the network as vectors.
+- Unlike FiveM, a vector is shared, not copied: after `local b = a`, setting
+  `b.x` also changes `a`. Arithmetic always returns a new vector.
+
+## Entities
+
+The server owns every entity. Clients keep a copy and cannot change it. An
+entity id is also its network id and its handle on both sides. There is no
+game yet, so an entity is its kind, model, position and rotation. Every client
+receives every entity: there is no distance scoping yet.
+
+| Name | Side | Signature and result |
+|---|---|---|
+| `CreateVehicle` | server | `CreateVehicle(model, x, y, z, heading, isNetwork, netMissionEntity)`. Returns the new entity id. The flags are ignored. |
+| `CreateVehicleServerSetter` | server | `CreateVehicleServerSetter(model, type, x, y, z, heading)`. Returns the id. `type` is ignored. |
+| `CreatePed` | server | `CreatePed(pedType, model, x, y, z, heading, isNetwork, bScriptHostPed)`. Returns the id. |
+| `CreateObject` / `CreateObjectNoOffset` | server | `CreateObject(model, x, y, z, isNetwork, netMissionEntity, doorFlag)`. Returns the id. |
+| `DeleteEntity` | server | `DeleteEntity(entity)`. Does nothing for an unknown entity. |
+| `SetEntityCoords` / `SetEntityCoordsNoOffset` | server | `SetEntityCoords(entity, x, y, z, ...)`. Extra arguments are ignored. |
+| `SetEntityHeading` | server | `SetEntityHeading(entity, heading)`. Keeps pitch and roll. |
+| `SetEntityRotation` | server | `SetEntityRotation(entity, pitch, roll, yaw, ...)`. |
+| `GetAllVehicles` / `GetAllPeds` / `GetAllObjects` | server | Return arrays of entity ids, ascending. |
+| `GetGamePool` | client | `GetGamePool(name)` with `'CVehicle'`, `'CPed'` or `'CObject'`. Returns an array of ids. Other names give an empty array. |
+| `DoesEntityExist` | both | `DoesEntityExist(entity)`. Returns a boolean. |
+| `GetEntityCoords` | both | Returns a `vector3`. |
+| `GetEntityHeading` | both | Returns the yaw in degrees. |
+| `GetEntityRotation` | both | `GetEntityRotation(entity [, order])`. Returns `vector3(pitch, roll, yaw)`. `order` is ignored. |
+| `GetEntityModel` | both | Returns the model hash as a signed integer, like `GetHashKey`. |
+| `GetEntityType` | both | Returns `1` for a ped, `2` for a vehicle, `3` for an object and `0` for none. |
+| `NetworkGetNetworkIdFromEntity` | both | Returns the id, or `0` when the entity does not exist. |
+| `NetworkGetEntityFromNetworkId` | both | Returns the id, or `0` when it does not exist. |
+| `NetworkDoesNetworkIdExist` | both | Returns a boolean. |
+| `GetEntityFromStateBagName` | both | `GetEntityFromStateBagName('entity:5')`. Returns the id of an existing entity, or `0`. |
+| `Entity` | both | `Entity(entity)`. Returns a table with a `state` field: the entity's state bag, named `entity:<id>`. |
+
+- A model is a hash or a name. A name is hashed like `GetHashKey`, and a
+  negative hash names the same model as its unsigned value.
+- Reading an unknown entity gives a neutral value: `vector3(0, 0, 0)`, `0` or
+  `false`. Setting one does nothing.
+- Coordinates and angles must be finite. NaN or infinity raises an error.
+- The server sends creation and deletion at once. Moves are collected, and each
+  entity that moved is sent once per server frame with its latest transform.
+- A deleted entity's state bag is removed on the server and on every client.
+- The console command `entities` lists every entity.
+
 ## JSON
 
 | Name | Side | Signature and result |
 |---|---|---|
-| `json.encode` | both | `json.encode(value)`. Returns a JSON string. Raises an error for functions, userdata, NaN, infinity, invalid UTF-8 and nesting deeper than 64 levels. |
+| `json.encode` | both | `json.encode(value)`. Returns a JSON string. Raises an error for functions, userdata other than vectors, NaN, infinity, invalid UTF-8 and nesting deeper than 64 levels. |
 | `json.decode` | both | `json.decode(text)`. Returns a Lua value. Integers stay integers, JSON `null` becomes `nil`. Raises an error on invalid JSON or invalid UTF-8. |
 
 - A table whose keys are `1..n` encodes as a JSON array. Other tables encode as
   objects. Number keys become strings.
+- A vector encodes as an object of its components, such as
+  `{"x":1.0,"y":2.0,"z":3.0}`. Decoding gives a table, not a vector.
 
 ## Other globals
 
 | Name | Side | Notes |
 |---|---|---|
+| `GetHashKey` | both | `GetHashKey(name)`. Returns the hash of `name` as a signed 32-bit integer, case-insensitive. `GetHashKey('adder')` is `-1216765807`. |
 | `IsDuplicityVersion` | both | `IsDuplicityVersion()`. Returns `true` on the server and `false` on the client. |
 | `print` | both | Writes a line to the log, prefixed with the resource name. Arguments are joined with tabs. |
 | `source` | both | Global. See the events section. |

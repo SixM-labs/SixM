@@ -58,6 +58,9 @@ variants, in this order:
 | 4 | `String` | raw bytes |
 | 5 | `Array` | sequence of values |
 | 6 | `Map` | sequence of key and value pairs |
+| 7 | `Vector2` | two 32-bit floats |
+| 8 | `Vector3` | three 32-bit floats |
+| 9 | `Vector4` | four 32-bit floats |
 
 Function references have no encoding. A peer cannot send one, so it cannot
 forge a reference into server code.
@@ -67,7 +70,7 @@ forge a reference into server code.
 | Limit | Value |
 |---|---|
 | Nesting depth of containers | 64 |
-| Values in one message, map keys included | 65,536 |
+| Values in one message, map keys included | 65,536 (a vector, an entity entry and an entity update count as one each) |
 | Event name length | 256 bytes |
 | Player name length | 1 to 64 characters, after trimming |
 | State bag name and state key length | 256 bytes |
@@ -106,20 +109,29 @@ Server to client (`ServerMessage`):
 | 8 | `ResourceStarted` | one resource entry |
 | 9 | `ResourceStopped` | `name: string` |
 | 10 | `FileUnavailable` | `hash: 32 bytes` |
+| 11 | `EntityCreated` | one entity entry (see below) |
+| 12 | `EntityTransforms` | list of `(id: u32, position: 3 floats, rotation: 3 floats)` |
+| 13 | `EntityDeleted` | `id: u32` |
+| 14 | `EntitySnapshot` | list of entity entries |
 
 ### Handshake
 
-1. The client sends `Hello` with `protocol = 2` and its player name.
+1. The client sends `Hello` with `protocol = 4` and its player name.
 2. A different protocol number is refused with `Rejected`, for example
-   `unsupported protocol version 3, server speaks 2`.
+   `unsupported protocol version 3, server speaks 4`.
 3. A name outside 1 to 64 characters is refused.
 4. The server replies `Welcome`, or `Rejected` with a reason.
 5. The server sends a `Resources` snapshot. It may span several frames, which
    add entries. An empty `Resources` frame ends the snapshot.
-6. The server sends the replicated state as a `StateSnapshot`.
+6. The server sends every existing entity as an `EntitySnapshot`, which may
+   span several frames. With no entities, no frame is sent.
+7. The server sends the replicated state as a `StateSnapshot`.
 
-After the handshake, the server sends `ResourceStarted`, `ResourceStopped` and
-state messages as they happen.
+After the handshake, the server sends `ResourceStarted`, `ResourceStopped`,
+state and entity messages as they happen. `EntityCreated` and `EntityDeleted`
+are sent at once. Moves are collected, and once per server frame every entity
+that moved is sent once, with its latest transform, in `EntityTransforms`
+frames.
 
 ### Resource entries
 
@@ -127,6 +139,14 @@ A resource entry has the resource name, the list of its client files, and its
 client exports. Each file has its name, its kind (shared script, client script
 or data file), its size and its SHA-256 hash. A client that receives a
 `ResourceStarted` replaces any earlier entry with the same name.
+
+### Entity entries
+
+An entity entry is `(id: u32, kind: u8, model: u32, position: 3 floats,
+rotation: 3 floats)`. The id is also the entity's network id. `kind` is 1 for a
+ped, 2 for a vehicle and 3 for an object, and any other value is rejected. The
+model is the `GetHashKey` hash, and the rotation is pitch, roll and yaw in
+degrees.
 
 ## File transfer
 
@@ -161,7 +181,7 @@ Clients keep each file in a cache under its hash. See [client.md](client.md).
 
 ## Versioning
 
-- `PROTOCOL_VERSION` is `2`. It is sent in `Hello`. A server refuses any other
+- `PROTOCOL_VERSION` is `4`. It is sent in `Hello`. A server refuses any other
   value.
 - The ALPN string is `sixm/1`. It does not change with the protocol version.
 - Enum order, field order and limits can change between protocol versions.

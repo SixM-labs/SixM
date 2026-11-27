@@ -82,6 +82,7 @@ same name is never reached.
 | `endpoint_add_udp <ip:port>` | Stores the listen address in `endpoint_add_udp`. It applies at the next start. The address must parse. |
 | `endpoint_add_tcp <ip:port>` | The same as `endpoint_add_udp`. SixM speaks only UDP, and the command logs a note. |
 | `players` | Lists connected players with their id, name and endpoint. |
+| `entities` | Lists every entity with its id, kind, model hash, position and heading. |
 | `state [bag]` | Without a name, lists the state bags. With a name, prints the bag's keys and values. Replicated keys are marked. |
 | `set <name> <value>` | Stores a convar. The value is the rest of the line, joined with single spaces. |
 | `sets <name> <value>` | Same as `set`. |
