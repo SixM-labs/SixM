@@ -9,7 +9,7 @@ use crate::files::{FileHash, ResourceEntry};
 use crate::wire::{Args, StateValue};
 
 /// Version of the wire protocol. A client must send it in its `Hello`.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Application protocol identifier negotiated during the TLS handshake.
 pub(crate) const ALPN: &[u8] = b"sixm/1";
@@ -32,6 +32,8 @@ pub(crate) const MAX_DECODED_VALUES: usize = 65_536;
 
 /// Longest event name in bytes.
 pub(crate) const MAX_EVENT_NAME_LEN: usize = 256;
+/// Longest console line a client may send with [`ClientMessage::Command`], in bytes.
+pub(crate) const MAX_COMMAND_LEN: usize = 4096;
 /// Longest player name in characters, after trimming.
 pub(crate) const MAX_PLAYER_NAME_LEN: usize = 64;
 
@@ -79,6 +81,11 @@ pub(crate) enum ClientMessage {
     RequestFile {
         hash: FileHash,
     },
+    /// A console line the server runs with the player's permissions. Lines
+    /// longer than [`MAX_COMMAND_LEN`] bytes are rejected when decoded.
+    Command {
+        line: String,
+    },
 }
 
 impl ClientMessage {
@@ -88,6 +95,8 @@ impl ClientMessage {
     pub(crate) const EVENT_TAG: u32 = 1;
     /// Variant index of [`ClientMessage::RequestFile`] on the wire.
     pub(crate) const REQUEST_FILE_TAG: u32 = 2;
+    /// Variant index of [`ClientMessage::Command`] on the wire.
+    pub(crate) const COMMAND_TAG: u32 = 3;
 }
 
 /// Messages the server sends on the stream. Decoding is done by the wire

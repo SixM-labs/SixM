@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use sixm_net::{NetError, NetEvent};
 use tracing::{error, info, warn};
 
-use crate::commands;
+use crate::commands::{self, CommandContext};
 use crate::manager::ResourceManager;
 
 /// Most queued commands that run in one drain. Beyond this, scripts are
@@ -54,14 +54,19 @@ impl Server {
 
     /// Runs one console line, then every command it or the scripts queued.
     pub fn execute(&self, line: &str) {
-        commands::run_line(&self.manager, line, 0);
+        commands::run_line(&self.manager, line, CommandContext::console());
         self.drain_commands();
     }
 
     /// Runs one command given as words, name first, then every queued command.
     /// This is how `+command` arguments run.
     pub fn execute_words(&self, words: &[String]) {
-        commands::run_words(&self.manager, words, &words.join(" "), 0);
+        commands::run_words(
+            &self.manager,
+            words,
+            &words.join(" "),
+            CommandContext::console(),
+        );
         self.drain_commands();
     }
 
@@ -180,7 +185,7 @@ impl Server {
                 return;
             }
             ran += 1;
-            commands::run_line(&self.manager, &line, 0);
+            commands::run_line(&self.manager, &line, CommandContext::console());
         }
     }
 }

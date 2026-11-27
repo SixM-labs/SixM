@@ -96,6 +96,9 @@ pub enum NetEvent {
         name: String,
         args: Vec<Value>,
     },
+    /// A player sent a console line to run with its permissions. The network
+    /// does not check the line; the server does.
+    Command { player: u32, line: String },
     /// An accepted player disconnected, was kicked, or broke the protocol.
     Disconnected { player: u32, reason: String },
     /// A connection left before it was accepted or rejected.

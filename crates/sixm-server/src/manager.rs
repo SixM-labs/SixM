@@ -19,6 +19,7 @@ use sixm_net::{
 use sixm_resources::{Catalog, DependencyError, ResourceError, ScanIssue};
 use tracing::{error, info, warn};
 
+use crate::access::AccessStore;
 use crate::convars::Convars;
 use crate::entities::{EntityStore, EntityUpdate};
 use crate::host_functions::{HostFunctions, is_host};
@@ -93,6 +94,8 @@ pub struct ResourceManager {
     pub(crate) entities: RefCell<EntityStore>,
     /// Reused between frames to hold the transforms sent to clients.
     pub(crate) entity_updates: RefCell<Vec<EntityUpdate>>,
+    /// Access control entries and principal links, changed by the `add_ace` family.
+    pub(crate) access: RefCell<AccessStore>,
     /// Functions the server offers to scripts, such as `setKickReason`.
     pub(crate) host_functions: RefCell<HostFunctions>,
     /// Client files of the running resources, in start order. Advertised to
@@ -124,6 +127,7 @@ impl ResourceManager {
             state: RefCell::default(),
             entities: RefCell::default(),
             entity_updates: RefCell::default(),
+            access: RefCell::default(),
             host_functions: RefCell::default(),
             advertised: RefCell::default(),
             hashes: RefCell::default(),
@@ -846,6 +850,10 @@ impl ServerHost for ResourceManager {
 
     fn drop_player(&self, player: u32, reason: &str) {
         self.queue_drop(player, reason);
+    }
+
+    fn is_ace_allowed(&self, principal: &str, object: &str) -> bool {
+        self.ace_allowed(principal, object)
     }
 
     fn create_entity(&self, info: EntityInfo) -> Result<u32, ScriptError> {

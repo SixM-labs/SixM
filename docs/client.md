@@ -70,7 +70,13 @@ The client has no `exec`, `start`, `stop` or `refresh`. Those are server
 commands.
 
 Any other name runs a script command registered with `RegisterCommand`, or
-prints or sets a convar. An unknown name is logged as `No such command`.
+prints or sets a convar. A name that is neither is sent to the server as the
+whole line, and the server runs it with this player's permissions (see
+[server.md](server.md#permissions)). The server logs what it refuses or does
+not know, so the client does not report an unknown name itself.
+
+The client keeps `help`, `quit`, `set`, `sets` and `setr` for itself, so the
+server never sees those lines.
 
 ### Convars
 

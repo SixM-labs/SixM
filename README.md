@@ -141,7 +141,8 @@ The server listens on `endpoint_add_udp` (default `0.0.0.0:30120`) over QUIC.
 `endpoint_add_tcp` is accepted as an alias.
 
 Each player gets a server id, counting up from 1 and never reused while the
-server runs. Scripts see the connection lifecycle as events:
+server runs. Players can send console commands that the server runs with their
+permissions; see [Permissions](docs/server.md#permissions). Scripts see the connection lifecycle as events:
 
 - `playerConnecting(name, setKickReason)` runs before a player is admitted.
   Call `setKickReason(text)` or `CancelEvent()` to refuse the connection. The

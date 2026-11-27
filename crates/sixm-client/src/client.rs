@@ -166,6 +166,12 @@ impl Client {
         self.net.send_event(name, args)
     }
 
+    /// Sends a console line to the server, which runs it with this player's
+    /// permissions.
+    pub fn send_command(&self, line: &str) -> Result<(), NetError> {
+        self.net.send_command(line)
+    }
+
     /// The running resources, in start order, with their files in the cache.
     pub fn resources(&self) -> &[SyncedResource] {
         &self.resources
