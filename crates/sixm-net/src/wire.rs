@@ -10,7 +10,6 @@
 
 use std::cell::Cell;
 use std::fmt;
-use std::marker::PhantomData;
 use std::sync::Arc;
 
 use quinn::{ReadExactError, RecvStream};
@@ -20,10 +19,10 @@ use serde::de::{
 };
 use serde::ser::{SerializeSeq, SerializeStructVariant};
 use serde::{Serialize, Serializer};
-use sixm_core::{EntityKind, MAX_STATE_NAME_LEN, Value};
+use sixm_core::{EntityKind, MAX_STATE_NAME_LEN, Value, is_finite};
 use tracing::warn;
 
-use crate::entities::EntityEntry;
+use crate::entities::{EntityEntry, EntityTransform};
 use crate::error::NetError;
 use crate::files::{
     FILE_KIND_FILE, FileEntry, FileHash, MAX_EXPORT_NAME_LEN, MAX_EXPORTS, MAX_FILE_NAME_LEN,
@@ -313,31 +312,147 @@ pub(crate) fn encode_resources_snapshot(
     Ok(frames)
 }
 
+/// Bit of the `flags` byte of a transform: the position is present.
+const TRANSFORM_POSITION: u8 = 0b01;
+/// Bit of the `flags` byte of a transform: the rotation is present.
+const TRANSFORM_ROTATION: u8 = 0b10;
+/// Bits of the `flags` byte of a transform that are defined. Any other bit is an error.
+const TRANSFORM_FLAGS: u8 = TRANSFORM_POSITION | TRANSFORM_ROTATION;
+/// Centimetres per metre: the unit of a position on the wire.
+const CENTIMETRES_PER_METRE: f32 = 100.0;
+/// Rotation units in a full turn: an angle travels as a `u16` count of them.
+const ANGLE_UNITS: f32 = 65_536.0;
+
 /// Encodes entity transforms as the fewest frames that carry them in order.
 /// Each update costs one unit of the decoding budget.
 pub(crate) fn encode_entity_transforms(
-    updates: &[(u32, [f32; 3], [f32; 3], u32)],
+    updates: &[EntityTransform],
     max_frame: usize,
 ) -> Result<Vec<Arc<[u8]>>, NetError> {
-    encode_items(ServerMessage::ENTITY_TRANSFORMS_TAG, updates, max_frame)
+    encode_with(
+        ServerMessage::ENTITY_TRANSFORMS_TAG,
+        updates,
+        max_frame,
+        append_transform,
+    )
 }
 
 /// Encodes the transforms a client sends as the fewest frames that carry them
 /// in order. Each frame is one message and holds at most
 /// [`MAX_TRANSFORMS_PER_MESSAGE`] updates.
 pub(crate) fn encode_client_transforms(
-    updates: &[(u32, [f32; 3], [f32; 3], u32)],
+    updates: &[EntityTransform],
     max_frame: usize,
 ) -> Result<Vec<Arc<[u8]>>, NetError> {
     let mut frames = Vec::new();
     for batch in updates.chunks(MAX_TRANSFORMS_PER_MESSAGE) {
-        frames.extend(encode_items(
+        frames.extend(encode_with(
             ClientMessage::ENTITY_TRANSFORMS_TAG,
             batch,
             max_frame,
+            append_transform,
         )?);
     }
     Ok(frames)
+}
+
+/// Appends one entity transform: the id as a varint, a flags byte, the
+/// position and rotation the flags announce, and the epoch as a varint.
+///
+/// Each position component is a zigzag varint of centimetres, rounded and
+/// clamped to the `i32` range. Each rotation angle is normalized to `[0, 360)`
+/// and sent as a little-endian `u16` of [`ANGLE_UNITS`] per turn.
+fn append_transform(
+    bytes: &mut Vec<u8>,
+    &(id, position, rotation, epoch): &EntityTransform,
+) -> Result<(), NetError> {
+    if position.is_none() && rotation.is_none() {
+        return Err(NetError::InvalidInput(
+            "an entity transform carries a position, a rotation or both".to_owned(),
+        ));
+    }
+    if !position.is_none_or(is_finite) || !rotation.is_none_or(is_finite) {
+        return Err(NetError::InvalidInput(
+            "entity transforms must be finite".to_owned(),
+        ));
+    }
+    let flags =
+        position.map_or(0, |_| TRANSFORM_POSITION) | rotation.map_or(0, |_| TRANSFORM_ROTATION);
+    push_varint(bytes, id);
+    bytes.push(flags);
+    if let Some(position) = position {
+        for metres in position {
+            push_zigzag(bytes, centimetres(metres));
+        }
+    }
+    if let Some(rotation) = rotation {
+        for degrees in rotation {
+            bytes.extend_from_slice(&angle_units(degrees).to_le_bytes());
+        }
+    }
+    push_varint(bytes, epoch);
+    Ok(())
+}
+
+/// Appends `value` as a postcard varint, which is how a `u32` is encoded. The
+/// bytes are written directly, since transforms are encoded once per player and
+/// frame.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "each cast keeps the low byte of the value, which is what a varint stores"
+)]
+fn push_varint(bytes: &mut Vec<u8>, mut value: u32) {
+    while value >= 0x80 {
+        bytes.push((value & 0x7F) as u8 | 0x80);
+        value >>= 7;
+    }
+    bytes.push(value as u8);
+}
+
+/// Appends `value` as a zigzag varint, which is how postcard encodes an `i32`.
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "zigzag maps the sign to the low bit, so the bits are read as unsigned on purpose"
+)]
+fn push_zigzag(bytes: &mut Vec<u8>, value: i32) {
+    push_varint(bytes, ((value << 1) ^ (value >> 31)) as u32);
+}
+
+/// A position component in whole centimetres, rounded and clamped to the `i32` range.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the value is clamped to the i32 range first, and the cast is then exact"
+)]
+fn centimetres(metres: f32) -> i32 {
+    (metres * CENTIMETRES_PER_METRE)
+        .round()
+        .clamp(-2_147_483_648.0, 2_147_483_647.0) as i32
+}
+
+/// A rotation angle as a count of [`ANGLE_UNITS`] per turn. The angle is
+/// normalized to `[0, 360)` first, so a turn of 360 is the count 0.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the normalized angle gives a count of at most 65 536, and it is reduced below 65 536"
+)]
+fn angle_units(degrees: f32) -> u16 {
+    let units = (degrees.rem_euclid(360.0) / 360.0 * ANGLE_UNITS).round() as u32;
+    (units % 65_536) as u16
+}
+
+/// A position component in metres, from its whole centimetres.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "centimetres beyond 2^24 lose their low bits, which a position can spare"
+)]
+fn metres(centimetres: i32) -> f32 {
+    centimetres as f32 / CENTIMETRES_PER_METRE
+}
+
+/// A rotation angle in degrees, in `[0, 360)`, from its count of [`ANGLE_UNITS`] per turn.
+fn degrees(units: u16) -> f32 {
+    f32::from(units) * (360.0 / ANGLE_UNITS)
 }
 
 /// Encodes a list of entities as the fewest frames that carry them in order.
@@ -378,13 +493,24 @@ fn check_convar_value(value: &str) -> Result<(), NetError> {
     Ok(())
 }
 
-/// Encodes `items` as the frames of a sequence message whose variant index is
-/// `tag`. Every item costs one unit of the decoding budget. A frame that fails
-/// to seal, because one item is larger than `max_frame`, fails the call.
+/// Encodes `items` with their postcard encoding, as [`encode_with`] does.
 fn encode_items<T: Serialize>(
     tag: u32,
     items: &[T],
     max_frame: usize,
+) -> Result<Vec<Arc<[u8]>>, NetError> {
+    encode_with(tag, items, max_frame, append_encoded)
+}
+
+/// Encodes `items` as the frames of a sequence message whose variant index is
+/// `tag`, appending each item with `append`. Every item costs one unit of the
+/// decoding budget. A frame that fails to seal, because one item is larger
+/// than `max_frame`, fails the call.
+fn encode_with<T>(
+    tag: u32,
+    items: &[T],
+    max_frame: usize,
+    append: fn(&mut Vec<u8>, &T) -> Result<(), NetError>,
 ) -> Result<Vec<Arc<[u8]>>, NetError> {
     let mut frames = Vec::new();
     let mut chunk = SnapshotChunk::new(tag);
@@ -392,12 +518,12 @@ fn encode_items<T: Serialize>(
         // The item is encoded straight into the chunk's bytes, so encoding a
         // batch allocates only when the chunk grows.
         let start = chunk.bytes.len();
-        append_encoded(&mut chunk.bytes, item)?;
+        append(&mut chunk.bytes, item)?;
         if !chunk.is_empty() && !chunk.fits(chunk.bytes.len(), 1, max_frame) {
             chunk.bytes.truncate(start);
             frames.push(chunk.seal(max_frame)?);
             chunk = SnapshotChunk::new(tag);
-            append_encoded(&mut chunk.bytes, item)?;
+            append(&mut chunk.bytes, item)?;
         }
         chunk.count += 1;
         chunk.values += 1;
@@ -864,10 +990,7 @@ impl<'de> Visitor<'de> for ClientMessageVisitor<'_> {
                 Ok(ClientMessage::Command { line })
             }
             ClientMessage::ENTITY_TRANSFORMS_TAG => variant
-                .newtype_variant_seed(TransformsSeed::<(u32, [f32; 3], [f32; 3], u32)>::new(
-                    self.budget,
-                    MAX_TRANSFORMS_PER_MESSAGE,
-                ))
+                .newtype_variant_seed(TransformsSeed::new(self.budget, MAX_TRANSFORMS_PER_MESSAGE))
                 .map(|updates| ClientMessage::EntityTransforms { updates }),
             other => Err(de::Error::unknown_variant(
                 &other.to_string(),
@@ -970,10 +1093,7 @@ impl<'de> Visitor<'de> for ServerMessageVisitor<'_> {
                 })
                 .map(|entity| ServerMessage::EntityCreated { entity }),
             ServerMessage::ENTITY_TRANSFORMS_TAG => variant
-                .newtype_variant_seed(TransformsSeed::<(u32, [f32; 3], [f32; 3], u32)>::new(
-                    self.budget,
-                    usize::MAX,
-                ))
+                .newtype_variant_seed(TransformsSeed::new(self.budget, usize::MAX))
                 .map(|updates| ServerMessage::EntityTransforms { updates }),
             ServerMessage::ENTITY_DELETED_TAG => variant
                 .newtype_variant::<u32>()
@@ -1112,52 +1232,45 @@ impl<'de> DeserializeSeed<'de> for EntitySeed<'_> {
     }
 }
 
-/// Decodes a sequence of entity transforms of type `T`. Each update costs one
-/// unit of the budget, and a sequence longer than `limit` is rejected.
-struct TransformsSeed<'a, T> {
+/// Decodes a sequence of entity transforms. Each update costs one unit of the
+/// budget, and a sequence longer than `limit` is rejected.
+struct TransformsSeed<'a> {
     budget: &'a ValueBudget,
     limit: usize,
-    marker: PhantomData<fn() -> T>,
 }
 
-impl<'a, T> TransformsSeed<'a, T> {
+impl<'a> TransformsSeed<'a> {
     fn new(budget: &'a ValueBudget, limit: usize) -> Self {
-        Self {
-            budget,
-            limit,
-            marker: PhantomData,
-        }
+        Self { budget, limit }
     }
 }
 
-impl<'de, T: serde::Deserialize<'de>> DeserializeSeed<'de> for TransformsSeed<'_, T> {
-    type Value = Vec<T>;
+impl<'de> DeserializeSeed<'de> for TransformsSeed<'_> {
+    type Value = Vec<EntityTransform>;
 
-    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Vec<T>, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
         deserializer.deserialize_seq(TransformsVisitor {
             budget: self.budget,
             limit: self.limit,
-            marker: PhantomData,
         })
     }
 }
 
-struct TransformsVisitor<'a, T> {
+struct TransformsVisitor<'a> {
     budget: &'a ValueBudget,
     limit: usize,
-    marker: PhantomData<fn() -> T>,
 }
 
-impl<'de, T: serde::Deserialize<'de>> Visitor<'de> for TransformsVisitor<'_, T> {
-    type Value = Vec<T>;
+impl<'de> Visitor<'de> for TransformsVisitor<'_> {
+    type Value = Vec<EntityTransform>;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         formatter.write_str("a sequence of entity transforms")
     }
 
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
         let mut updates = Vec::new();
-        while let Some(update) = seq.next_element::<T>()? {
+        while let Some(update) = seq.next_element_seed(TransformSeed)? {
             self.budget.spend::<A::Error>()?;
             if updates.len() == self.limit {
                 return Err(de::Error::custom(format!(
@@ -1168,6 +1281,134 @@ impl<'de, T: serde::Deserialize<'de>> Visitor<'de> for TransformsVisitor<'_, T> 
             updates.push(update);
         }
         Ok(updates)
+    }
+}
+
+/// Decodes one entity transform, the inverse of `append_transform`. The
+/// position and rotation are read only when the flags announce them.
+#[derive(Clone, Copy)]
+struct TransformSeed;
+
+impl<'de> DeserializeSeed<'de> for TransformSeed {
+    type Value = EntityTransform;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        // The tuple length is an upper bound: postcard reads elements in
+        // order, and an absent position or rotation is simply not read.
+        deserializer.deserialize_tuple(5, TransformVisitor)
+    }
+}
+
+struct TransformVisitor;
+
+impl<'de> Visitor<'de> for TransformVisitor {
+    type Value = EntityTransform;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("an entity transform")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let id: u32 = seq
+            .next_element()?
+            .ok_or_else(|| de::Error::invalid_length(0, &"an entity id"))?;
+        let flags: u8 = seq
+            .next_element()?
+            .ok_or_else(|| de::Error::invalid_length(1, &"transform flags"))?;
+        if flags & !TRANSFORM_FLAGS != 0 || flags & TRANSFORM_FLAGS == 0 {
+            return Err(de::Error::custom(format!(
+                "entity transform flags {flags:#04x} must set bit 0 or bit 1 and no other bit"
+            )));
+        }
+        let position = if flags & TRANSFORM_POSITION != 0 {
+            let position = seq
+                .next_element_seed(PositionSeed)?
+                .ok_or_else(|| de::Error::invalid_length(2, &"a position"))?;
+            Some(position)
+        } else {
+            None
+        };
+        let rotation = if flags & TRANSFORM_ROTATION != 0 {
+            let rotation = seq
+                .next_element_seed(RotationSeed)?
+                .ok_or_else(|| de::Error::invalid_length(3, &"a rotation"))?;
+            Some(rotation)
+        } else {
+            None
+        };
+        let epoch: u32 = seq
+            .next_element()?
+            .ok_or_else(|| de::Error::invalid_length(4, &"an epoch"))?;
+        Ok((id, position, rotation, epoch))
+    }
+}
+
+/// Decodes a position: three zigzag varints of centimetres.
+#[derive(Clone, Copy)]
+struct PositionSeed;
+
+impl<'de> DeserializeSeed<'de> for PositionSeed {
+    type Value = [f32; 3];
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<[f32; 3], D::Error> {
+        deserializer.deserialize_tuple(3, PositionVisitor)
+    }
+}
+
+struct PositionVisitor;
+
+impl<'de> Visitor<'de> for PositionVisitor {
+    type Value = [f32; 3];
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("three coordinates in centimetres")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<[f32; 3], A::Error> {
+        let mut position = [0.0_f32; 3];
+        for (index, component) in position.iter_mut().enumerate() {
+            let centimetres: i32 = seq
+                .next_element()?
+                .ok_or_else(|| de::Error::invalid_length(index, &"three coordinates"))?;
+            *component = metres(centimetres);
+        }
+        Ok(position)
+    }
+}
+
+/// Decodes a rotation: three `u16` little-endian angle counts, six raw bytes.
+#[derive(Clone, Copy)]
+struct RotationSeed;
+
+impl<'de> DeserializeSeed<'de> for RotationSeed {
+    type Value = [f32; 3];
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<[f32; 3], D::Error> {
+        deserializer.deserialize_tuple(6, RotationVisitor)
+    }
+}
+
+struct RotationVisitor;
+
+impl<'de> Visitor<'de> for RotationVisitor {
+    type Value = [f32; 3];
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("three rotation angles")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<[f32; 3], A::Error> {
+        let mut rotation = [0.0_f32; 3];
+        for (index, component) in rotation.iter_mut().enumerate() {
+            let low: u8 = seq
+                .next_element()?
+                .ok_or_else(|| de::Error::invalid_length(2 * index, &"three rotation angles"))?;
+            let high: u8 = seq.next_element()?.ok_or_else(|| {
+                de::Error::invalid_length(2 * index + 1, &"three rotation angles")
+            })?;
+            *component = degrees(u16::from_le_bytes([low, high]));
+        }
+        Ok(rotation)
     }
 }
 
@@ -1210,12 +1451,12 @@ impl<'de> Visitor<'de> for ConvarsVisitor<'_> {
         while let Some((name, value)) = seq.next_element::<(String, Option<String>)>()? {
             self.budget.spend::<A::Error>()?;
             let name = checked_name::<A::Error>(name, MAX_CONVAR_NAME_LEN)?;
-            if let Some(value) = &value {
-                if value.len() > MAX_CONVAR_VALUE_LEN {
-                    return Err(de::Error::custom(format!(
-                        "convar value must be at most {MAX_CONVAR_VALUE_LEN} bytes"
-                    )));
-                }
+            if let Some(value) = &value
+                && value.len() > MAX_CONVAR_VALUE_LEN
+            {
+                return Err(de::Error::custom(format!(
+                    "convar value must be at most {MAX_CONVAR_VALUE_LEN} bytes"
+                )));
             }
             entries.push((name, value));
         }
@@ -2561,7 +2802,25 @@ mod tests {
     }
 
     /// One entity transform, as the server sends it.
-    type Update = (u32, [f32; 3], [f32; 3], u32);
+    type Update = EntityTransform;
+
+    /// A sequence message's payload with `updates` written by the transform
+    /// encoder, without the budget or frame checks, so that a test can build a
+    /// message the encoder itself refuses to split.
+    fn raw_transforms(tag: u32, updates: &[Update]) -> Vec<u8> {
+        let mut payload =
+            postcard::to_extend(&(tag, updates.len()), Vec::new()).expect("header encodes");
+        for update in updates {
+            append_transform(&mut payload, update).expect("update encodes");
+        }
+        payload
+    }
+
+    /// The angle between two rotation angles, in degrees, taking the wrap at 360 into account.
+    fn angle_gap(a: f32, b: f32) -> f32 {
+        let difference = (a - b).abs() % 360.0;
+        difference.min(360.0 - difference)
+    }
 
     fn entry(id: u32) -> EntityEntry {
         EntityEntry {
@@ -2632,18 +2891,19 @@ mod tests {
             decode_server_message(&payload_of(&snapshot)),
             Ok(ServerMessage::EntitySnapshot { entities }) if entities == [entry(1), entry(2)]
         ));
-        let frames = encode_entity_transforms(&[(4, [1.0; 3], [2.0; 3], 3)], MAX_FRAME)
-            .expect("transforms encode");
+        let frames =
+            encode_entity_transforms(&[(4, Some([1.0; 3]), Some([45.0; 3]), 3)], MAX_FRAME)
+                .expect("transforms encode");
         assert_eq!(
             decode_frames(&frames, MAX_FRAME, transforms_of),
-            vec![(4, [1.0; 3], [2.0; 3], 3)]
+            vec![(4, Some([1.0; 3]), Some([45.0; 3]), 3)]
         );
     }
 
     #[test]
     fn client_transforms_round_trip_and_split_at_the_message_limit() {
-        let updates: Vec<(u32, [f32; 3], [f32; 3], u32)> = (1..=2500_u32)
-            .map(|id| (id, [1.0, 2.0, 3.0], [0.0, 0.0, 90.0], 0))
+        let updates: Vec<Update> = (1..=2500_u32)
+            .map(|id| (id, Some([1.0, 2.0, 3.0]), Some([0.0, 0.0, 90.0]), 0))
             .collect();
         let frames = encode_client_transforms(&updates, MAX_FRAME).expect("transforms encode");
         assert_eq!(frames.len(), 3, "2500 updates make 1024 + 1024 + 452");
@@ -2668,12 +2928,10 @@ mod tests {
 
     #[test]
     fn client_transform_messages_over_the_limit_are_rejected() {
-        let over = ClientMessage::EntityTransforms {
-            updates: vec![(1, [0.0; 3], [0.0; 3], 0); MAX_TRANSFORMS_PER_MESSAGE + 1],
-        };
-        let frame = encode_frame(&over, MAX_FRAME * 4).expect("message encodes");
+        let over = vec![(1, Some([0.0; 3]), None, 0); MAX_TRANSFORMS_PER_MESSAGE + 1];
+        let payload = raw_transforms(ClientMessage::ENTITY_TRANSFORMS_TAG, &over);
         assert!(matches!(
-            decode_client_message(&frame[FRAME_HEADER_LEN..]),
+            decode_client_message(&payload),
             Err(NetError::Protocol(_))
         ));
     }
@@ -2712,7 +2970,11 @@ mod tests {
     fn entity_transforms_split_and_decode_to_the_same_updates() {
         const MAX: usize = 512;
         let updates: Vec<Update> = (0..3000_u32)
-            .map(|id| (id, [1.0, 2.0, 3.0], [0.0, 0.0, 90.0], id % 7))
+            .map(|id| match id % 3 {
+                0 => (id, Some([1.0, 2.0, 3.0]), Some([0.0, 0.0, 90.0]), id % 7),
+                1 => (id, Some([-1.0, 0.0, 250.0]), None, id % 7),
+                _ => (id, None, Some([0.0, 180.0, 45.0]), id % 7),
+            })
             .collect();
         let frames = encode_entity_transforms(&updates, MAX).expect("transforms encode");
         assert!(
@@ -2720,6 +2982,129 @@ mod tests {
             "3000 updates cannot fit one 512-byte frame"
         );
         assert_eq!(decode_frames(&frames, MAX, transforms_of), updates);
+    }
+
+    #[test]
+    fn transforms_carry_only_the_parts_that_changed() {
+        let updates: Vec<Update> = vec![
+            (1, Some([1.0, 2.0, 3.0]), None, 4),
+            (2, None, Some([0.0, 0.0, 90.0]), 5),
+            (3, Some([-4.5, 0.25, 0.0]), Some([45.0, 180.0, 270.0]), 6),
+        ];
+        let frames = encode_entity_transforms(&updates, MAX_FRAME).expect("transforms encode");
+        assert_eq!(decode_frames(&frames, MAX_FRAME, transforms_of), updates);
+    }
+
+    #[test]
+    fn a_transform_has_the_flags_byte_and_quantized_parts_on_the_wire() {
+        // Message tag 4, one update, id 1, flags 0b01 (position only), the
+        // position 1 m and -0.5 m as zigzag centimetres 200, 99 and 0, then epoch 0.
+        let frames = encode_client_transforms(&[(1, Some([1.0, -0.5, 0.0]), None, 0)], MAX_FRAME)
+            .expect("transforms encode");
+        assert_eq!(
+            frames[0][..],
+            [9, 0, 0, 0, 4, 1, 1, 1, 0xC8, 0x01, 0x63, 0x00, 0]
+        );
+        // Flags 0b10 (rotation only): yaw 90 degrees is 16 384 units, the bytes 0x00 0x40.
+        let frames = encode_client_transforms(&[(1, None, Some([0.0, 0.0, 90.0]), 0)], MAX_FRAME)
+            .expect("transforms encode");
+        assert_eq!(
+            frames[0][..],
+            [11, 0, 0, 0, 4, 1, 1, 2, 0, 0, 0, 0, 0, 0x40, 0]
+        );
+    }
+
+    #[test]
+    fn a_transform_needs_a_part_and_finite_values_to_be_encoded() {
+        assert!(encode_entity_transforms(&[(1, None, None, 0)], MAX_FRAME).is_err());
+        assert!(
+            encode_entity_transforms(&[(1, Some([f32::NAN, 0.0, 0.0]), None, 0)], MAX_FRAME)
+                .is_err()
+        );
+        assert!(
+            encode_entity_transforms(&[(1, None, Some([0.0, f32::INFINITY, 0.0]), 0)], MAX_FRAME)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn transform_flags_with_unknown_bits_or_no_part_are_rejected() {
+        for flags in [0_u8, 0b100, 0b1011, 0xFF] {
+            let payload = [12, 1, 1, flags, 0, 0, 0, 0, 0, 0, 0, 0];
+            assert!(
+                matches!(decode_server_message(&payload), Err(NetError::Protocol(_))),
+                "flags {flags:#04x} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn quantization_error_is_at_most_half_a_centimetre_and_one_angle_unit() {
+        let positions = [
+            [0.004, -0.004, 12.345_678],
+            [-987.654_3, 1_234.567_8, -0.499_9],
+            [3.0, -0.005_1, 0.0049],
+        ];
+        let rotations = [
+            [0.0001, 359.9999, 123.456_7],
+            [-0.0001, 12.3456, 270.0001],
+            [0.0027, 179.9999, 90.0055],
+        ];
+        let unit = 360.0 / 65_536.0;
+        for position in positions {
+            for rotation in rotations {
+                let frames =
+                    encode_entity_transforms(&[(1, Some(position), Some(rotation), 0)], MAX_FRAME)
+                        .expect("transforms encode");
+                let decoded = decode_frames(&frames, MAX_FRAME, transforms_of);
+                let (_, decoded_position, decoded_rotation, _) = decoded[0];
+                let decoded_position = decoded_position.expect("the position is present");
+                let decoded_rotation = decoded_rotation.expect("the rotation is present");
+                for axis in 0..3 {
+                    assert!(
+                        (decoded_position[axis] - position[axis]).abs() <= 0.005 + 1e-4,
+                        "position {position:?} decoded as {decoded_position:?}"
+                    );
+                    assert!(
+                        angle_gap(decoded_rotation[axis], rotation[axis]) <= unit + 1e-4,
+                        "rotation {rotation:?} decoded as {decoded_rotation:?}"
+                    );
+                    assert!((0.0..360.0).contains(&decoded_rotation[axis]));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn negative_coordinates_and_angles_normalize_correctly() {
+        let frames = encode_entity_transforms(
+            &[(
+                1,
+                Some([-12.5, -0.25, -3.0]),
+                Some([-90.0, 450.0, -360.0]),
+                0,
+            )],
+            MAX_FRAME,
+        )
+        .expect("transforms encode");
+        let decoded = decode_frames(&frames, MAX_FRAME, transforms_of);
+        assert_eq!(
+            decoded,
+            vec![(1, Some([-12.5, -0.25, -3.0]), Some([270.0, 90.0, 0.0]), 0)]
+        );
+    }
+
+    #[test]
+    fn huge_coordinates_are_clamped_to_the_centimetre_range() {
+        let frames =
+            encode_entity_transforms(&[(1, Some([1e30, -1e30, f32::MAX]), None, 0)], MAX_FRAME)
+                .expect("transforms encode");
+        let decoded = decode_frames(&frames, MAX_FRAME, transforms_of);
+        let position = decoded[0].1.expect("the position is present");
+        // i32::MAX centimetres is 21 474 836.47 m, and i32::MIN is one more below.
+        assert!((position[0] - 21_474_836.47).abs() < 0.01, "{position:?}");
+        assert!((position[1] + 21_474_836.48).abs() < 0.01, "{position:?}");
+        assert!((position[2] - 21_474_836.47).abs() < 0.01, "{position:?}");
     }
 
     #[test]
@@ -2739,7 +3124,7 @@ mod tests {
         // Each update costs one unit, so 70 000 of them need two frames even
         // though they fit one frame by size.
         const LARGE: usize = 16 * 1024 * 1024;
-        let updates = vec![(1_u32, [0.0; 3], [0.0; 3], 0); 70_000];
+        let updates = vec![(1_u32, Some([0.0; 3]), None, 0); 70_000];
         let frames = encode_entity_transforms(&updates, LARGE).expect("transforms encode");
         assert_eq!(frames.len(), 2);
         assert_eq!(decode_frames(&frames, LARGE, transforms_of).len(), 70_000);
@@ -2748,12 +3133,10 @@ mod tests {
     #[test]
     fn entity_batches_over_the_decoding_budget_are_rejected() {
         const LARGE: usize = 16 * 1024 * 1024;
-        let over = ServerMessage::EntityTransforms {
-            updates: vec![(1, [0.0; 3], [0.0; 3], 0); MAX_DECODED_VALUES + 1],
-        };
-        let frame = encode_frame(&over, LARGE).expect("message encodes");
+        let over = vec![(1, None, Some([0.0; 3]), 0); MAX_DECODED_VALUES + 1];
+        let payload = raw_transforms(ServerMessage::ENTITY_TRANSFORMS_TAG, &over);
         assert!(matches!(
-            decode_server_message(&frame[FRAME_HEADER_LEN..]),
+            decode_server_message(&payload),
             Err(NetError::Protocol(reason)) if reason.contains("values")
         ));
         let over = ServerMessage::EntitySnapshot {

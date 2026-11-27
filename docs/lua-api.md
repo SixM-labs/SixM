@@ -469,6 +469,10 @@ position and rotation. Clients hold the entities in their scope only, see
   both sides and whoever owns the entity.
 - The server sends creation and deletion at once. Moves are collected, and each
   entity that moved is sent once per server frame with its latest transform.
+  Only the part that changed, the position, the rotation or both, is sent.
+- Other clients see positions to 1 cm and angles to about 0.0055 degrees, since
+  transforms travel quantized. A script's own values stay exact on the server,
+  and the owner of an entity keeps the exact values it set on its client.
 - A deleted entity's state bag is removed on the server and on every client.
 - The console command `entities` lists every entity.
 
