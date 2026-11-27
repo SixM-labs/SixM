@@ -41,8 +41,26 @@ impl Counters {
         self.bytes_sent.fetch_add(as_u64(bytes), Ordering::Relaxed);
     }
 
+    pub(crate) fn received_data(&self, bytes: usize) {
+        self.bytes_received
+            .fetch_add(as_u64(bytes), Ordering::Relaxed);
+    }
+
     /// Counts one frame of `bytes` read from a client.
     pub(crate) fn received(&self, bytes: usize) {
+        self.frames_received.fetch_add(1, Ordering::Relaxed);
+        self.bytes_received
+            .fetch_add(as_u64(bytes), Ordering::Relaxed);
+    }
+
+    /// Counts one unidirectional stream and its bytes (for latent events).
+    pub(crate) fn sent_stream(&self, bytes: usize) {
+        self.frames_sent.fetch_add(1, Ordering::Relaxed);
+        self.sent_data(bytes);
+    }
+
+    /// Counts one received unidirectional stream and its bytes.
+    pub(crate) fn received_stream(&self, bytes: usize) {
         self.frames_received.fetch_add(1, Ordering::Relaxed);
         self.bytes_received
             .fetch_add(as_u64(bytes), Ordering::Relaxed);

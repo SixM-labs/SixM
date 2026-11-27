@@ -15,6 +15,7 @@ use tracing::{debug, warn};
 use crate::error::NetError;
 use crate::files::FileHash;
 use crate::identity::Fingerprint;
+use crate::latent::{self, LatentJob};
 use crate::protocol::{
     ClientMessage, EVENT_FLOOD, MAX_CONCURRENT_TRANSFERS, MAX_PENDING_REQUESTS,
     MAX_PLAYER_NAME_LEN, PROTOCOL_VERSION, SHUTTING_DOWN, ServerMessage, TOO_MANY_REQUESTS,
@@ -39,6 +40,7 @@ const NO_CLIENT_CERTIFICATE: &str = "a client certificate is required";
 
 /// Settings and the event callback shared by every connection.
 pub(crate) struct Shared {
+    pub(crate) player_connections: crate::server::PlayerConnections,
     pub(crate) on_event: Arc<dyn Fn(NetEvent) + Send + Sync>,
     pub(crate) server_name: String,
     pub(crate) handshake_timeout: Duration,
@@ -70,6 +72,7 @@ pub(crate) struct Ticket {
     /// channel closes, which refuses the connection as shutting down.
     pub(crate) instructions: mpsc::UnboundedReceiver<Instruction>,
     pub(crate) outbound: mpsc::Receiver<Arc<[u8]>>,
+    pub(crate) latent: mpsc::Receiver<LatentJob>,
     /// Another sender of the outbound queue, for replies the reader sends.
     pub(crate) reply: mpsc::Sender<Arc<[u8]>>,
     pub(crate) kick: Arc<watch::Sender<Option<Arc<str>>>>,
@@ -81,6 +84,7 @@ pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket)
         id,
         mut instructions,
         outbound,
+        latent,
         reply,
         kick,
     } = ticket;
@@ -139,6 +143,11 @@ pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket)
         let reason = format!("player name must be 1 to {MAX_PLAYER_NAME_LEN} characters");
         return refuse(&connection, send, &reason, &shared).await;
     };
+    shared
+        .player_connections
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(id, connection.clone());
     (shared.on_event)(NetEvent::Connecting {
         connection: id,
         name,
@@ -158,6 +167,7 @@ pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket)
                 send,
                 recv,
                 outbound,
+                latent,
                 reply,
                 kick,
             };
@@ -290,6 +300,7 @@ struct Accepted {
     send: SendStream,
     recv: RecvStream,
     outbound: mpsc::Receiver<Arc<[u8]>>,
+    latent: mpsc::Receiver<LatentJob>,
     reply: mpsc::Sender<Arc<[u8]>>,
     kick: Arc<watch::Sender<Option<Arc<str>>>>,
 }
@@ -360,9 +371,32 @@ async fn serve(shared: &Shared, accepted: Accepted) {
         send,
         mut recv,
         outbound,
+        mut latent,
         reply,
         kick,
     } = accepted;
+    let latent_connection = connection.clone();
+    let latent_traffic = Arc::clone(&shared.traffic);
+    let latent_sender = tokio::spawn(async move {
+        let mut seq = 0_u64;
+        while let Some(job) = latent.recv().await {
+            if latent::send(&latent_connection, &mut seq, &job, Some(&latent_traffic))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let limiter = Arc::new(std::sync::Mutex::new(RateLimiter::new(Instant::now())));
+    let latent_receiver = tokio::spawn(receive_latent(
+        connection.clone(),
+        player,
+        Arc::clone(&shared.on_event),
+        Arc::clone(&limiter),
+        Arc::clone(&shared.traffic),
+        kick.clone(),
+    ));
     let mut writer = tokio::spawn(write_loop(WriteLoop {
         send,
         player,
@@ -378,7 +412,7 @@ async fn serve(shared: &Shared, accepted: Accepted) {
         reply,
         Arc::clone(&shared.traffic),
     );
-    let mut reader = pin!(read_loop(shared, player, &mut recv, &mut requests));
+    let mut reader = pin!(read_loop(shared, player, &mut recv, &mut requests, limiter));
     let (code, reason) = tokio::select! {
         stop = &mut reader => match stop {
             Stop::Kick(reason) => {
@@ -402,6 +436,8 @@ async fn serve(shared: &Shared, accepted: Accepted) {
         ended = &mut writer => (CLOSE_NORMAL, join_writer(ended)),
     };
     close_connection(&connection, code, &reason);
+    latent_sender.abort();
+    latent_receiver.abort();
     (shared.on_event)(NetEvent::Disconnected { player, reason });
 }
 
@@ -417,8 +453,8 @@ async fn read_loop(
     player: u32,
     recv: &mut RecvStream,
     requests: &mut Requests,
+    limiter: Arc<std::sync::Mutex<RateLimiter>>,
 ) -> Stop {
-    let mut limiter = RateLimiter::new(Instant::now());
     loop {
         let payload = match read_frame(recv, shared.max_frame).await {
             Ok(Some(payload)) => {
@@ -451,7 +487,11 @@ async fn read_loop(
             Err(err) => return Stop::Protocol(err.to_string()),
         };
         let now = Instant::now();
-        match limiter.admit(now) {
+        let verdict = limiter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .admit(now);
+        match verdict {
             Verdict::Accept => (shared.on_event)(match inbound {
                 Inbound::Event { name, args } => NetEvent::Event { player, name, args },
                 Inbound::Command { line } => NetEvent::Command { player, line },
@@ -460,11 +500,102 @@ async fn read_loop(
                 }
             }),
             Verdict::Drop => {
-                if let Some(dropped) = limiter.take_drop_report(now) {
+                if let Some(dropped) = limiter
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take_drop_report(now)
+                {
                     warn!(player, dropped, "dropping events above the rate limit");
                 }
             }
             Verdict::Flood => return Stop::Kick(EVENT_FLOOD.to_owned()),
+        }
+    }
+}
+
+/// Accepts latent streams concurrently and emits their events in sequence order.
+async fn receive_latent(
+    connection: Connection,
+    player: u32,
+    on_event: Arc<dyn Fn(NetEvent) + Send + Sync>,
+    limiter: Arc<std::sync::Mutex<RateLimiter>>,
+    traffic: Arc<Counters>,
+    kick: Arc<watch::Sender<Option<Arc<str>>>>,
+) {
+    let slots = Arc::new(Semaphore::new(crate::protocol::MAX_LATENT_STREAMS));
+    let mut tasks = JoinSet::new();
+    let mut sequence = latent::Sequencer::default();
+    loop {
+        tokio::select! {
+            incoming = connection.accept_uni(), if tasks.len() < crate::protocol::MAX_LATENT_STREAMS => match incoming {
+                Ok(stream) => {
+                    let slots = Arc::clone(&slots);
+                    let traffic = Arc::clone(&traffic);
+                    tasks.spawn(receive_latent_stream(
+                        stream,
+                        slots,
+                        traffic,
+                        connection.clone(),
+                    ));
+                }
+                Err(_) => break,
+            },
+            Some(result) = tasks.join_next(), if !tasks.is_empty() => if let Ok(Some(arrival)) = result {
+                match sequence.push(arrival) {
+                    Ok(ready) => for event in ready {
+                        let now = Instant::now();
+                        let verdict = limiter.lock().unwrap_or_else(std::sync::PoisonError::into_inner).admit(now);
+                        match verdict {
+                            Verdict::Accept => (on_event)(NetEvent::Event { player, name: event.name, args: event.args }),
+                            Verdict::Drop => {
+                                if let Some(dropped) = limiter.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take_drop_report(now) {
+                                    warn!(player, dropped, "dropping events above the rate limit");
+                                }
+                            },
+                            Verdict::Flood => { kick.send_replace(Some(Arc::from(EVENT_FLOOD))); return; }
+                        }
+                    },
+                    Err(err) => { close_connection(&connection, CLOSE_PROTOCOL, &err.to_string()); break; }
+                }
+            },
+        }
+    }
+    tasks.abort_all();
+}
+
+async fn receive_latent_stream(
+    mut stream: RecvStream,
+    slots: Arc<Semaphore>,
+    traffic: Arc<Counters>,
+    connection: Connection,
+) -> Option<latent::Arrival> {
+    match latent::read_kind(&mut stream).await {
+        Some(crate::protocol::STREAM_KIND_LATENT) => {
+            let arrival = latent::receive(stream, slots, Some(traffic)).await;
+            if arrival.is_none() {
+                close_connection(
+                    &connection,
+                    CLOSE_PROTOCOL,
+                    "latent stream ended before its sequence header",
+                );
+            }
+            arrival
+        }
+        Some(_) => {
+            close_connection(
+                &connection,
+                CLOSE_PROTOCOL,
+                "unexpected client unidirectional stream",
+            );
+            None
+        }
+        None => {
+            close_connection(
+                &connection,
+                CLOSE_PROTOCOL,
+                "latent stream ended before its kind byte",
+            );
+            None
         }
     }
 }

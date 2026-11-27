@@ -20,18 +20,7 @@ const EXACT_FLOAT_LIMIT: f64 = 9_007_199_254_740_992.0;
 /// `IsPlayerAceAllowed`, `IsPrincipalAceAllowed` and `Player`. Only server
 /// runtimes call this.
 pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::Result<()> {
-    let trigger_client_event = bind_fn(
-        lua,
-        weak,
-        |rt, (name, target, args): (String, LuaValue, MultiValue)| {
-            let target = client_target(&target)?;
-            let values = rt.to_network_values(&args.into_vec()).map_err(lua_err)?;
-            let host = rt.host()?;
-            server(&*host)?
-                .trigger_client_event(&name, target, &values)
-                .map_err(lua_err)
-        },
-    )?;
+    install_event_senders(lua, weak, globals)?;
     let get_players = bind_fn(lua, weak, |rt, (): ()| {
         let ids = server(&*rt.host()?)?.players();
         rt.lua.create_sequence_from(ids.iter().map(u32::to_string))
@@ -43,6 +32,15 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
     let get_player_ped = player_ped_function(lua, weak)?;
     let get_player_name = bind_fn(lua, weak, |rt, (player,): (LuaValue,)| {
         Ok(player_info(rt, &player)?.map(|info| info.name))
+    })?;
+    let get_player_ping = bind_fn(lua, weak, |rt, (player,): (LuaValue,)| {
+        let Some(id) = player_id(&player) else {
+            return Ok(-1_i64);
+        };
+        let ping = server(&*rt.host()?)?.player_ping(id);
+        Ok(ping.map_or(-1, |duration| {
+            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+        }))
     })?;
     let get_player_endpoint = bind_fn(lua, weak, |rt, (player,): (LuaValue,)| {
         Ok(player_info(rt, &player)?.map(|info| info.endpoint))
@@ -100,10 +98,10 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
     })?;
 
     let functions = [
-        ("TriggerClientEvent", trigger_client_event),
         ("GetPlayers", get_players),
         ("GetNumPlayerIndices", get_num_player_indices),
         ("GetPlayerName", get_player_name),
+        ("GetPlayerPing", get_player_ping),
         ("GetPlayerPed", get_player_ped),
         ("GetPlayerEndpoint", get_player_endpoint),
         ("GetPlayerIdentifiers", get_player_identifiers),
@@ -119,6 +117,36 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
         globals.raw_set(name, function)?;
     }
     Ok(())
+}
+
+fn install_event_senders(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::Result<()> {
+    let trigger_client_event = bind_fn(
+        lua,
+        weak,
+        |rt, (name, target, args): (String, LuaValue, MultiValue)| {
+            let target = client_target(&target)?;
+            let values = rt.to_network_values(&args.into_vec()).map_err(lua_err)?;
+            let host = rt.host()?;
+            server(&*host)?
+                .trigger_client_event(&name, target, &values)
+                .map_err(lua_err)
+        },
+    )?;
+    let trigger_latent_client_event = bind_fn(
+        lua,
+        weak,
+        |rt, (name, target, bps, args): (String, LuaValue, LuaValue, MultiValue)| {
+            let target = client_target(&target)?;
+            let bps = crate::client::latent_bps(&bps)?;
+            let values = rt.to_network_values(&args.into_vec()).map_err(lua_err)?;
+            let host = rt.host()?;
+            server(&*host)?
+                .trigger_latent_client_event(&name, target, &values, bps)
+                .map_err(lua_err)
+        },
+    )?;
+    globals.raw_set("TriggerClientEvent", trigger_client_event)?;
+    globals.raw_set("TriggerLatentClientEvent", trigger_latent_client_event)
 }
 
 /// `GetPlayerPed`: the ped of a connected player, or 0 for a player without one.

@@ -231,6 +231,23 @@ impl ClientHost for ClientRuntime {
             .map_err(|err| ScriptError::Runtime(err.to_string()))
     }
 
+    fn trigger_latent_server_event(
+        &self,
+        event: &str,
+        args: &[Value],
+        bps: u64,
+    ) -> Result<(), ScriptError> {
+        if args.iter().any(Value::contains_func_ref) {
+            return Err(ScriptError::Runtime(
+                "function references cannot be sent to the server".to_owned(),
+            ));
+        }
+        self.client
+            .borrow()
+            .send_latent_event(event, args, bps)
+            .map_err(|err| ScriptError::Runtime(err.to_string()))
+    }
+
     fn local_player(&self) -> u32 {
         self.local_player
     }

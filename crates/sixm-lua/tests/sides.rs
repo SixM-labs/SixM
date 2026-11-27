@@ -10,16 +10,23 @@ use sixm_core::{EventContext, EventSource, GLOBAL_BAG, Host, ScriptRuntime, Valu
 use sixm_lua::LuaRuntime;
 
 /// Globals that exist only on servers.
-const SERVER_ONLY: [&str; 5] = [
+const SERVER_ONLY: [&str; 7] = [
     "TriggerClientEvent",
+    "TriggerLatentClientEvent",
     "GetPlayers",
     "GetNumPlayerIndices",
     "GetPlayerName",
+    "GetPlayerPing",
     "DropPlayer",
 ];
 
 /// Globals that exist only on clients.
-const CLIENT_ONLY: [&str; 3] = ["TriggerServerEvent", "PlayerId", "LocalPlayer"];
+const CLIENT_ONLY: [&str; 4] = [
+    "TriggerServerEvent",
+    "TriggerLatentServerEvent",
+    "PlayerId",
+    "LocalPlayer",
+];
 
 /// A runtime whose `present(name)` export reports whether the global `name` exists.
 fn probe(host: &Rc<TestHost>) -> Rc<LuaRuntime> {
@@ -114,6 +121,62 @@ fn trigger_server_event_records_name_and_arguments_and_refuses_functions() {
         1,
         "refused call is not sent"
     );
+}
+
+#[test]
+fn latent_event_globals_use_the_expected_argument_order_and_ping_defaults() {
+    let client_host = new_client_host(7);
+    let client_rt = start(
+        &client_host,
+        "latent-client",
+        &["send"],
+        &[(
+            "main.lua",
+            "exports('send', function(bps) return pcall(TriggerLatentServerEvent, 'latent', bps, 'payload') end)\n",
+        )],
+    );
+    call(&client_rt, "send", &[Value::Int(0)]);
+    assert_eq!(
+        client_host.latent_server_events.borrow()[0],
+        ("latent".to_owned(), vec![Value::from("payload")], 25_000)
+    );
+
+    let large_rate = 9_007_199_254_740_993;
+    call(&client_rt, "send", &[Value::Int(large_rate)]);
+    assert_eq!(
+        client_host.latent_server_events.borrow()[1].2,
+        large_rate.unsigned_abs()
+    );
+    for bad_rate in [
+        Value::Float(f64::NEG_INFINITY),
+        Value::Float(1.25),
+        Value::from("1"),
+    ] {
+        assert_eq!(call(&client_rt, "send", &[bad_rate])[0], Value::Bool(false));
+    }
+    assert_eq!(client_host.latent_server_events.borrow().len(), 2);
+
+    let server_host = new_host();
+    let server_rt = start(
+        &server_host,
+        "latent-server",
+        &["send", "ping"],
+        &[(
+            "main.lua",
+            "exports('send', function() TriggerLatentClientEvent('latent', -1, -4, 'payload') end)\nexports('ping', function() return GetPlayerPing(999) end)\n",
+        )],
+    );
+    call(&server_rt, "send", &[]);
+    assert_eq!(
+        server_host.latent_client_events.borrow()[0],
+        (
+            "latent".to_owned(),
+            sixm_core::ClientTarget::All,
+            vec![Value::from("payload")],
+            25_000
+        )
+    );
+    assert_eq!(first(&server_rt, "ping"), Value::Int(-1));
 }
 
 #[test]

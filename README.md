@@ -220,7 +220,10 @@ GetPlayerFromStateBagName('player:3') -- 3, or 0 for any other bag name
 
 Events sent by players reach only handlers registered with `RegisterNetEvent`.
 Use `TriggerClientEvent(name, id, ...)` to send to one player, or `-1` for
-everyone. Also available: `GetPlayers`, `GetPlayerName`, `GetPlayerEndpoint`
+everyone. For large payloads, `TriggerLatentClientEvent` and
+`TriggerLatentServerEvent` send at a chosen byte rate while ordinary events
+continue. Server scripts can read the QUIC round-trip time in milliseconds
+with `GetPlayerPing(id)`. Also available: `GetPlayers`, `GetPlayerName`, `GetPlayerEndpoint`
 and `DropPlayer`. The console command `players` lists the connected players.
 
 ## Entities

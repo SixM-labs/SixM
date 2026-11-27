@@ -32,8 +32,8 @@ use crate::files::{
 };
 use crate::protocol::{
     ClientMessage, MAX_COMMAND_LEN, MAX_CONVAR_NAME_LEN, MAX_CONVAR_VALUE_LEN, MAX_DECODED_VALUES,
-    MAX_DEFERRAL_MESSAGE_LEN, MAX_EVENT_NAME_LEN, MAX_TRANSFORMS_PER_MESSAGE, MAX_VALUE_DEPTH,
-    ServerMessage,
+    MAX_DEFERRAL_MESSAGE_LEN, MAX_EVENT_NAME_LEN, MAX_LATENT_EVENT_LEN, MAX_TRANSFORMS_PER_MESSAGE,
+    MAX_VALUE_DEPTH, ServerMessage,
 };
 
 pub(crate) const FRAME_HEADER_LEN: usize = 4;
@@ -516,6 +516,40 @@ pub(crate) fn encode_event(
     validate_event_name(name)?;
     check_values(args)?;
     encode_frame(&EventFrame { tag, name, args }, max_frame)
+}
+
+/// Encodes the body of a latent event: its name and its arguments, in the same
+/// form as an event. The body is sent on a stream of its own, so it may be
+/// larger than a frame, up to [`MAX_LATENT_EVENT_LEN`] bytes.
+pub(crate) fn encode_latent_body(name: &str, args: &[Value]) -> Result<Vec<u8>, NetError> {
+    validate_event_name(name)?;
+    check_values(args)?;
+    if args.iter().map(count_values).sum::<usize>() > MAX_DECODED_VALUES {
+        return Err(NetError::InvalidInput(format!(
+            "a latent event may contain at most {MAX_DECODED_VALUES} values"
+        )));
+    }
+    let event = (name, Elements(args));
+    let len = postcard::experimental::serialized_size(&event)
+        .map_err(|err| NetError::Protocol(format!("cannot size latent event: {err}")))?;
+    if len > MAX_LATENT_EVENT_LEN {
+        return Err(NetError::FrameTooLarge {
+            len,
+            max: MAX_LATENT_EVENT_LEN,
+        });
+    }
+    let mut body = Vec::with_capacity(len);
+    append_encoded(&mut body, &event)?;
+    Ok(body)
+}
+
+/// Decodes the body of a latent event, which must hold exactly one event under
+/// the same limits as a frame.
+pub(crate) fn decode_latent_body(payload: &[u8]) -> Result<(String, Args), NetError> {
+    let budget = ValueBudget::new();
+    let (name, args) = decode_budgeted(payload, &budget, EventSeed { budget: &budget })?;
+    validate_event_name(&name)?;
+    Ok((name, args))
 }
 
 /// Encodes a progress message for a connection that is held by deferrals.
@@ -1852,6 +1886,24 @@ mod tests {
             name: "test".to_owned(),
             args: Args(args),
         }
+    }
+
+    #[test]
+    fn latent_sender_checks_size_and_nested_value_limits() {
+        let oversized = Value::String(vec![0; MAX_LATENT_EVENT_LEN].into_boxed_slice());
+        assert!(matches!(
+            encode_latent_body("x", &[oversized]),
+            Err(NetError::FrameTooLarge { .. })
+        ));
+        let array = Value::Array(vec![Value::Nil; MAX_DECODED_VALUES]);
+        assert!(matches!(
+            encode_latent_body("x", &[array]),
+            Err(NetError::InvalidInput(_))
+        ));
+        let body = encode_latent_body("x", &[Value::Nil]).expect("encodes");
+        let (name, args) = decode_latent_body(&body).expect("decodes");
+        assert_eq!(name, "x");
+        assert_eq!(args.0, vec![Value::Nil]);
     }
 
     #[test]

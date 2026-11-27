@@ -734,6 +734,33 @@ impl ResourceManager {
         result.map_err(|err| ScriptError::Runtime(err.to_string()))
     }
 
+    /// Sends a paced event to one player or every player.
+    pub(crate) fn send_latent_client_event(
+        &self,
+        event: &str,
+        target: ClientTarget,
+        args: &[Value],
+        bps: u64,
+    ) -> Result<(), ScriptError> {
+        let server = self.network.server.borrow();
+        let Some(server) = server.as_ref() else {
+            debug!("TriggerLatentClientEvent `{event}` ignored: the network is not running");
+            return Ok(());
+        };
+        let player = match target {
+            ClientTarget::Player(id) => Some(id),
+            ClientTarget::All => None,
+        };
+        server
+            .send_latent_event(player, event, args, bps)
+            .map_err(|err| ScriptError::Runtime(err.to_string()))
+    }
+
+    pub(crate) fn player_round_trip(&self, player: u32) -> Option<Duration> {
+        let id = self.network.players.borrow().get(player)?.connection;
+        self.network.server.borrow().as_ref()?.connection_ping(id)
+    }
+
     /// Server ids of the connected players, in join order.
     pub(crate) fn player_ids(&self) -> Vec<u32> {
         self.network.players.borrow().admitted_ids()

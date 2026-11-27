@@ -175,6 +175,11 @@ impl Client {
         self.net.send_event(name, args)
     }
 
+    /// Sends an event to the server at the requested byte rate.
+    pub fn send_latent_event(&self, name: &str, args: &[Value], bps: u64) -> Result<(), NetError> {
+        self.net.send_latent_event(name, args, bps)
+    }
+
     /// Sends a console line to the server, which runs it with this player's
     /// permissions.
     pub fn send_command(&self, line: &str) -> Result<(), NetError> {

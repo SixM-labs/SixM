@@ -31,6 +31,7 @@ pub enum Side {
 /// Owns runtimes in start order and routes calls between them.
 /// A move of an owned entity: the entity, and the parts of its transform that moved.
 pub type OwnedMove = (u32, Option<[f32; 3]>, Option<[f32; 3]>);
+pub type LatentClientEvent = (String, ClientTarget, Vec<Value>, u64);
 
 #[derive(Debug, Default)]
 pub struct TestHost {
@@ -40,6 +41,7 @@ pub struct TestHost {
     pub local_player: u32,
     /// Events sent to the server by a client host, as `(event, args)`, in order.
     pub server_events: RefCell<Vec<(String, Vec<Value>)>>,
+    pub latent_server_events: RefCell<Vec<(String, Vec<Value>, u64)>>,
     runtimes: RefCell<Vec<Rc<LuaRuntime>>>,
     roots: RefCell<HashMap<String, PathBuf>>,
     dirs: RefCell<Vec<TempDir>>,
@@ -57,6 +59,7 @@ pub struct TestHost {
     pub identifiers: RefCell<Vec<(u32, Vec<String>)>>,
     /// Client events sent, as `(event, target, args)`, in order.
     pub client_events: RefCell<Vec<(String, ClientTarget, Vec<Value>)>>,
+    pub latent_client_events: RefCell<Vec<LatentClientEvent>>,
     /// Players dropped, as `(id, reason)`, in order.
     pub dropped: RefCell<Vec<(u32, String)>>,
     /// State values by `(bag, key)`.
@@ -326,6 +329,19 @@ impl ServerHost for TestHost {
         Ok(())
     }
 
+    fn trigger_latent_client_event(
+        &self,
+        event: &str,
+        target: ClientTarget,
+        args: &[Value],
+        bps: u64,
+    ) -> Result<(), ScriptError> {
+        self.latent_client_events
+            .borrow_mut()
+            .push((event.to_owned(), target, args.to_vec(), bps));
+        Ok(())
+    }
+
     fn players(&self) -> Vec<u32> {
         self.players.borrow().iter().map(|(id, _)| *id).collect()
     }
@@ -429,6 +445,18 @@ impl ClientHost for TestHost {
         self.server_events
             .borrow_mut()
             .push((event.to_owned(), args.to_vec()));
+        Ok(())
+    }
+
+    fn trigger_latent_server_event(
+        &self,
+        event: &str,
+        args: &[Value],
+        bps: u64,
+    ) -> Result<(), ScriptError> {
+        self.latent_server_events
+            .borrow_mut()
+            .push((event.to_owned(), args.to_vec(), bps));
         Ok(())
     }
 

@@ -918,12 +918,26 @@ impl ServerHost for ResourceManager {
         self.send_client_event(event, target, args)
     }
 
+    fn trigger_latent_client_event(
+        &self,
+        event: &str,
+        target: ClientTarget,
+        args: &[Value],
+        bps: u64,
+    ) -> Result<(), ScriptError> {
+        self.send_latent_client_event(event, target, args, bps)
+    }
+
     fn players(&self) -> Vec<u32> {
         self.player_ids()
     }
 
     fn player_info(&self, player: u32) -> Option<PlayerInfo> {
         self.player_details(player)
+    }
+
+    fn player_ping(&self, player: u32) -> Option<std::time::Duration> {
+        self.player_round_trip(player)
     }
 
     fn player_identifiers(&self, player: u32) -> Vec<String> {

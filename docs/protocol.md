@@ -33,12 +33,13 @@ given `PROTOCOL_VERSION`.
 - The client sends its later messages (`Event`, `RequestFile`, `Command`,
   `EntityTransforms`) on that stream.
   The server sends its messages on the send side of the same stream.
-- The server opens a **unidirectional** stream for each file transfer. See
-  below.
+- The server opens a unidirectional stream for each requested file. Either peer
+  can open a unidirectional stream for a latent event. The first byte identifies
+  the stream kind.
 
 ## Framing
 
-Every message on a stream is a frame:
+The bidirectional stream carries length-prefixed frames.
 
 ```text
 +----------------------+-----------------------------+
@@ -244,6 +245,7 @@ moves the entity, or `0` when only the server does. `epoch` is the entity's
 1. The client sends `RequestFile` with the hash it wants.
 2. If the hash is advertised, the server opens a unidirectional stream and
    writes:
+   - the stream kind as a single byte, `1`
    - the 32-byte hash
    - the size as a `u64`, little-endian
    - the file bytes, in chunks of 64 KiB
@@ -261,18 +263,33 @@ Rules on the server:
 
 Clients keep each file in a cache under its hash. See [client.md](client.md).
 
+## Latent events
+
+Each direction numbers its latent events from zero. A stream starts with kind
+`2`, followed by the sequence number as a little-endian `u64` and the encoded
+body length as a little-endian `u32`. The body is a postcard tuple containing
+the event name and argument list. It can occupy up to 16 MiB. The same name
+and value validation applies as for ordinary events.
+
+A sender paces the body at 1 KiB/s through 100 MiB/s. The default is 25,000 bytes per second. The receiver delivers
+completed events in sequence order within that direction. Ordinary frames and
+resource files can arrive while a latent transfer is in progress.
+
 ## Connection limits and kicks
 
 | Limit | Value | Result |
 |---|---|---|
 | Outbound queue per player | 1024 frames | The player is kicked with `send queue overflow`. |
+| Outbound latent queue per player | 16 waiting events | The server kicks the player with `latent queue overflow` if its queue fills. The client API reports a full local queue to its caller. |
+| Server latent send requests awaiting dispatch | 16 | Enqueue reports a full queue to the caller. |
+| Concurrent incoming latent bodies per connection | 4 | Further streams wait for a receive slot or are refused. |
 | Event rate | 100 events or commands per second, burst 200 | Events and commands over the rate are dropped. The connection stays open. |
 | Event flood | More than 1000 events or commands in a second, for five seconds | The player is kicked with `event flood`. |
 | Server shutdown | none | Every player is kicked with `server shutting down`. |
 
 ## Versioning
 
-- `PROTOCOL_VERSION` is `9`. It is sent in `Hello`. A server refuses any other
+- `PROTOCOL_VERSION` is `10`. It is sent in `Hello`. A server refuses any other
   value.
 - The ALPN string is `sixm/1`. It does not change with the protocol version.
 - Enum order, field order and limits can change between protocol versions.
