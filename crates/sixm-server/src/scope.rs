@@ -113,10 +113,10 @@ impl Grid {
             return;
         };
         bucket.swap_remove(location.index);
-        if let Some((moved, _)) = bucket.get(location.index).copied() {
-            if let Some(found) = self.locations.get_mut(&moved) {
-                found.index = location.index;
-            }
+        if let Some((moved, _)) = bucket.get(location.index).copied()
+            && let Some(found) = self.locations.get_mut(&moved)
+        {
+            found.index = location.index;
         }
         if bucket.is_empty() {
             self.cells.remove(&location.cell);

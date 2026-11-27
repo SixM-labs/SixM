@@ -243,10 +243,10 @@ impl Host for TestHost {
             return false;
         };
         let full = root.join(path);
-        if let Some(parent) = full.parent() {
-            if fs::create_dir_all(parent).is_err() {
-                return false;
-            }
+        if let Some(parent) = full.parent()
+            && fs::create_dir_all(parent).is_err()
+        {
+            return false;
         }
         fs::write(full, data).is_ok()
     }

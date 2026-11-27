@@ -86,10 +86,10 @@ impl Harness {
         let deadline = Instant::now() + TIMEOUT;
         loop {
             self.pump();
-            if let Some(notice) = client.poll(STEP) {
-                if wanted(&notice) {
-                    return notice;
-                }
+            if let Some(notice) = client.poll(STEP)
+                && wanted(&notice)
+            {
+                return notice;
             }
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
         }

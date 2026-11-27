@@ -150,10 +150,10 @@ impl Host for ClientRuntime {
             return false;
         };
         let full = dir.join(path);
-        if let Some(parent) = full.parent() {
-            if fs::create_dir_all(parent).is_err() {
-                return false;
-            }
+        if let Some(parent) = full.parent()
+            && fs::create_dir_all(parent).is_err()
+        {
+            return false;
         }
         fs::write(full, data).is_ok()
     }

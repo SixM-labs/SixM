@@ -552,10 +552,10 @@ impl NetServer {
 impl Drop for NetServer {
     fn drop(&mut self) {
         drop(self.commands.take());
-        if let Some(thread) = self.thread.take() {
-            if thread.join().is_err() {
-                error!("the network thread panicked");
-            }
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            error!("the network thread panicked");
         }
     }
 }
@@ -687,12 +687,12 @@ impl Supervisor {
                     None => self.players.values().copied().collect(),
                 };
                 for id in ids {
-                    if let Some(entry) = self.connections.get(&id) {
-                        if entry.latent.try_send(job.clone()).is_err() {
-                            entry.kick.send_replace(Some(Arc::from(
-                                crate::protocol::LATENT_QUEUE_OVERFLOW,
-                            )));
-                        }
+                    if let Some(entry) = self.connections.get(&id)
+                        && entry.latent.try_send(job.clone()).is_err()
+                    {
+                        entry
+                            .kick
+                            .send_replace(Some(Arc::from(crate::protocol::LATENT_QUEUE_OVERFLOW)));
                     }
                 }
             }
@@ -825,12 +825,11 @@ impl Supervisor {
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&id);
-        if let Some(entry) = self.connections.remove(&id) {
-            if let Some(player) = entry.player {
-                if self.players.get(&player) == Some(&id) {
-                    self.players.remove(&player);
-                }
-            }
+        if let Some(entry) = self.connections.remove(&id)
+            && let Some(player) = entry.player
+            && self.players.get(&player) == Some(&id)
+        {
+            self.players.remove(&player);
         }
     }
 

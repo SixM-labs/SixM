@@ -1210,12 +1210,12 @@ impl<'de> Visitor<'de> for ConvarsVisitor<'_> {
         while let Some((name, value)) = seq.next_element::<(String, Option<String>)>()? {
             self.budget.spend::<A::Error>()?;
             let name = checked_name::<A::Error>(name, MAX_CONVAR_NAME_LEN)?;
-            if let Some(value) = &value {
-                if value.len() > MAX_CONVAR_VALUE_LEN {
-                    return Err(de::Error::custom(format!(
-                        "convar value must be at most {MAX_CONVAR_VALUE_LEN} bytes"
-                    )));
-                }
+            if let Some(value) = &value
+                && value.len() > MAX_CONVAR_VALUE_LEN
+            {
+                return Err(de::Error::custom(format!(
+                    "convar value must be at most {MAX_CONVAR_VALUE_LEN} bytes"
+                )));
             }
             entries.push((name, value));
         }
