@@ -1,5 +1,8 @@
 # SixM
 
+[![CI](https://github.com/SixM-labs/SixM/actions/workflows/ci.yml/badge.svg)](https://github.com/SixM-labs/SixM/actions/workflows/ci.yml)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+
 **SixM is a multiplayer modification framework written in Rust.** It provides
 a dedicated server, a resource system and a scripting runtime in the style of
 FiveM, so that developers who know FiveM can start building right away.
@@ -56,6 +59,14 @@ examples/server-data/ A runnable example server with two resources
 Like FiveM, the split between game-independent and game-specific code is the
 central idea. Unlike FiveM, a new game is added by implementing a single Rust
 trait instead of a parallel set of components.
+
+## Download
+
+Prebuilt `sixm-server` and `sixm-client` binaries for Linux (x86_64) and
+Windows (x86_64) are attached to each release on the
+[Releases page](https://github.com/SixM-labs/SixM/releases). Each archive also
+contains the license, this README and the example server data. See the
+[changelog](CHANGELOG.md) for what changed.
 
 ## Building
 
