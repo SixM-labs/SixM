@@ -37,9 +37,13 @@ may change the protocol and the API.
   clean-room `[system]/sessionmanager` and `[system]/baseevents` resources in
   `examples/server-data`.
 - Lua vector helpers `vector`, `dot`, `cross`, `norm`, `inv` and `slerp`.
+- Server events `onPlayerBucketChange`, `onEntityBucketChange`,
+  `onResourceListRefresh`; `playerJoining` gets `oldID`, `playerDropped` gets
+  `resourceName` and `clientDropReason`.
 
 ### Changed
 
+- `ServerHost::drop_player` takes the calling resource.
 - Marked `sv_playerEventRateLimit`, `sv_metricsEnabled`, `sv_adminUiEnabled`,
   `sv_masterUrl`, and `sv_heartbeatInterval` as console-only convars.
 

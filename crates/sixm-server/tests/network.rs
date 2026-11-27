@@ -35,8 +35,12 @@ AddEventHandler('playerJoining', function()
     note('joined:' .. source .. ':' .. GetPlayerName(source) .. ':' .. #GetPlayers())
 end)
 
-AddEventHandler('playerDropped', function(reason)
-    note('dropped:' .. source .. ':' .. reason)
+AddEventHandler('playerJoining', function(oldID)
+    note('oldid:' .. type(oldID) .. ':' .. oldID)
+end)
+
+AddEventHandler('playerDropped', function(reason, resource, code)
+    note('dropped:' .. source .. ':' .. reason .. ':' .. resource .. ':' .. code)
 end)
 
 AddEventHandler('net:secret', function(text)
@@ -123,6 +127,7 @@ fn joining_player_runs_playerjoining_and_is_listed() {
     assert_eq!(alice.server_name(), "SixM Server");
     assert!(h.log().contains("connecting:Alice"), "log: {}", h.log());
     assert!(h.log().contains("joined:1:Alice:1"), "log: {}", h.log());
+    assert!(h.log().contains("oldid:string:1"), "log: {}", h.log());
     assert_eq!(h.fx.text("net", "names"), "1=Alice");
 }
 
@@ -247,7 +252,7 @@ fn drop_player_kicks_with_the_reason_and_fires_playerdropped() {
         _ => None,
     });
     assert_eq!(reason, "bye");
-    h.wait_for_log("dropped:1:bye");
+    h.wait_for_log("dropped:1:bye:net:1");
     assert_eq!(h.fx.text("net", "names"), "");
 }
 
@@ -258,6 +263,7 @@ fn client_disconnect_fires_playerdropped() {
     assert_eq!(h.fx.text("net", "names"), "1=Leaver");
     leaver.disconnect();
     h.wait_for_log("dropped:");
+    assert!(h.log().contains("::0"), "log: {}", h.log());
     assert_eq!(h.fx.text("net", "names"), "");
 }
 

@@ -572,3 +572,28 @@ fn set_game_type_and_map_name_set_server_info_convars() {
     )));
     assert!(sets.contains(&("mapname".to_owned(), "x".to_owned(), ConvarKind::ServerInfo)));
 }
+
+#[test]
+fn drop_player_passes_the_calling_resource_to_the_host() {
+    let host = new_host();
+    let rt = start(
+        &host,
+        "drops",
+        &["drop"],
+        &[(
+            "index.js",
+            r#"exports("drop", (p, reason) => DropPlayer(p, reason));"#,
+        )],
+    );
+
+    call(&rt, "drop", &[Value::Int(4)]);
+    call(&rt, "drop", &[Value::from("5"), Value::from("bye")]);
+
+    assert_eq!(
+        *host.dropped.borrow(),
+        vec![
+            (4, "Dropped by server".to_owned(), "drops".to_owned()),
+            (5, "bye".to_owned(), "drops".to_owned()),
+        ]
+    );
+}

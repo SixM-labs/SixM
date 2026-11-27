@@ -33,7 +33,7 @@ use crate::convars::{Convars, KVP_PATH, RCON_PASSWORD};
 use crate::entities::{EntityStore, EntityUpdate};
 use crate::host_functions::{HostFunctions, is_host};
 use crate::http::{Completion, HttpClient};
-use crate::network::Network;
+use crate::network::{DROP_SCRIPT, DropOrigin, Network};
 use crate::perf::FrameHistory;
 use crate::profiler::Profiler;
 use crate::resource_files::{FileHashes, listing};
@@ -291,6 +291,7 @@ impl ResourceManager {
         info!("Found {} resources in {}", catalog.len(), root.display());
         *self.catalog.borrow_mut() = catalog;
         self.scanned.set(true);
+        self.dispatch("onResourceListRefresh", EventSource::Local, &[]);
     }
 
     /// Whether `name` (canonical name or `provide` alias) is running.
@@ -678,6 +679,14 @@ impl ResourceManager {
     /// order. Returns whether a handler canceled it.
     pub(crate) fn dispatch(&self, event: &str, source: EventSource, args: &[Value]) -> bool {
         self.dispatch_from(event, source, args, None)
+    }
+
+    /// Whether any running runtime handles `event`. Lets the callers skip
+    /// building the arguments of an event nobody listens to.
+    pub(crate) fn has_handler(&self, event: &str) -> bool {
+        self.snapshot()
+            .iter()
+            .any(|runtime| runtime.handles_event(event))
     }
 
     /// Like [`dispatch`](Self::dispatch), for an event that a resource started.
@@ -1430,8 +1439,12 @@ impl ServerHost for ResourceManager {
         self.identifiers_of(player)
     }
 
-    fn drop_player(&self, player: u32, reason: &str) {
-        self.queue_drop(player, reason);
+    fn drop_player(&self, player: u32, reason: &str, resource: &str) {
+        let origin = DropOrigin {
+            resource: resource.to_owned(),
+            code: DROP_SCRIPT,
+        };
+        self.queue_drop(player, reason, origin);
     }
 
     fn is_ace_allowed(&self, principal: &str, object: &str) -> bool {

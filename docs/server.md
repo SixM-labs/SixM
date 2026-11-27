@@ -89,7 +89,7 @@ same name is never reached.
 | `stop <resource>` | Stops the running resources that depend on it, then the resource. A resource that is not running is a warning. |
 | `restart <resource>` | Stops the resource and its running dependents, starts the resource, then starts the dependents in dependency order. If the resource is not running, it is started. |
 | `ensure <resource>` | Restarts the resource if it is running, otherwise starts it. |
-| `refresh` | Scans `sixm_resourcesPath` again. Running resources are not affected. `start` scans on its own if no scan has run yet. |
+| `refresh` | Scans `sixm_resourcesPath` again. Running resources are not affected. `start` scans on its own if no scan has run yet. Fires `onResourceListRefresh` when done. |
 | `watch_resources [on\|off]` | Console-only. Prints or toggles hot-reload watching for running resources. When on, polls running resource folders every 500 ms for changes to manifests (`fxmanifest.lua`, `__resource.lua`) and `.lua`/`.js` scripts (ignoring `data/`, hidden `.` entries, `[...]` folders, and symlinks) and runs `refresh` and `restart` on changed resources. |
 | `endpoint_add_udp <ip:port>` | Stores the listen address in `endpoint_add_udp`. It applies at the next start. The address must parse. |
 | `endpoint_add_tcp <ip:port>` | The same as `endpoint_add_udp`: TCP (HTTP) and UDP (the game) share one address, so this sets both. |

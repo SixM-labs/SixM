@@ -80,7 +80,7 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
         |rt, (player, reason): (LuaValue, Option<String>)| {
             let id = player_id(&player).ok_or_else(|| invalid_player("DropPlayer"))?;
             let reason = reason.as_deref().unwrap_or(DEFAULT_DROP_REASON);
-            server(&*rt.host()?)?.drop_player(id, reason);
+            server(&*rt.host()?)?.drop_player(id, reason, &rt.resource);
             Ok(())
         },
     )?;

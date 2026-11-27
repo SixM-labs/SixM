@@ -62,8 +62,8 @@ pub struct TestHost {
     /// Client events sent, as `(event, target, args)`, in order.
     pub client_events: RefCell<Vec<(String, ClientTarget, Vec<Value>)>>,
     pub latent_client_events: RefCell<Vec<LatentClientEvent>>,
-    /// Players dropped, as `(id, reason)`, in order.
-    pub dropped: RefCell<Vec<(u32, String)>>,
+    /// Players dropped, as `(id, reason, resource)`, in order.
+    pub dropped: RefCell<Vec<(u32, String, String)>>,
     /// State values by `(bag, key)`.
     pub state: RefCell<HashMap<(String, String), Value>>,
     /// The key-value store, in a temporary folder unless [`TestHost::set_kvp_dir`] chose one.
@@ -473,8 +473,10 @@ impl ServerHost for TestHost {
             .unwrap_or_default()
     }
 
-    fn drop_player(&self, player: u32, reason: &str) {
-        self.dropped.borrow_mut().push((player, reason.to_owned()));
+    fn drop_player(&self, player: u32, reason: &str, resource: &str) {
+        self.dropped
+            .borrow_mut()
+            .push((player, reason.to_owned(), resource.to_owned()));
     }
 
     fn player_time_online(&self, player: u32) -> Option<Duration> {

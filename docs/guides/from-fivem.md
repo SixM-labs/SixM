@@ -45,9 +45,14 @@ See [manifest.md](../manifest.md) for all manifest rules.
   - Server: `onResourceStarting` (cancellable), `onResourceStart`,
     `onServerResourceStart`, `onResourceStop`, `onServerResourceStop`,
     `playerConnecting(name, setKickReason, deferrals)` (including
-    `deferrals.defer`, `deferrals.update`, `deferrals.done`), `playerJoining`,
-    `playerDropped(reason)`, `entityCreating` (cancellable), `entityCreated`,
-    and `entityRemoved`.
+    `deferrals.defer`, `deferrals.update`, `deferrals.done`),
+    `playerJoining(oldID)`, `playerDropped(reason, resourceName,
+    clientDropReason)`, `entityCreating` (cancellable), `entityCreated`,
+    `entityRemoved`, `onEntityBucketChange`, `onPlayerBucketChange` and
+    `onResourceListRefresh`.
+  - Difference: `oldID` always equals `source`, because SixM assigns the
+    player id before `playerConnecting` and keeps it. The `clientDropReason`
+    numbers (`0` client, `1` script, `2` server) are SixM's own.
   - Client: `onClientResourceStart`, `onResourceStart`, `onClientResourceStop`,
     and `onResourceStop`.
 

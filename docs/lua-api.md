@@ -127,8 +127,11 @@ Server (`EventSource::Local` unless noted):
 | `entityCreating` | `entity`, `kind`, `model` | Fired before a client-created entity is accepted (`source` is the creator's player id). `kind` is `1` (ped), `2` (vehicle) or `3` (object). `CancelEvent()` refuses it. |
 | `entityCreated` | `entity` | Right after a server- or client-created entity is stored. Its state bag already exists. |
 | `entityRemoved` | `entity` | Before an entity is deleted, while it still exists. |
-| `playerJoining` | none | `source` is the player's id. Fired after admission and after the player's state bag exists. |
-| `playerDropped` | `reason` | `source` is the player's id. The player is still listed while the handlers run. |
+| `onResourceListRefresh` | none | Fired when `refresh` (or the hot-reload watcher) has replaced the resource list. |
+| `playerJoining` | `oldID` | `source` is the player's id. `oldID` is the id as a string and always equals `source`, because SixM assigns the id before `playerConnecting` and keeps it (FiveM uses a temporary id there). Fired after admission and after the player's state bag exists. |
+| `playerDropped` | `reason`, `resourceName`, `clientDropReason` | `source` is the player's id. The player is still listed while the handlers run. `reason` is the text shown to the player. `resourceName` is the resource that called `DropPlayer`, or `""` when none did. `clientDropReason` is `0` when the client closed or lost the connection, `1` for a `DropPlayer` call from a script, and `2` for a kick the server decides itself (for example an entity id that was not leased). These numbers are SixM's own; FiveM's values are not documented here. |
+| `onPlayerBucketChange` | `player`, `bucket`, `oldBucket` | `player` is the player id as a string, like `GetPlayers`. Fired only when `SetPlayerRoutingBucket` really changes the bucket (a call with the same bucket, or for an unknown player, fires nothing), after the move is complete. |
+| `onEntityBucketChange` | `entity`, `bucket`, `oldBucket` | Fired only when `SetEntityRoutingBucket` really changes the bucket, after the move is complete. It fires for every entity kind. A player's ped moves with the player, so a change of the player fires this event for the ped too, after `onPlayerBucketChange`, when the ped's own bucket was different. A player without a ped fires no entity event. |
 
 Client (`EventSource::Local`):
 
@@ -274,9 +277,10 @@ library can tell who called it. It is `nil` when no resource caused it.
   keeps the same value, and so does a handler after a `Wait`.
 - It is `nil` for events the host fires: lifecycle events (`onResourceStarting`,
   `onResourceStart`, `onServerResourceStart`, `onResourceStop`,
-  `onServerResourceStop`, `onClientResourceStart`, `onClientResourceStop`),
-  player events (`playerConnecting`, `playerJoining`, `playerDropped`), entity
-  events (`entityCreated`, `entityRemoved`), events from the network
+  `onServerResourceStop`, `onClientResourceStart`, `onClientResourceStop`,
+  `onResourceListRefresh`), player events (`playerConnecting`, `playerJoining`,
+  `playerDropped`, `onPlayerBucketChange`), entity events (`entityCreated`,
+  `entityRemoved`, `onEntityBucketChange`), events from the network
   (`TriggerServerEvent` and `TriggerClientEvent`), console commands and state
   bag change handlers.
 

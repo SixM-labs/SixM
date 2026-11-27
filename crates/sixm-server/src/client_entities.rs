@@ -18,6 +18,7 @@ use sixm_core::{
 use tracing::{debug, info, warn};
 
 use crate::manager::ResourceManager;
+use crate::network::{DROP_SERVER, DropOrigin};
 use crate::scope::squared_distance;
 
 /// Ids leased to a client each time it runs low.
@@ -77,7 +78,14 @@ impl ResourceManager {
     ) {
         if !self.entities.borrow_mut().use_leased_id(player, id) {
             warn!(player, id, "entity {id} was not leased to the player");
-            self.queue_drop(player, "entity id out of lease");
+            self.queue_drop(
+                player,
+                "entity id out of lease",
+                DropOrigin {
+                    resource: String::new(),
+                    code: DROP_SERVER,
+                },
+            );
             return;
         }
         match self.creation_refusal(player, id, kind, model, position, rotation) {

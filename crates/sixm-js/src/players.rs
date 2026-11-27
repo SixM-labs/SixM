@@ -335,7 +335,7 @@ fn install_acl_and_player<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquick
                 let id = player_id(&player).ok_or_else(|| invalid_player(&ctx, "DropPlayer"))?;
                 let reason = reason.0.flatten();
                 let reason = reason.as_deref().unwrap_or(DEFAULT_DROP_REASON);
-                server(&ctx, &*rt.host(&ctx)?)?.drop_player(id, reason);
+                server(&ctx, &*rt.host(&ctx)?)?.drop_player(id, reason, &rt.resource);
                 Ok(())
             },
         )?

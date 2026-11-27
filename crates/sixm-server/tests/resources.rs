@@ -409,3 +409,30 @@ fn resource_commands_game_type_and_instance_id_work_on_the_real_manager() {
         vec![Value::Int(i64::from(std::process::id()))]
     );
 }
+
+#[test]
+fn refresh_fires_on_resource_list_refresh() {
+    let fx = Fixture::new();
+    add_observer(&fx);
+    fx.add_resource(
+        "listener",
+        &manifest(&["server.lua"], &[], &["observer"]),
+        &[(
+            "server.lua",
+            "AddEventHandler('onResourceListRefresh', function()\n\
+                 exports.observer:record('refreshed')\n\
+             end)\n",
+        )],
+    );
+    fx.manager().start("observer").expect("observer starts");
+    fx.manager().start("listener").expect("listener starts");
+
+    fx.manager().refresh();
+    fx.manager().refresh();
+
+    let values = fx
+        .manager()
+        .call_export("observer", "log", &[], None)
+        .expect("log");
+    assert_eq!(values, vec![Value::from("refreshed refreshed")]);
+}

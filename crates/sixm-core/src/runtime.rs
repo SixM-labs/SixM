@@ -440,9 +440,10 @@ pub trait ServerHost {
     /// its identifiers, so entries can name a player by `license`.
     fn is_ace_allowed(&self, principal: &str, object: &str) -> bool;
 
-    /// Disconnects a player with a reason shown to them. Takes effect after
+    /// Disconnects a player with a reason shown to them. `resource` is the
+    /// resource that asked; `playerDropped` reports it. Takes effect after
     /// the current script call returns.
-    fn drop_player(&self, player: u32, reason: &str);
+    fn drop_player(&self, player: u32, reason: &str, resource: &str);
 
     /// Creates an entity and returns its id. Ids count up from 1 and are not
     /// reused while the server runs. The entity's state bag exists from now on,

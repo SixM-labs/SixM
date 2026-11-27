@@ -232,7 +232,10 @@ fn drop_player_uses_a_default_reason_and_accepts_a_custom_one() {
 
     assert_eq!(
         *host.dropped.borrow(),
-        vec![(4, "Dropped by server".to_owned()), (5, "bye".to_owned()),]
+        vec![
+            (4, "Dropped by server".to_owned(), "drops".to_owned()),
+            (5, "bye".to_owned(), "drops".to_owned()),
+        ]
     );
 }
 
