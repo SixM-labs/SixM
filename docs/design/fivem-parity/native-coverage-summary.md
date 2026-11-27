@@ -1,0 +1,373 @@
+# Native coverage: SixM vs official CFX natives
+
+Method: PascalCase name matched as an exact quoted string in crates/*/src (registration sites in sixm-lua, sixm-js, sixm-client sim); comments, docs and tests do not count. Status `sim` = only in the client-side `--sim` SimAdapter, not in the server/script runtimes (counted as not implemented below).
+
+## Counts per apiset (CFX namespace, 943 natives)
+
+| apiset | total | yes | sim-only | no |
+|---|---|---|---|---|
+| server | 286 | 62 | 2 | 222 |
+| shared | 74 | 42 | 0 | 32 |
+| client | 583 | 1 | 0 | 582 |
+| all | 943 | 105 | 2 | 836 |
+
+## Missing server+shared natives: 256 total = 60 [core] + 196 [game]
+
+### [core] (game-independent)
+
+- [core] CanPlayerStartCommerceSession (server)
+- [core] DeleteFunctionReference (shared)
+- [core] DoesPlayerOwnSku (server)
+- [core] DoesPlayerOwnSkuExt (server)
+- [core] DuplicateFunctionReference (shared)
+- [core] EnableEnhancedHostSupport (server)
+- [core] EnsureEntityStateBag (shared)
+- [core] FlagServerAsPrivate (server)
+- [core] FormatStackTrace (shared)
+- [core] GetConsoleBuffer (server)
+- [core] GetEntitiesInRadius (shared)
+- [core] GetEntityOrphanMode (server)
+- [core] GetEntitySpeed (server, sim-only)
+- [core] GetGameBuildNumber (shared)
+- [core] GetGameName (shared)
+- [core] GetHostId (server)
+- [core] GetInstanceId (shared)
+- [core] GetNetTypeFromEntity (server)
+- [core] GetPasswordHash (server)
+- [core] GetPlayerFromIndex (server)
+- [core] GetPlayerGuid (server)
+- [core] GetPlayerPeerStatistics (server)
+- [core] GetPlayerTeam (server)
+- [core] GetPlayerTimeOnline (server)
+- [core] GetResourceCommands (shared)
+- [core] GetStateBagKeys (shared)
+- [core] GetStateBagValue (shared)
+- [core] IsAceAllowed (shared)
+- [core] IsPlayerCommerceInfoLoaded (server)
+- [core] IsPlayerCommerceInfoLoadedExt (server)
+- [core] LoadPlayerCommerceData (server)
+- [core] LoadPlayerCommerceDataExt (server)
+- [core] MumbleCreateChannel (server)
+- [core] MumbleIsPlayerMuted (server)
+- [core] MumbleSetPlayerMuted (server)
+- [core] NetworkGetVoiceProximityOverrideForPlayer (server)
+- [core] PerformHttpRequestInternal (server)
+- [core] PerformHttpRequestInternalEx (server)
+- [core] PrintStructuredTrace (server)
+- [core] ProfilerEnterScope (shared)
+- [core] ProfilerExitScope (shared)
+- [core] ProfilerIsRecording (shared)
+- [core] RegisterConsoleListener (server)
+- [core] RegisterResourceAsEventHandler (shared)
+- [core] RegisterResourceAsset (server)
+- [core] RegisterResourceBuildTaskFactory (server)
+- [core] RequestPlayerCommerceSession (server)
+- [core] ScanResourceRoot (server)
+- [core] ScheduleResourceTick (server)
+- [core] SetEntityIgnoreRequestControlFilter (server)
+- [core] SetGameType (server)
+- [core] SetMapName (server)
+- [core] SetPlayerCullingRadius (server)
+- [core] SetStateBagValue (shared)
+- [core] StateBagHasKey (shared)
+- [core] TempBanPlayer (server)
+- [core] TriggerClientEventInternal (server)
+- [core] TriggerEventInternal (shared)
+- [core] TriggerLatentClientEventInternal (server)
+- [core] VerifyPasswordHash (server)
+
+### [game] (needs real game world)
+
+- [game] AddBlipForArea (server)
+- [game] AddBlipForCoord (server)
+- [game] AddBlipForEntity (server)
+- [game] AddBlipForRadius (server)
+- [game] AddPedDecorationFromHashes (server)
+- [game] ApplyForceToEntity (server)
+- [game] ClearPedProp (server)
+- [game] ClearPedSecondaryTask (server)
+- [game] ClearPedTasks (server)
+- [game] ClearPedTasksImmediately (server)
+- [game] ClearPlayerWantedLevel (server)
+- [game] CreatePedInsideVehicle (server)
+- [game] DeleteTrain (server)
+- [game] DoesBoatSinkWhenWrecked (server)
+- [game] DoesTrainStopAtStations (shared)
+- [game] GetAirDragMultiplierForPlayersVehicle (server)
+- [game] GetCurrentPedWeapon (server)
+- [game] GetEntityCollisionDisabled (server)
+- [game] GetEntityPopulationType (server)
+- [game] GetEntityRemoteSyncedScenesAllowed (server)
+- [game] GetEntityRotationVelocity (server)
+- [game] GetHeliBodyHealth (server)
+- [game] GetHeliDisableExplodeFromBodyDamage (server)
+- [game] GetHeliEngineHealth (server)
+- [game] GetHeliGasTankHealth (server)
+- [game] GetHeliMainRotorDamageScale (server)
+- [game] GetHeliMainRotorHealth (server)
+- [game] GetHeliPitchControl (server)
+- [game] GetHeliRearRotorDamageScale (server)
+- [game] GetHeliRearRotorHealth (server)
+- [game] GetHeliRollControl (server)
+- [game] GetHeliTailRotorDamageScale (server)
+- [game] GetHeliTailRotorHealth (server)
+- [game] GetHeliThrottleControl (server)
+- [game] GetHeliYawControl (server)
+- [game] GetIsHeliEngineRunning (server)
+- [game] GetIsVehicleEngineRunning (server)
+- [game] GetIsVehiclePrimaryColourCustom (server)
+- [game] GetIsVehicleSecondaryColourCustom (server)
+- [game] GetLandingGearState (server)
+- [game] GetLastPedInVehicleSeat (server)
+- [game] GetMount (server)
+- [game] GetPedArmour (server)
+- [game] GetPedCauseOfDeath (server)
+- [game] GetPedDesiredHeading (server)
+- [game] GetPedInVehicleSeat (server)
+- [game] GetPedMaxHealth (server)
+- [game] GetPedRelationshipGroupHash (server)
+- [game] GetPedScriptTaskCommand (server)
+- [game] GetPedScriptTaskStage (server)
+- [game] GetPedSourceOfDamage (server)
+- [game] GetPedSourceOfDeath (server)
+- [game] GetPedSpecificTaskType (server)
+- [game] GetPedStealthMovement (server)
+- [game] GetPlayerCameraRotation (server)
+- [game] GetPlayerFakeWantedLevel (server)
+- [game] GetPlayerFocusPos (server)
+- [game] GetPlayerInvincible (server)
+- [game] GetPlayerMaxArmour (server)
+- [game] GetPlayerMaxHealth (server)
+- [game] GetPlayerMeleeWeaponDamageModifier (shared)
+- [game] GetPlayerTimeInPursuit (server)
+- [game] GetPlayerWantedCentrePosition (server)
+- [game] GetPlayerWantedLevel (server)
+- [game] GetPlayerWeaponDamageModifier (shared)
+- [game] GetPlayerWeaponDefenseModifier (shared)
+- [game] GetPlayerWeaponDefenseModifier2 (shared)
+- [game] GetSeatPedIsUsing (server)
+- [game] GetSelectedPedWeapon (server)
+- [game] GetThrusterSideRcsThrottle (server)
+- [game] GetThrusterThrottle (server)
+- [game] GetTrainBackwardCarriage (server)
+- [game] GetTrainCarriageEngine (server)
+- [game] GetTrainCarriageIndex (server)
+- [game] GetTrainCruiseSpeed (shared)
+- [game] GetTrainDirection (shared)
+- [game] GetTrainForwardCarriage (server)
+- [game] GetTrainState (shared)
+- [game] GetTrainTrackIndex (shared)
+- [game] GetVehicleBodyHealth (server)
+- [game] GetVehicleColours (server)
+- [game] GetVehicleCustomPrimaryColour (server)
+- [game] GetVehicleCustomSecondaryColour (server)
+- [game] GetVehicleDashboardColour (server)
+- [game] GetVehicleDirtLevel (server)
+- [game] GetVehicleDoorLockStatus (server)
+- [game] GetVehicleDoorStatus (server)
+- [game] GetVehicleDoorsLockedForPlayer (server)
+- [game] GetVehicleEngineHealth (server)
+- [game] GetVehicleExtraColours (server)
+- [game] GetVehicleFlightNozzlePosition (server)
+- [game] GetVehicleHandbrake (shared)
+- [game] GetVehicleHeadlightsColour (server)
+- [game] GetVehicleHomingLockonState (server)
+- [game] GetVehicleHornType (server)
+- [game] GetVehicleInteriorColour (server)
+- [game] GetVehicleLightsState (server)
+- [game] GetVehicleLivery (server)
+- [game] GetVehicleLockOnTarget (server)
+- [game] GetVehicleNeonColour (server)
+- [game] GetVehicleNeonEnabled (server)
+- [game] GetVehicleNumberPlateText (server)
+- [game] GetVehicleNumberPlateTextIndex (server)
+- [game] GetVehiclePedIsIn (server)
+- [game] GetVehiclePetrolTankHealth (server)
+- [game] GetVehicleRadioStationIndex (server)
+- [game] GetVehicleRoofLivery (server)
+- [game] GetVehicleSteeringAngle (shared)
+- [game] GetVehicleTotalRepairs (server)
+- [game] GetVehicleType (shared)
+- [game] GetVehicleTyreSmokeColor (server)
+- [game] GetVehicleWheelType (server)
+- [game] GetVehicleWindowTint (server)
+- [game] GiveWeaponComponentToPed (server)
+- [game] GiveWeaponToPed (server)
+- [game] HasEntityBeenMarkedAsNoLongerNeeded (server)
+- [game] HasVehicleBeenDamagedByBullets (server)
+- [game] HasVehicleBeenOwnedByPlayer (server)
+- [game] IsBoatAnchoredAndFrozen (server)
+- [game] IsBoatWrecked (server)
+- [game] IsFlashLightOn (server)
+- [game] IsHeliTailBoomBreakable (server)
+- [game] IsHeliTailBoomBroken (server)
+- [game] IsPedAPlayer (server)
+- [game] IsPedHandcuffed (server)
+- [game] IsPedInAnyVehicle (server)
+- [game] IsPedInVehicle (server)
+- [game] IsPedOnMount (server)
+- [game] IsPedRagdoll (server)
+- [game] IsPedStrafing (server)
+- [game] IsPedUsingActionMode (server)
+- [game] IsPlayerEvadingWantedLevel (server)
+- [game] IsPlayerInFreeCamMode (server)
+- [game] IsPlayerUsingSuperJump (server)
+- [game] IsTrainCaboose (server)
+- [game] IsVehicleEngineStarting (shared)
+- [game] IsVehicleExtraTurnedOn (server)
+- [game] IsVehicleSirenOn (server)
+- [game] IsVehicleTyreBurst (server)
+- [game] IsVehicleWindowIntact (server)
+- [game] RemoveAllPedWeapons (server)
+- [game] RemoveBlip (server)
+- [game] RemoveWeaponComponentFromPed (server)
+- [game] RemoveWeaponFromPed (server)
+- [game] SetBlipSprite (server)
+- [game] SetCurrentPedWeapon (server)
+- [game] SetEntityRemoteSyncedScenesAllowed (server)
+- [game] SetPedAmmo (server)
+- [game] SetPedArmour (server)
+- [game] SetPedCanRagdoll (server)
+- [game] SetPedComponentVariation (server)
+- [game] SetPedConfigFlag (server)
+- [game] SetPedDefaultComponentVariation (server)
+- [game] SetPedEyeColor (server)
+- [game] SetPedFaceFeature (server)
+- [game] SetPedHairTint (server)
+- [game] SetPedHeadBlendData (server)
+- [game] SetPedHeadOverlay (server)
+- [game] SetPedHeadOverlayColor (server)
+- [game] SetPedIntoVehicle (server)
+- [game] SetPedPropIndex (server)
+- [game] SetPedRandomComponentVariation (server)
+- [game] SetPedRandomProps (server)
+- [game] SetPedResetFlag (server)
+- [game] SetPedToRagdoll (server)
+- [game] SetPedToRagdollWithFall (server)
+- [game] SetPlayerControl (server)
+- [game] SetPlayerInvincible (server)
+- [game] SetPlayerModel (server)
+- [game] SetPlayerWantedLevel (server)
+- [game] SetVehicleAlarm (server)
+- [game] SetVehicleBodyHealth (server)
+- [game] SetVehicleColourCombination (server)
+- [game] SetVehicleColours (server)
+- [game] SetVehicleCustomPrimaryColour (server)
+- [game] SetVehicleCustomSecondaryColour (server)
+- [game] SetVehicleDirtLevel (server)
+- [game] SetVehicleDoorBroken (server)
+- [game] SetVehicleDoorsLocked (server)
+- [game] SetVehicleNumberPlateText (server)
+- [game] TaskCombatPed (server)
+- [game] TaskDriveBy (server)
+- [game] TaskEnterVehicle (server)
+- [game] TaskEveryoneLeaveVehicle (server)
+- [game] TaskGoStraightToCoord (server, sim-only)
+- [game] TaskGoToCoordAnyMeans (server)
+- [game] TaskGoToEntity (server)
+- [game] TaskHandsUp (server)
+- [game] TaskLeaveAnyVehicle (server)
+- [game] TaskLeaveVehicle (server)
+- [game] TaskPlayAnim (server)
+- [game] TaskPlayAnimAdvanced (server)
+- [game] TaskReactAndFleePed (server)
+- [game] TaskShootAtCoord (server)
+- [game] TaskShootAtEntity (server)
+- [game] TaskWarpPedIntoVehicle (server)
+
+## Missing client natives: 582 total = 92 [core] + 490 [game] (game ones not listed)
+
+### [core] client natives missing
+
+- [core] CreateDui
+- [core] CreateRuntimeTextureFromDuiHandle
+- [core] DestroyDui
+- [core] DisableRawKeyThisFrame
+- [core] EnterCursorMode
+- [core] GetActivePlayers
+- [core] GetClientConfigBool
+- [core] GetCurrentGameName
+- [core] GetCurrentServerEndpoint
+- [core] GetDuiHandle
+- [core] GetExternalKvpFloat
+- [core] GetExternalKvpInt
+- [core] GetExternalKvpString
+- [core] GetNuiCursorPosition
+- [core] GetPlayerFromServerId
+- [core] IsDisabledRawKeyDown
+- [core] IsDisabledRawKeyPressed
+- [core] IsDisabledRawKeyReleased
+- [core] IsDisabledRawKeyUp
+- [core] IsDuiAvailable
+- [core] IsNuiFocusKeepingInput
+- [core] IsNuiFocused
+- [core] IsRawKeyDown
+- [core] IsRawKeyPressed
+- [core] IsRawKeyReleased
+- [core] IsRawKeyUp
+- [core] LeaveCursorMode
+- [core] MumbleAddVoiceChannelListen
+- [core] MumbleAddVoiceTargetChannel
+- [core] MumbleAddVoiceTargetPlayer
+- [core] MumbleAddVoiceTargetPlayerByServerId
+- [core] MumbleClearVoiceChannel
+- [core] MumbleClearVoiceTarget
+- [core] MumbleClearVoiceTargetChannels
+- [core] MumbleClearVoiceTargetPlayers
+- [core] MumbleDoesChannelExist
+- [core] MumbleGetTalkerProximity
+- [core] MumbleGetVoiceChannelFromServerId
+- [core] MumbleIsActive
+- [core] MumbleIsConnected
+- [core] MumbleIsPlayerTalking
+- [core] MumbleRemoveVoiceChannelListen
+- [core] MumbleRemoveVoiceTargetChannel
+- [core] MumbleRemoveVoiceTargetPlayer
+- [core] MumbleRemoveVoiceTargetPlayerByServerId
+- [core] MumbleSetActive
+- [core] MumbleSetAudioInputDistance
+- [core] MumbleSetAudioInputIntent
+- [core] MumbleSetAudioOutputDistance
+- [core] MumbleSetServerAddress
+- [core] MumbleSetSubmixForServerId
+- [core] MumbleSetTalkerProximity
+- [core] MumbleSetVoiceChannel
+- [core] MumbleSetVoiceTarget
+- [core] MumbleSetVolumeOverride
+- [core] MumbleSetVolumeOverrideByServerId
+- [core] NetworkDoesEntityExistWithNetworkId
+- [core] RegisterKeyMapping
+- [core] RegisterNuiCallback
+- [core] RegisterNuiCallbackType
+- [core] RegisterRawKeymap
+- [core] RegisterRawNuiCallback
+- [core] RemapRawKeymap
+- [core] RequestResourceFileSet
+- [core] SendDuiMessage
+- [core] SendDuiMouseDown
+- [core] SendDuiMouseMove
+- [core] SendDuiMouseUp
+- [core] SendDuiMouseWheel
+- [core] SendLoadingScreenMessage
+- [core] SendNuiMessage
+- [core] SetClientConfigBool
+- [core] SetCursorLocation
+- [core] SetDiscordAppId
+- [core] SetDiscordRichPresenceAction
+- [core] SetDiscordRichPresenceAsset
+- [core] SetDiscordRichPresenceAssetSmall
+- [core] SetDiscordRichPresenceAssetSmallText
+- [core] SetDiscordRichPresenceAssetText
+- [core] SetDuiUrl
+- [core] SetKeyMappingHideResources
+- [core] SetManualShutdownLoadingScreenNui
+- [core] SetNuiFocus
+- [core] SetNuiFocusKeepInput
+- [core] SetNuiZindex
+- [core] SetRichPresence
+- [core] SetTextChatEnabled
+- [core] ShutdownLoadingScreenNui
+- [core] StartFindExternalKvp
+- [core] TriggerLatentServerEventInternal
+- [core] TriggerServerEventInternal
+- [core] UnregisterRawNuiCallback
