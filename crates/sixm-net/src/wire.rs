@@ -13,14 +13,16 @@ use std::fmt;
 use std::sync::Arc;
 
 use quinn::{ReadExactError, RecvStream};
+use serde::Deserialize as _;
 use serde::de::{
     self, DeserializeSeed, Deserializer, EnumAccess, SeqAccess, VariantAccess, Visitor,
 };
 use serde::ser::{SerializeSeq, SerializeStructVariant};
 use serde::{Serialize, Serializer};
-use sixm_core::{MAX_STATE_NAME_LEN, Value};
+use sixm_core::{EntityKind, MAX_STATE_NAME_LEN, Value};
 use tracing::warn;
 
+use crate::entities::EntityEntry;
 use crate::error::NetError;
 use crate::files::{
     FILE_KIND_FILE, FileEntry, FileHash, MAX_EXPORT_NAME_LEN, MAX_EXPORTS, MAX_FILE_NAME_LEN,
@@ -59,6 +61,10 @@ const SERVER_VARIANTS: &[&str] = &[
     "ResourceStarted",
     "ResourceStopped",
     "FileUnavailable",
+    "EntityCreated",
+    "EntityTransforms",
+    "EntityDeleted",
+    "EntitySnapshot",
 ];
 /// Most files one snapshot entry carries. Larger resources are split into
 /// several entries of the same name, so one entry always fits a frame.
@@ -289,6 +295,49 @@ pub(crate) fn encode_resources_snapshot(
         },
         max_frame,
     )?);
+    Ok(frames)
+}
+
+/// Encodes entity transforms as the fewest frames that carry them in order.
+/// Each update costs one unit of the decoding budget.
+pub(crate) fn encode_entity_transforms(
+    updates: &[(u32, [f32; 3], [f32; 3])],
+    max_frame: usize,
+) -> Result<Vec<Arc<[u8]>>, NetError> {
+    encode_items(ServerMessage::ENTITY_TRANSFORMS_TAG, updates, max_frame)
+}
+
+/// Encodes a list of entities as the fewest frames that carry them in order.
+/// Each entry costs one unit of the decoding budget.
+pub(crate) fn encode_entity_snapshot(
+    entities: &[EntityEntry],
+    max_frame: usize,
+) -> Result<Vec<Arc<[u8]>>, NetError> {
+    encode_items(ServerMessage::ENTITY_SNAPSHOT_TAG, entities, max_frame)
+}
+
+/// Encodes `items` as the frames of a sequence message whose variant index is
+/// `tag`. Every item costs one unit of the decoding budget. A frame that fails
+/// to seal, because one item is larger than `max_frame`, fails the call.
+fn encode_items<T: Serialize>(
+    tag: u32,
+    items: &[T],
+    max_frame: usize,
+) -> Result<Vec<Arc<[u8]>>, NetError> {
+    let mut frames = Vec::new();
+    let mut chunk = SnapshotChunk::new(tag);
+    for item in items {
+        let encoded = postcard::to_extend(item, Vec::<u8>::new())
+            .map_err(|err| NetError::Protocol(format!("cannot encode message: {err}")))?;
+        if !chunk.is_empty() && !chunk.accepts(encoded.len(), 1, max_frame) {
+            frames.push(chunk.seal(max_frame)?);
+            chunk = SnapshotChunk::new(tag);
+        }
+        chunk.push(&encoded, 1);
+    }
+    if !chunk.is_empty() {
+        frames.push(chunk.seal(max_frame)?);
+    }
     Ok(frames)
 }
 
@@ -741,6 +790,24 @@ impl<'de> Visitor<'de> for ServerMessageVisitor<'_> {
             ServerMessage::FILE_UNAVAILABLE_TAG => variant
                 .newtype_variant::<FileHash>()
                 .map(|hash| ServerMessage::FileUnavailable { hash }),
+            ServerMessage::ENTITY_CREATED_TAG => variant
+                .newtype_variant_seed(EntitySeed {
+                    budget: self.budget,
+                })
+                .map(|entity| ServerMessage::EntityCreated { entity }),
+            ServerMessage::ENTITY_TRANSFORMS_TAG => variant
+                .newtype_variant_seed(TransformsSeed {
+                    budget: self.budget,
+                })
+                .map(|updates| ServerMessage::EntityTransforms { updates }),
+            ServerMessage::ENTITY_DELETED_TAG => variant
+                .newtype_variant::<u32>()
+                .map(|id| ServerMessage::EntityDeleted { id }),
+            ServerMessage::ENTITY_SNAPSHOT_TAG => variant
+                .newtype_variant_seed(EntitiesSeed {
+                    budget: self.budget,
+                })
+                .map(|entities| ServerMessage::EntitySnapshot { entities }),
             other => Err(de::Error::unknown_variant(
                 &other.to_string(),
                 SERVER_VARIANTS,
@@ -841,6 +908,116 @@ impl<'de> Visitor<'de> for SnapshotVisitor<'_> {
             entries.push((bag, key, StateValue(value)));
         }
         Ok(entries)
+    }
+}
+
+/// Decodes one entity, which costs one unit of the budget.
+#[derive(Clone, Copy)]
+struct EntitySeed<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> DeserializeSeed<'de> for EntitySeed<'_> {
+    type Value = EntityEntry;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<EntityEntry, D::Error> {
+        self.budget.spend::<D::Error>()?;
+        let entry = EntityEntry::deserialize(deserializer)?;
+        checked_entity_kind::<D::Error>(&entry)?;
+        Ok(entry)
+    }
+}
+
+/// Decodes a sequence of entity transforms. Each update costs one unit of the budget.
+#[derive(Clone, Copy)]
+struct TransformsSeed<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> DeserializeSeed<'de> for TransformsSeed<'_> {
+    type Value = Vec<(u32, [f32; 3], [f32; 3])>;
+
+    fn deserialize<D: Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Vec<(u32, [f32; 3], [f32; 3])>, D::Error> {
+        deserializer.deserialize_seq(TransformsVisitor {
+            budget: self.budget,
+        })
+    }
+}
+
+struct TransformsVisitor<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> Visitor<'de> for TransformsVisitor<'_> {
+    type Value = Vec<(u32, [f32; 3], [f32; 3])>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a sequence of entity transforms")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(
+        self,
+        mut seq: A,
+    ) -> Result<Vec<(u32, [f32; 3], [f32; 3])>, A::Error> {
+        let mut updates = Vec::new();
+        while let Some(update) = seq.next_element::<(u32, [f32; 3], [f32; 3])>()? {
+            self.budget.spend::<A::Error>()?;
+            updates.push(update);
+        }
+        Ok(updates)
+    }
+}
+
+/// Decodes a sequence of entities. Each entity costs one unit of the budget.
+#[derive(Clone, Copy)]
+struct EntitiesSeed<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> DeserializeSeed<'de> for EntitiesSeed<'_> {
+    type Value = Vec<EntityEntry>;
+
+    fn deserialize<D: Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Vec<EntityEntry>, D::Error> {
+        deserializer.deserialize_seq(EntitiesVisitor {
+            budget: self.budget,
+        })
+    }
+}
+
+struct EntitiesVisitor<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> Visitor<'de> for EntitiesVisitor<'_> {
+    type Value = Vec<EntityEntry>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a sequence of entities")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<EntityEntry>, A::Error> {
+        let mut entities = Vec::new();
+        while let Some(entry) = seq.next_element::<EntityEntry>()? {
+            self.budget.spend::<A::Error>()?;
+            checked_entity_kind::<A::Error>(&entry)?;
+            entities.push(entry);
+        }
+        Ok(entities)
+    }
+}
+
+/// Rejects an entity whose kind code is not one of the known kinds.
+fn checked_entity_kind<E: de::Error>(entry: &EntityEntry) -> Result<(), E> {
+    if EntityKind::from_code(entry.kind).is_some() {
+        Ok(())
+    } else {
+        Err(E::custom(format!("unknown entity kind {}", entry.kind)))
     }
 }
 
@@ -1927,5 +2104,171 @@ mod tests {
             .collect();
         let frames = encode_resources_snapshot(&resources, MAX_FRAME).expect("snapshot encodes");
         assert_eq!(decode_resources_snapshot(&frames, MAX_FRAME), resources);
+    }
+
+    /// One entity transform, as a batch carries it.
+    type Update = (u32, [f32; 3], [f32; 3]);
+
+    fn entry(id: u32) -> EntityEntry {
+        EntityEntry {
+            id,
+            kind: 2,
+            model: 0xB779_A091,
+            position: [1.0, 2.0, 3.0],
+            rotation: [0.0, 0.0, 90.0],
+        }
+    }
+
+    /// Decodes every frame of a sequence message, checking each frame's length
+    /// prefix and size, and returns the items `take` extracts, in order.
+    fn decode_frames<T>(
+        frames: &[Arc<[u8]>],
+        max_frame: usize,
+        take: fn(ServerMessage) -> Option<Vec<T>>,
+    ) -> Vec<T> {
+        let mut items = Vec::new();
+        for frame in frames {
+            let len = frame.len() - FRAME_HEADER_LEN;
+            assert!(len <= max_frame, "frame of {len} bytes exceeds {max_frame}");
+            let prefix = u32::try_from(len).expect("frame fits a u32");
+            assert_eq!(&frame[..FRAME_HEADER_LEN], &prefix.to_le_bytes());
+            match decode_server_message(&frame[FRAME_HEADER_LEN..]) {
+                Ok(message) => {
+                    let part = take(message).expect("the frame carries the right list");
+                    items.extend(part);
+                }
+                Err(err) => panic!("the frame does not decode: {err}"),
+            }
+        }
+        items
+    }
+
+    fn transforms_of(message: ServerMessage) -> Option<Vec<Update>> {
+        match message {
+            ServerMessage::EntityTransforms { updates } => Some(updates),
+            _ => None,
+        }
+    }
+
+    fn entities_of(message: ServerMessage) -> Option<Vec<EntityEntry>> {
+        match message {
+            ServerMessage::EntitySnapshot { entities } => Some(entities),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn entity_messages_round_trip() {
+        let created = ServerMessage::EntityCreated { entity: entry(1) };
+        assert!(matches!(
+            decode_server_message(&payload_of(&created)),
+            Ok(ServerMessage::EntityCreated { entity }) if entity == entry(1)
+        ));
+        let deleted = ServerMessage::EntityDeleted { id: 1 };
+        assert!(matches!(
+            decode_server_message(&payload_of(&deleted)),
+            Ok(ServerMessage::EntityDeleted { id: 1 })
+        ));
+        let snapshot = ServerMessage::EntitySnapshot {
+            entities: vec![entry(1), entry(2)],
+        };
+        assert!(matches!(
+            decode_server_message(&payload_of(&snapshot)),
+            Ok(ServerMessage::EntitySnapshot { entities }) if entities == [entry(1), entry(2)]
+        ));
+        let frames = encode_entity_transforms(&[(4, [1.0; 3], [2.0; 3])], MAX_FRAME)
+            .expect("transforms encode");
+        assert_eq!(
+            decode_frames(&frames, MAX_FRAME, transforms_of),
+            vec![(4, [1.0; 3], [2.0; 3])]
+        );
+    }
+
+    #[test]
+    fn empty_entity_lists_send_nothing() {
+        assert_eq!(
+            encode_entity_transforms(&[], MAX_FRAME)
+                .expect("empty batch encodes")
+                .len(),
+            0
+        );
+        assert_eq!(
+            encode_entity_snapshot(&[], MAX_FRAME)
+                .expect("empty snapshot encodes")
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn unknown_entity_kinds_are_rejected() {
+        let bad = EntityEntry {
+            kind: 4,
+            ..entry(1)
+        };
+        let created = ServerMessage::EntityCreated { entity: bad };
+        assert!(decode_server_message(&payload_of(&created)).is_err());
+        let snapshot = ServerMessage::EntitySnapshot {
+            entities: vec![entry(1), bad],
+        };
+        assert!(decode_server_message(&payload_of(&snapshot)).is_err());
+    }
+
+    #[test]
+    fn entity_transforms_split_and_decode_to_the_same_updates() {
+        const MAX: usize = 512;
+        let updates: Vec<(u32, [f32; 3], [f32; 3])> = (0..3000_u32)
+            .map(|id| (id, [1.0, 2.0, 3.0], [0.0, 0.0, 90.0]))
+            .collect();
+        let frames = encode_entity_transforms(&updates, MAX).expect("transforms encode");
+        assert!(
+            frames.len() > 1,
+            "3000 updates cannot fit one 512-byte frame"
+        );
+        assert_eq!(decode_frames(&frames, MAX, transforms_of), updates);
+    }
+
+    #[test]
+    fn entity_snapshot_splits_and_decodes_to_the_same_entities() {
+        const MAX: usize = 256;
+        let entities: Vec<EntityEntry> = (1..=500_u32).map(entry).collect();
+        let frames = encode_entity_snapshot(&entities, MAX).expect("snapshot encodes");
+        assert!(
+            frames.len() > 1,
+            "500 entities cannot fit one 256-byte frame"
+        );
+        assert_eq!(decode_frames(&frames, MAX, entities_of), entities);
+    }
+
+    #[test]
+    fn entity_frames_respect_the_decoding_budget() {
+        // Each update costs one unit, so 70 000 of them need two frames even
+        // though they fit one frame by size.
+        const LARGE: usize = 16 * 1024 * 1024;
+        let updates = vec![(1_u32, [0.0; 3], [0.0; 3]); 70_000];
+        let frames = encode_entity_transforms(&updates, LARGE).expect("transforms encode");
+        assert_eq!(frames.len(), 2);
+        assert_eq!(decode_frames(&frames, LARGE, transforms_of).len(), 70_000);
+    }
+
+    #[test]
+    fn entity_batches_over_the_decoding_budget_are_rejected() {
+        const LARGE: usize = 16 * 1024 * 1024;
+        let over = ServerMessage::EntityTransforms {
+            updates: vec![(1, [0.0; 3], [0.0; 3]); MAX_DECODED_VALUES + 1],
+        };
+        let frame = encode_frame(&over, LARGE).expect("message encodes");
+        assert!(matches!(
+            decode_server_message(&frame[FRAME_HEADER_LEN..]),
+            Err(NetError::Protocol(reason)) if reason.contains("values")
+        ));
+        let over = ServerMessage::EntitySnapshot {
+            entities: vec![entry(1); MAX_DECODED_VALUES + 1],
+        };
+        let frame = encode_frame(&over, LARGE).expect("message encodes");
+        assert!(matches!(
+            decode_server_message(&frame[FRAME_HEADER_LEN..]),
+            Err(NetError::Protocol(reason)) if reason.contains("values")
+        ));
     }
 }

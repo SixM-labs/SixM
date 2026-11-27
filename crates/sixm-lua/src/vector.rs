@@ -336,7 +336,7 @@ fn read(value: &LuaValue) -> Option<Vector> {
 }
 
 /// The number a Lua value holds, as a component.
-fn number_of(value: &LuaValue) -> Option<f32> {
+pub(crate) fn number_of(value: &LuaValue) -> Option<f32> {
     match value {
         LuaValue::Integer(int) => Some(int_to_f32(*int)),
         LuaValue::Number(float) => Some(float_to_f32(*float)),

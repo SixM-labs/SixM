@@ -13,7 +13,9 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use sixm_core::{EventContext, EventSource, FuncRef, Host, ResourceName, ScriptRuntime, Value};
+use sixm_core::{
+    EntityInfo, EventContext, EventSource, FuncRef, Host, ResourceName, ScriptRuntime, Value,
+};
 use sixm_lua::LuaRuntime;
 use sixm_resources::ClientFileKind;
 use tracing::{error, info};
@@ -72,6 +74,8 @@ pub struct ClientRuntime {
     pub(crate) queued: RefCell<VecDeque<String>>,
     /// Replicated state and local writes.
     pub(crate) state: RefCell<StateMirror>,
+    /// The entities the server has created and not yet deleted, by id.
+    pub(crate) entities: RefCell<BTreeMap<u32, EntityInfo>>,
     /// The synced files of each running resource: file name (as the manifest
     /// names it) to its path in the cache.
     pub(crate) files: RefCell<HashMap<String, HashMap<String, PathBuf>>>,
@@ -96,6 +100,7 @@ impl ClientRuntime {
             commands: RefCell::default(),
             queued: RefCell::default(),
             state: RefCell::default(),
+            entities: RefCell::default(),
             files: RefCell::default(),
             quit: Cell::new(false),
         })
@@ -237,6 +242,21 @@ impl ClientRuntime {
                 self.deliver_state(&bag, &key, &value, true);
             }
             ClientNotice::StateBagRemoved { bag } => self.state.borrow_mut().remove_bag(&bag),
+            ClientNotice::EntityCreated { id, info } => {
+                self.entities.borrow_mut().insert(id, info);
+            }
+            ClientNotice::EntityTransforms { updates } => {
+                let mut entities = self.entities.borrow_mut();
+                for (id, position, rotation) in updates {
+                    if let Some(info) = entities.get_mut(&id) {
+                        info.position = position;
+                        info.rotation = rotation;
+                    }
+                }
+            }
+            ClientNotice::EntityDeleted { id } => {
+                self.entities.borrow_mut().remove(&id);
+            }
             ClientNotice::Kicked { reason } => {
                 info!("kicked: {reason}");
                 self.close();

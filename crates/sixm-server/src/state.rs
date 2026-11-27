@@ -1,14 +1,17 @@
 //! State bags: the server's copy of every bag, replication to clients, and the
 //! change handlers that run on every write.
 //!
-//! There is one bag named `global`, and one `player:<id>` bag per connected
-//! player. A player's bag is created just before `playerJoining` and removed
-//! after `playerDropped`, so a write to it outside that window is an error.
+//! There is one bag named `global`, one `player:<id>` bag per connected
+//! player and one `entity:<id>` bag per existing entity. A player's bag is
+//! created just before `playerJoining` and removed after `playerDropped`, and
+//! an entity's bag lives as long as the entity, so a write to a bag outside
+//! that window is an error.
 
 use std::collections::HashMap;
 
 use sixm_core::{
-    GLOBAL_BAG, MAX_STATE_NAME_LEN, ScriptError, ScriptRuntime, Value, player_bag, player_of_bag,
+    GLOBAL_BAG, MAX_STATE_NAME_LEN, ScriptError, ScriptRuntime, Value, entity_of_bag, player_bag,
+    player_of_bag,
 };
 use tracing::warn;
 
@@ -61,6 +64,16 @@ impl StateStore {
                     .map(move |(key, entry)| (bag.clone(), key.clone(), entry.value.clone()))
             })
             .collect()
+    }
+
+    /// Creates `bag` with no keys, unless it exists already.
+    pub(crate) fn create_bag(&mut self, bag: &str) {
+        self.bags.entry(bag.to_owned()).or_default();
+    }
+
+    /// Removes `bag` and every key in it.
+    pub(crate) fn remove_bag(&mut self, bag: &str) {
+        self.bags.remove(bag);
     }
 
     /// The names of the bags that exist, sorted.
@@ -124,11 +137,13 @@ impl ResourceManager {
         Ok(())
     }
 
-    /// Fails unless `bag` is `global` or the bag of a connected player.
+    /// Fails unless `bag` is `global`, the bag of a connected player or the bag
+    /// of an existing entity.
     fn ensure_bag(&self, bag: &str) -> Result<(), ScriptError> {
         let exists = bag == GLOBAL_BAG
             || player_of_bag(bag)
-                .is_some_and(|player| self.network.players.borrow().contains(player));
+                .is_some_and(|player| self.network.players.borrow().contains(player))
+            || entity_of_bag(bag).is_some_and(|entity| self.entities.borrow().contains(entity));
         if exists {
             Ok(())
         } else {
@@ -165,7 +180,7 @@ impl ResourceManager {
     pub(crate) fn join_state(&self, player: u32) {
         let snapshot = {
             let mut store = self.state.borrow_mut();
-            store.bags.entry(player_bag(player)).or_default();
+            store.create_bag(&player_bag(player));
             store.replicated()
         };
         let entries: Vec<(&str, &str, &Value)> = snapshot
@@ -182,7 +197,7 @@ impl ResourceManager {
     /// Removes the bag of `player`, who has left, and tells every player.
     pub(crate) fn leave_state(&self, player: u32) {
         let bag = player_bag(player);
-        self.state.borrow_mut().bags.remove(&bag);
+        self.state.borrow_mut().remove_bag(&bag);
         self.with_server(|server| {
             if let Err(err) = server.broadcast_state_removed(&bag) {
                 warn!("cannot announce the removal of state bag `{bag}`: {err}");

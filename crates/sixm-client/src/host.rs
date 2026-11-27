@@ -5,8 +5,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use sixm_core::{
-    ClientHost, EventSource, FuncRef, GLOBAL_BAG, Host, ScriptError, ScriptRuntime, ServerHost,
-    Value, player_of_bag,
+    ClientHost, EntityInfo, EntityKind, EventSource, FuncRef, GLOBAL_BAG, Host, ScriptError,
+    ScriptRuntime, ServerHost, Value, entity_of_bag, player_of_bag,
 };
 use tracing::warn;
 
@@ -147,6 +147,19 @@ impl Host for ClientRuntime {
         self.state.borrow().get(bag, key).cloned()
     }
 
+    fn entity(&self, entity: u32) -> Option<EntityInfo> {
+        self.entities.borrow().get(&entity).copied()
+    }
+
+    fn entities(&self, kind: Option<EntityKind>) -> Vec<u32> {
+        self.entities
+            .borrow()
+            .iter()
+            .filter(|(_, info)| kind.is_none_or(|wanted| info.kind == wanted))
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// Writes local state. Replicated state belongs to the server, so a
     /// replicated write is refused here.
     fn state_set(
@@ -180,10 +193,12 @@ impl Host for ClientRuntime {
 
 impl ClientRuntime {
     /// Whether a local write to `bag` makes sense: the global bag, this
-    /// client's own bag, and any bag the server has replicated keys into.
+    /// client's own bag, the bag of a mirrored entity, and any bag the server
+    /// has replicated keys into.
     fn bag_exists(&self, bag: &str) -> bool {
         bag == GLOBAL_BAG
             || player_of_bag(bag) == Some(self.local_player)
+            || entity_of_bag(bag).is_some_and(|entity| self.entities.borrow().contains_key(&entity))
             || self.state.borrow().has_bag(bag)
     }
 }

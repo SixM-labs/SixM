@@ -69,6 +69,7 @@ impl Server {
     pub fn tick(&self, now: Instant) {
         self.manager.tick_all(now);
         self.drain_commands();
+        self.manager.flush_entities();
     }
 
     /// Binds the listening socket and sends its events to `input`, the sending

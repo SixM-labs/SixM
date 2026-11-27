@@ -4,11 +4,12 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+use crate::entities::EntityEntry;
 use crate::files::{FileHash, ResourceEntry};
 use crate::wire::{Args, StateValue};
 
 /// Version of the wire protocol. A client must send it in its `Hello`.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Application protocol identifier negotiated during the TLS handshake.
 pub(crate) const ALPN: &[u8] = b"sixm/1";
@@ -143,6 +144,25 @@ pub(crate) enum ServerMessage {
     FileUnavailable {
         hash: FileHash,
     },
+    /// An entity was created. Clients add it to their copy, with its state bag.
+    EntityCreated {
+        entity: EntityEntry,
+    },
+    /// New positions and rotations, as `(id, position, rotation)`. Clients
+    /// ignore an id they do not know. One frame may carry many updates.
+    EntityTransforms {
+        updates: Vec<(u32, [f32; 3], [f32; 3])>,
+    },
+    /// An entity was deleted. Clients remove it, and its state bag follows as a
+    /// removal.
+    EntityDeleted {
+        id: u32,
+    },
+    /// Entities that exist when a player joins, in ascending id order. A
+    /// snapshot may span several frames, and each entry is a creation.
+    EntitySnapshot {
+        entities: Vec<EntityEntry>,
+    },
 }
 
 impl ServerMessage {
@@ -168,4 +188,12 @@ impl ServerMessage {
     pub(crate) const RESOURCE_STOPPED_TAG: u32 = 9;
     /// Variant index of [`ServerMessage::FileUnavailable`] on the wire.
     pub(crate) const FILE_UNAVAILABLE_TAG: u32 = 10;
+    /// Variant index of [`ServerMessage::EntityCreated`] on the wire.
+    pub(crate) const ENTITY_CREATED_TAG: u32 = 11;
+    /// Variant index of [`ServerMessage::EntityTransforms`] on the wire.
+    pub(crate) const ENTITY_TRANSFORMS_TAG: u32 = 12;
+    /// Variant index of [`ServerMessage::EntityDeleted`] on the wire.
+    pub(crate) const ENTITY_DELETED_TAG: u32 = 13;
+    /// Variant index of [`ServerMessage::EntitySnapshot`] on the wire.
+    pub(crate) const ENTITY_SNAPSHOT_TAG: u32 = 14;
 }

@@ -68,6 +68,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             Some(ClientEvent::ResourceStopped { name }) => {
                 println!("resource {name} stopped");
             }
+            Some(ClientEvent::EntityCreated { entity }) => {
+                println!("entity {} created (kind {})", entity.id, entity.kind);
+            }
+            Some(ClientEvent::EntityTransforms { updates }) => {
+                println!("{} entity transforms", updates.len());
+            }
+            Some(ClientEvent::EntityDeleted { id }) => {
+                println!("entity {id} deleted");
+            }
+            Some(ClientEvent::EntitySnapshot { entities }) => {
+                println!("{} entities exist", entities.len());
+            }
             Some(ClientEvent::Kicked { reason }) => {
                 println!("kicked: {reason}");
                 break;
