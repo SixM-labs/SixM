@@ -115,6 +115,8 @@ pub(crate) struct Players {
     /// Next id to hand out. Zero once every id has been used.
     next_id: u32,
     by_id: BTreeMap<u32, Player>,
+    #[cfg(test)]
+    test_peds: BTreeMap<u32, Option<u32>>,
 }
 
 impl Default for Players {
@@ -122,6 +124,8 @@ impl Default for Players {
         Self {
             next_id: 1,
             by_id: BTreeMap::new(),
+            #[cfg(test)]
+            test_peds: BTreeMap::new(),
         }
     }
 }
@@ -141,7 +145,21 @@ impl Players {
 
     /// Whether `id` is an admitted player.
     pub(crate) fn contains(&self, id: u32) -> bool {
+        #[cfg(test)]
+        if self.test_peds.contains_key(&id) {
+            return true;
+        }
         self.get(id).is_some_and(|player| player.admitted)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_test_player(&mut self, id: u32, ped: Option<u32>) {
+        self.test_peds.insert(id, ped);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remove_test_player(&mut self, id: u32) {
+        self.test_peds.remove(&id);
     }
 
     /// The admitted players' ids, in join order.
@@ -738,9 +756,12 @@ impl ResourceManager {
 
     /// The ped of the admitted player `player`, if it has one.
     pub(crate) fn ped_of_player(&self, player: u32) -> Option<u32> {
-        self.network
-            .players
-            .borrow()
+        let players = self.network.players.borrow();
+        #[cfg(test)]
+        if let Some(ped) = players.test_peds.get(&player) {
+            return *ped;
+        }
+        players
             .get(player)
             .filter(|found| found.admitted)
             .and_then(|found| found.ped)

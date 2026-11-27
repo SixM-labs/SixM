@@ -1439,3 +1439,49 @@ fn raw_client_without_a_certificate_cannot_get_a_welcome() {
         "the server reports no connection without a certificate"
     );
 }
+
+#[test]
+fn pre_encoded_state_frame_reaches_multiple_players() {
+    let server = start();
+    let alice = join(&server, "alice", 1);
+    let bob = join(&server, "bob", 2);
+
+    let frame = server
+        .net
+        .encode_state("entity:7", "color", &Value::from("red"))
+        .expect("valid state encodes");
+    let same = Arc::clone(&frame);
+    assert!(Arc::ptr_eq(&frame, &same));
+
+    server.net.send_encoded(1, frame).expect("send to alice");
+    server.net.send_encoded(2, same).expect("send to bob");
+
+    let expected = ClientEvent::StateBag {
+        bag: "entity:7".to_owned(),
+        key: "color".to_owned(),
+        value: Value::from("red"),
+    };
+    assert_eq!(client_event(&alice), expected);
+    assert_eq!(client_event(&bob), expected);
+
+    let broadcast = server
+        .net
+        .encode_state("global", "weather", &Value::from("sunny"))
+        .expect("valid broadcast state encodes");
+    server
+        .net
+        .broadcast_encoded(broadcast)
+        .expect("broadcast succeeds");
+    let expected_broadcast = ClientEvent::StateBag {
+        bag: "global".to_owned(),
+        key: "weather".to_owned(),
+        value: Value::from("sunny"),
+    };
+    assert_eq!(client_event(&alice), expected_broadcast);
+    assert_eq!(client_event(&bob), expected_broadcast);
+
+    assert!(
+        server.net.encode_state("", "k", &Value::Int(1)).is_err(),
+        "empty bag name is rejected"
+    );
+}
