@@ -15,7 +15,7 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use sixm_core::{ClientTarget, EventSource, FuncRef, PlayerInfo, ScriptError, Value};
-use sixm_net::{ConnectionId, Fingerprint, NetError, NetEvent, NetServer, ServerConfig};
+use sixm_net::{ConnectionId, Fingerprint, NetError, NetEvent, NetServer, ServerConfig, Traffic};
 use tracing::{debug, info, warn};
 
 use crate::commands::{self, CommandContext};
@@ -695,6 +695,16 @@ impl ResourceManager {
             .get(player)
             .filter(|found| found.admitted)
             .and_then(|found| found.ped)
+    }
+
+    /// Traffic totals of the running network since it started, or zeros while
+    /// it is not running.
+    pub(crate) fn network_traffic(&self) -> Traffic {
+        self.network
+            .server
+            .borrow()
+            .as_ref()
+            .map_or_else(Traffic::default, NetServer::traffic)
     }
 
     /// Runs `f` with the socket if the network is running.

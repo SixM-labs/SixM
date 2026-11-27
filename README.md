@@ -81,8 +81,9 @@ cargo run --release -p sixm-server
 ```
 
 The console accepts `start`, `stop`, `restart`, `ensure`, `refresh`, `set`,
-`exec`, `endpoint_add_udp`, `players`, `entities`, `state`, `help` and `quit`,
-plus every command registered with `RegisterCommand`.
+`exec`, `endpoint_add_udp`, `players`, `entities`, `state`, `perf`, `help` and
+`quit`, plus every command registered with `RegisterCommand`. `perf` prints the
+frame times and the network load; see [Load testing](docs/server.md#load-testing).
 
 A test client can connect while the example server runs:
 

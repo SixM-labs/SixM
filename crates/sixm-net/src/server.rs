@@ -27,6 +27,7 @@ use crate::identity::{Credentials, Fingerprint, Identity};
 use crate::protocol::{
     MAX_FRAME, OUTBOUND_QUEUE_LEN, SEND_QUEUE_OVERFLOW, SHUTTING_DOWN, ServerMessage,
 };
+use crate::traffic::{Counters, Traffic};
 use crate::transfer::Advertised;
 use crate::transport;
 use crate::wire::{
@@ -151,6 +152,8 @@ pub struct NetServer {
     max_frame: usize,
     /// Files and resources the server advertises. Read by the connections.
     advertised: Arc<RwLock<Advertised>>,
+    /// Traffic totals, updated by the connections.
+    traffic: Arc<Counters>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -175,12 +178,14 @@ impl NetServer {
         let credentials = Credentials::load(&config.identity)?;
         let fingerprint = credentials.fingerprint();
         let advertised = Arc::new(RwLock::new(Advertised::default()));
+        let traffic = Arc::new(Counters::default());
         let shared = Arc::new(Shared {
             on_event: Arc::new(on_event),
             server_name: config.server_name,
             handshake_timeout: config.handshake_timeout,
             max_frame,
             advertised: Arc::clone(&advertised),
+            traffic: Arc::clone(&traffic),
         });
         let (commands, command_rx) = mpsc::unbounded_channel();
         let (ready_tx, ready_rx) = sync_channel(1);
@@ -195,6 +200,7 @@ impl NetServer {
             fingerprint,
             max_frame,
             advertised,
+            traffic,
             thread: Some(thread),
         })
     }
@@ -202,6 +208,12 @@ impl NetServer {
     /// Address the server is listening on, with the port resolved.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// Traffic totals since the server started: frames and bytes in both
+    /// directions. Reading them does not block the network thread.
+    pub fn traffic(&self) -> Traffic {
+        self.traffic.snapshot()
     }
 
     /// Fingerprint of the certificate clients are shown. Clients that pass it

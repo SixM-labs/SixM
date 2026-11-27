@@ -81,6 +81,7 @@ same name is never reached.
 | `refresh` | Scans `sixm_resourcesPath` again. Running resources are not affected. `start` scans on its own if no scan has run yet. |
 | `endpoint_add_udp <ip:port>` | Stores the listen address in `endpoint_add_udp`. It applies at the next start. The address must parse. |
 | `endpoint_add_tcp <ip:port>` | The same as `endpoint_add_udp`. SixM speaks only UDP, and the command logs a note. |
+| `perf` | Prints the frame times of the last 1200 frames: count, average, p50, p99 and max, in milliseconds. Then the tick rate and the budget per frame, the players, entities and running resources, and the network rate in KiB/s and frames/s since the previous `perf` call, or since the server started. See [Load testing](#load-testing). |
 | `players` | Lists connected players with their id, name, `license` identifier and endpoint. |
 | `entities` | Lists every entity with its id, kind, model hash, position and heading. |
 | `state [bag]` | Without a name, lists the state bags. With a name, prints the bag's keys and values. Replicated keys are marked. |
@@ -268,6 +269,37 @@ The server presents a self-signed certificate. Its file is set by
 
 The `quit` command and Ctrl+C both set the quit flag. The loop checks the flag
 on each pass and then shuts down.
+
+## Load testing
+
+`examples/loadtest` is a server for measuring load, and the `swarm` example
+connects many clients to it. Run the server from its folder, and the swarm
+from the repository root, in two terminals:
+
+```sh
+cd examples/loadtest
+cargo run --release -p sixm-server
+```
+
+```sh
+cargo run --release -p sixm-client --example swarm -- 127.0.0.1:30120 50 --seconds 60
+```
+
+Then type `perf` in the server console. The swarm prints a line per bot and
+a summary when the run ends.
+
+- The server owns `loadtest_vehicles` vehicles (500 by default) on a 2 km
+  square. Every tenth vehicle moves on each frame, so transforms go out every
+  frame.
+- Each client moves its own ped on a 20 m circle, and pings the server every 5
+  seconds. The server prints the pings per second every 10 seconds.
+- `swarm <addr> <count>` starts `count` bots named `bot1` to `botN`, 50 ms
+  apart, each with an ephemeral certificate and its own cache. `--seconds N`
+  sets the run length (60 by default). `--cache DIR` keeps the caches in
+  `DIR`; without it they go to a temporary folder. Bots log at warn level, and
+  `RUST_LOG` overrides that.
+- The server needs `sv_maxclients` above the number of bots. The example
+  configuration sets 128.
 
 ## Files and logs
 

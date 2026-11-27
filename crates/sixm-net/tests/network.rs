@@ -23,7 +23,7 @@ use sixm_net::{
     ClientEvent, ConnectionId, EntityEntry, FILE_KIND_CLIENT, FILE_KIND_FILE, FileEntry, FileHash,
     Fingerprint, Identity, MAX_EXPORT_NAME_LEN, MAX_FILE_SIZE, MAX_METADATA,
     MAX_METADATA_VALUE_LEN, NetClient, NetError, NetEvent, NetServer, PROTOCOL_VERSION,
-    PublishedFile, PublishedResource, ResourceEntry, ServerConfig,
+    PublishedFile, PublishedResource, ResourceEntry, ServerConfig, Traffic,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -444,6 +444,48 @@ fn events_travel_both_ways_with_nested_values() {
         }
         other => panic!("expected Event, got {other:?}"),
     }
+}
+
+/// Waits until `condition` holds, polling every few milliseconds up to the
+/// test timeout. Used for counters that the server updates after a write.
+fn eventually(condition: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    while !condition() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "condition not met in time"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn traffic_counts_frames_and_bytes_in_both_directions() {
+    let server = start();
+    assert_eq!(server.net.traffic(), Traffic::default());
+    let client = join(&server, "jo", 5);
+    // The welcome is the first frame the server writes.
+    eventually(|| server.net.traffic().frames_sent >= 1);
+    let before = server.net.traffic();
+    assert_eq!(before.frames_received, 1, "the hello was counted");
+
+    client
+        .send_event("ping", &[Value::Int(1)])
+        .expect("event is queued");
+    assert!(matches!(next_event(&server), NetEvent::Event { .. }));
+    let received = server.net.traffic();
+    assert_eq!(received.frames_received, before.frames_received + 1);
+    assert!(received.bytes_received > before.bytes_received);
+
+    server
+        .net
+        .send_event(5, "pong", &[Value::Int(2)])
+        .expect("event is queued");
+    assert!(matches!(client_event(&client), ClientEvent::Event { .. }));
+    eventually(|| server.net.traffic().frames_sent > before.frames_sent);
+    let sent = server.net.traffic();
+    assert_eq!(sent.frames_received, received.frames_received);
+    assert!(sent.bytes_sent > before.bytes_sent);
 }
 
 #[test]
