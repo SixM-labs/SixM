@@ -73,6 +73,12 @@ pub struct TestHost {
     pub entities: RefCell<BTreeMap<u32, EntityInfo>>,
     /// The ped of each player by player id, as a server host reports it.
     pub player_peds: RefCell<HashMap<u32, u32>>,
+    /// Routing buckets of players and entities outside bucket 0, by id.
+    pub player_buckets: RefCell<BTreeMap<u32, u32>>,
+    pub entity_buckets: RefCell<BTreeMap<u32, u32>>,
+    /// Population switches and lockdown modes of buckets, by bucket.
+    pub population: RefCell<BTreeMap<u32, bool>>,
+    pub lockdown: RefCell<BTreeMap<u32, String>>,
     /// The ped a client host reports as the local player's, once set.
     pub local_ped: Cell<Option<u32>>,
     /// Moves a client host accepted, as `(entity, position, rotation)`, in order.
@@ -467,6 +473,88 @@ impl ServerHost for TestHost {
         self.web_replies.borrow_mut().push((request, reply));
         Ok(())
     }
+
+    fn player_routing_bucket(&self, player: u32) -> Option<u32> {
+        let connected = self.players.borrow().iter().any(|(id, _)| *id == player);
+        connected.then(|| {
+            self.player_buckets
+                .borrow()
+                .get(&player)
+                .copied()
+                .unwrap_or(0)
+        })
+    }
+
+    fn set_player_routing_bucket(&self, player: u32, bucket: u32) -> bool {
+        if self.player_routing_bucket(player).is_none() {
+            return false;
+        }
+        store_bucket(&mut self.player_buckets.borrow_mut(), player, bucket);
+        true
+    }
+
+    fn entity_routing_bucket(&self, entity: u32) -> Option<u32> {
+        let exists = self.entities.borrow().contains_key(&entity);
+        exists.then(|| {
+            self.entity_buckets
+                .borrow()
+                .get(&entity)
+                .copied()
+                .unwrap_or(0)
+        })
+    }
+
+    fn set_entity_routing_bucket(&self, entity: u32, bucket: u32) -> bool {
+        if self.entity_routing_bucket(entity).is_none() {
+            return false;
+        }
+        store_bucket(&mut self.entity_buckets.borrow_mut(), entity, bucket);
+        true
+    }
+
+    fn players_in_routing_bucket(&self, bucket: u32) -> Vec<u32> {
+        let buckets = self.player_buckets.borrow();
+        self.players
+            .borrow()
+            .iter()
+            .map(|(id, _)| *id)
+            .filter(|id| buckets.get(id).copied().unwrap_or(0) == bucket)
+            .collect()
+    }
+
+    fn set_routing_bucket_population_enabled(&self, bucket: u32, enabled: bool) {
+        self.population.borrow_mut().insert(bucket, enabled);
+    }
+
+    fn routing_bucket_population_enabled(&self, bucket: u32) -> bool {
+        self.population
+            .borrow()
+            .get(&bucket)
+            .copied()
+            .unwrap_or(true)
+    }
+
+    fn set_routing_bucket_entity_lockdown_mode(
+        &self,
+        bucket: u32,
+        mode: &str,
+    ) -> Result<(), ScriptError> {
+        if !matches!(mode, "inactive" | "relaxed" | "strict") {
+            return Err(ScriptError::Runtime(format!(
+                "unknown lockdown mode `{mode}`"
+            )));
+        }
+        self.lockdown.borrow_mut().insert(bucket, mode.to_owned());
+        Ok(())
+    }
+
+    fn routing_bucket_entity_lockdown_mode(&self, bucket: u32) -> String {
+        self.lockdown
+            .borrow()
+            .get(&bucket)
+            .cloned()
+            .unwrap_or_else(|| "inactive".to_owned())
+    }
 }
 
 impl TestHost {
@@ -499,6 +587,15 @@ impl TestHost {
         let entities = self.entities.borrow_mut();
         std::cell::RefMut::filter_map(entities, |map| map.get_mut(&entity))
             .map_err(|_| ScriptError::Runtime(format!("entity {entity} does not exist")))
+    }
+}
+
+/// Stores `bucket` for `id`, or forgets `id` when it is bucket 0.
+fn store_bucket(buckets: &mut BTreeMap<u32, u32>, id: u32, bucket: u32) {
+    if bucket == 0 {
+        buckets.remove(&id);
+    } else {
+        buckets.insert(id, bucket);
     }
 }
 

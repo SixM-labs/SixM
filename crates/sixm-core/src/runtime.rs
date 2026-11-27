@@ -446,6 +446,44 @@ pub trait ServerHost {
     /// The ped of a connected player. It is created, owned by the player, just
     /// before `playerJoining`, and deleted after `playerDropped`.
     fn player_ped(&self, player: u32) -> Option<u32>;
+
+    /// The routing bucket of a connected player, or `None` when it is not
+    /// connected. Players start in bucket 0.
+    fn player_routing_bucket(&self, player: u32) -> Option<u32>;
+
+    /// Moves a connected player and its ped to `bucket`. A player only holds
+    /// the entities of its own bucket. Returns `false` when the player is not
+    /// connected.
+    fn set_player_routing_bucket(&self, player: u32, bucket: u32) -> bool;
+
+    /// The routing bucket of an entity, or `None` when it does not exist.
+    /// Entities start in bucket 0.
+    fn entity_routing_bucket(&self, entity: u32) -> Option<u32>;
+
+    /// Moves an entity to `bucket`, and tells the players that gain or lose
+    /// it. Returns `false` when the entity does not exist.
+    fn set_entity_routing_bucket(&self, entity: u32, bucket: u32) -> bool;
+
+    /// The connected players in `bucket`, in ascending order.
+    fn players_in_routing_bucket(&self, bucket: u32) -> Vec<u32>;
+
+    /// Stores whether the population of `bucket` is enabled. Nothing acts on
+    /// it until a game adapter exists. Enabled by default.
+    fn set_routing_bucket_population_enabled(&self, bucket: u32, enabled: bool);
+
+    /// Whether the population of `bucket` is enabled.
+    fn routing_bucket_population_enabled(&self, bucket: u32) -> bool;
+
+    /// Stores the entity lockdown mode of `bucket`: `inactive`, `relaxed` or
+    /// `strict`. Fails for any other mode.
+    fn set_routing_bucket_entity_lockdown_mode(
+        &self,
+        bucket: u32,
+        mode: &str,
+    ) -> Result<(), ScriptError>;
+
+    /// The entity lockdown mode of `bucket`, `inactive` unless set.
+    fn routing_bucket_entity_lockdown_mode(&self, bucket: u32) -> String;
 }
 
 /// Services only a client provides: the connection to the server.

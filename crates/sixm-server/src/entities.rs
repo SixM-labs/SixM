@@ -69,6 +69,9 @@ pub(crate) struct EntityStore {
     /// The entities by position, for finding those near a player. Only kept
     /// while scoping is on.
     grid: Option<Grid>,
+    /// The routing bucket of each entity outside bucket 0. Empty while every
+    /// entity is in bucket 0, so the bucket checks cost nothing then.
+    buckets: BTreeMap<u32, u32>,
 }
 
 impl Default for EntityStore {
@@ -79,6 +82,7 @@ impl Default for EntityStore {
             dirty: Vec::new(),
             owned: BTreeMap::new(),
             grid: None,
+            buckets: BTreeMap::new(),
         }
     }
 }
@@ -116,27 +120,62 @@ impl EntityStore {
         self.by_id.keys().copied()
     }
 
-    /// Fills `out` with the scope of `player`: the entities within `radius`
-    /// metres of `center`, and the entities it owns. The list is in ascending
-    /// order and has no duplicates. Without a center, only the owned entities
-    /// are listed. Nothing is allocated when `out` has room already.
+    /// The routing bucket of the entity `id`. Zero for an unknown entity.
+    pub(crate) fn bucket(&self, id: u32) -> u32 {
+        self.buckets.get(&id).copied().unwrap_or(0)
+    }
+
+    /// Whether the entity `id` is in `bucket`. Costs nothing when every entity
+    /// is in bucket 0 and `bucket` is 0.
+    pub(crate) fn in_bucket(&self, id: u32, bucket: u32) -> bool {
+        (bucket == 0 && self.buckets.is_empty()) || self.bucket(id) == bucket
+    }
+
+    /// Whether any entity is outside bucket 0.
+    pub(crate) fn any_bucket(&self) -> bool {
+        !self.buckets.is_empty()
+    }
+
+    /// Moves the entity `id` to `bucket`. Does nothing for an unknown entity.
+    pub(crate) fn set_bucket(&mut self, id: u32, bucket: u32) {
+        if !self.by_id.contains_key(&id) {
+            return;
+        }
+        if bucket == 0 {
+            self.buckets.remove(&id);
+        } else {
+            self.buckets.insert(id, bucket);
+        }
+    }
+
+    /// Fills `out` with the scope of `player` in `bucket`: the entities within
+    /// `radius` metres of `center`, and the entities it owns, that are in the
+    /// bucket. The list is in ascending order and has no duplicates. Without a
+    /// center, only the owned entities are listed. Nothing is allocated when
+    /// `out` has room already.
     pub(crate) fn scope_into(
         &self,
         player: u32,
         center: Option<[f32; 3]>,
         radius: f32,
+        bucket: u32,
         out: &mut Vec<u32>,
     ) {
         out.clear();
         if let (Some(center), Some(grid)) = (center, self.grid.as_ref()) {
             let limit = radius * radius;
             grid.for_each_near(center, |id, position| {
-                if squared_distance(position, center) <= limit {
+                if squared_distance(position, center) <= limit && self.in_bucket(id, bucket) {
                     out.push(id);
                 }
             });
         }
-        out.extend_from_slice(self.owned(player));
+        out.extend(
+            self.owned(player)
+                .iter()
+                .copied()
+                .filter(|&id| self.in_bucket(id, bucket)),
+        );
         out.sort_unstable();
         out.dedup();
     }
@@ -177,6 +216,7 @@ impl EntityStore {
     /// Removes the entity `id`, and returns it when it existed.
     pub(crate) fn remove(&mut self, id: u32) -> Option<EntityInfo> {
         let info = self.by_id.remove(&id)?.info;
+        self.buckets.remove(&id);
         if let Some(grid) = self.grid.as_mut() {
             grid.remove(id);
         }
@@ -365,12 +405,13 @@ impl ResourceManager {
             EventSource::Local,
             &[Value::Int(i64::from(id))],
         );
+        let bucket = self.entities.borrow().bucket(id);
         let removed = self.entities.borrow_mut().remove(id);
         if removed.is_none() {
             return false;
         }
         self.state.borrow_mut().remove_bag(&entity_bag(id));
-        self.announce_removed(id);
+        self.announce_removed(id, bucket);
         true
     }
 
@@ -399,12 +440,14 @@ impl ResourceManager {
     /// transform that breaks the rules is ignored, and is only logged at debug
     /// level, since a client may race a server move.
     pub(crate) fn player_transforms(&self, player: u32, updates: &[EntityUpdate]) {
+        let bucket = self.bucket_of_player(player);
         let ignored = {
             let mut entities = self.entities.borrow_mut();
             updates
                 .iter()
                 .filter(|&&(id, position, rotation, epoch)| {
-                    !entities.owner_move(player, id, position, rotation, epoch)
+                    !entities.in_bucket(id, bucket)
+                        || !entities.owner_move(player, id, position, rotation, epoch)
                 })
                 .count()
         };
@@ -428,11 +471,15 @@ impl ResourceManager {
             self.refresh_scopes();
             self.send_scoped_transforms(&updates);
         } else if !updates.is_empty() {
-            self.with_server(|server| {
-                if let Err(err) = server.broadcast_entity_transforms(&updates) {
-                    warn!("cannot send the entity transforms: {err}");
-                }
-            });
+            if self.buckets_in_use() {
+                self.send_bucketed_transforms(&updates);
+            } else {
+                self.with_server(|server| {
+                    if let Err(err) = server.broadcast_entity_transforms(&updates) {
+                        warn!("cannot send the entity transforms: {err}");
+                    }
+                });
+            }
         }
         updates.clear();
         *self.entity_updates.borrow_mut() = updates;
@@ -698,18 +745,18 @@ mod tests {
         let near = store.insert(info(EntityKind::Ped, 80.0)).unwrap();
         let mut scope = Vec::new();
         store.set_grid(Some(10.0));
-        store.scope_into(1, Some([0.0; 3]), 100.0, &mut scope);
+        store.scope_into(1, Some([0.0; 3]), 100.0, 0, &mut scope);
         assert!(
             scope.is_empty(),
             "a grid of 10 metres does not reach 80 metres"
         );
 
         store.set_grid(Some(100.0));
-        store.scope_into(1, Some([0.0; 3]), 100.0, &mut scope);
+        store.scope_into(1, Some([0.0; 3]), 100.0, 0, &mut scope);
         assert_eq!(scope, vec![near]);
 
         store.set_grid(None);
-        store.scope_into(1, Some([0.0; 3]), 100.0, &mut scope);
+        store.scope_into(1, Some([0.0; 3]), 100.0, 0, &mut scope);
         assert!(scope.is_empty(), "without a grid nothing is near");
     }
 
@@ -791,5 +838,44 @@ mod tests {
             dirty(&mut store),
             vec![(ped, Some([1.0, 0.0, 0.0]), Some([0.0, 0.0, 10.0]), 0)]
         );
+    }
+
+    #[test]
+    fn a_scope_holds_only_the_entities_of_its_bucket() {
+        let mut store = EntityStore::default();
+        store.set_grid(Some(50.0));
+        let near = store.insert(info(EntityKind::Ped, 1.0)).unwrap();
+        let far_owned = store.insert(owned_by(4)).unwrap();
+        let moved = store.insert(owned_by(4)).unwrap();
+        store.set_bucket(near, 7);
+        store.set_bucket(moved, 7);
+        let mut scope = Vec::new();
+        store.scope_into(4, Some([0.0; 3]), 50.0, 0, &mut scope);
+        assert_eq!(
+            scope,
+            vec![far_owned],
+            "the owned entity in bucket 7 is not held"
+        );
+        store.scope_into(4, Some([0.0; 3]), 50.0, 7, &mut scope);
+        assert_eq!(scope, vec![near, moved], "bucket 7 holds its own entities");
+        store.scope_into(4, Some([0.0; 3]), 50.0, 3, &mut scope);
+        assert!(scope.is_empty(), "an empty bucket holds nothing");
+    }
+
+    #[test]
+    fn buckets_are_kept_sparse_and_follow_removals() {
+        let mut store = EntityStore::default();
+        let id = store.insert(info(EntityKind::Object, 0.0)).unwrap();
+        assert!(!store.any_bucket());
+        assert!(store.in_bucket(id, 0) && !store.in_bucket(id, 1));
+        store.set_bucket(id, 5);
+        assert!(store.any_bucket() && store.bucket(id) == 5);
+        store.set_bucket(id, 0);
+        assert!(!store.any_bucket(), "bucket 0 is not stored");
+        store.set_bucket(id, 9);
+        store.remove(id);
+        assert!(!store.any_bucket(), "a removed entity drops its bucket");
+        store.set_bucket(id, 9);
+        assert!(!store.any_bucket(), "an unknown entity cannot be moved");
     }
 }

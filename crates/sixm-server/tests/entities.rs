@@ -628,7 +628,15 @@ fn a_move_sent_before_a_teleport_does_not_undo_the_teleport() {
 const SCOPE_RESOURCE: &str = "scope_demo";
 
 /// The exports of the scoping tests, from the server script.
-const SCOPE_EXPORTS: &[&str] = &["report", "view", "ped_of", "spawn_vehicle", "paint"];
+const SCOPE_EXPORTS: &[&str] = &[
+    "report",
+    "view",
+    "ped_of",
+    "spawn_vehicle",
+    "paint",
+    "set_bucket",
+    "set_vehicle_bucket",
+];
 
 /// Server side of the scoping tests. Keeps the latest view each player reported,
 /// and a vehicle that every player is told about.
@@ -671,6 +679,14 @@ end
 
 function paint(color)
     Entity(vehicle).state.color = color
+end
+
+function set_bucket(player, bucket)
+    SetPlayerRoutingBucket(player, bucket)
+end
+
+function set_vehicle_bucket(bucket)
+    SetEntityRoutingBucket(vehicle, bucket)
 end
 ";
 
@@ -997,4 +1013,208 @@ fn drain_notices(client: &mut Client, out: &mut Vec<ClientNotice>) {
     while let Some(notice) = client.poll(Duration::ZERO) {
         out.push(notice);
     }
+}
+
+#[test]
+fn a_player_holds_only_the_entities_of_its_bucket_while_scoping() {
+    let h = Harness::start(SCOPE_RESOURCE, SCOPE_SERVER, SCOPE_CLIENT, SCOPE_EXPORTS);
+    set_cull_radius(&h, 50);
+    let dir_a = tempfile::tempdir().expect("temp dir");
+    let dir_b = tempfile::tempdir().expect("temp dir");
+    let a = h.connect(&dir_a.path().join("cache"), &dir_a.path().join("data"));
+    let b = h.connect(&dir_b.path().join("cache"), &dir_b.path().join("data"));
+    let both_runtimes = [&*a, &*b];
+    let ped_a = h.number("ped_of", &[Value::Int(1)]);
+    let ped_b = h.number("ped_of", &[Value::Int(2)]);
+    let both = view_line(&[ped_a, ped_b], "false nil");
+    h.look_until(&a, &both_runtimes, 1, &both, "a to see both peds");
+    h.look_until(&b, &both_runtimes, 2, &both, "b to see both peds");
+
+    // Moving `b` to bucket 2 takes its ped along: `a` loses it, `b` loses `a`'s.
+    h.call("set_bucket", &[Value::Int(2), Value::Int(2)]);
+    h.look_until(
+        &a,
+        &both_runtimes,
+        1,
+        &view_line(&[ped_a], "false nil"),
+        "a to lose the ped of bucket 2",
+    );
+    h.look_until(
+        &b,
+        &both_runtimes,
+        2,
+        &view_line(&[ped_b], "false nil"),
+        "b to lose the ped of bucket 0",
+    );
+
+    // A vehicle in bucket 0 reaches `a` only; moved to bucket 2, it reaches `b` only.
+    h.spawn_vehicle([0.0, 0.0, 0.0]);
+    h.call("paint", &[Value::from("red")]);
+    h.look_until(
+        &a,
+        &both_runtimes,
+        1,
+        &view_line(&[ped_a], "true red"),
+        "a to see the vehicle of bucket 0",
+    );
+    h.look_until(
+        &b,
+        &both_runtimes,
+        2,
+        &view_line(&[ped_b], "false nil"),
+        "b not to see the vehicle of bucket 0",
+    );
+    h.call("set_vehicle_bucket", &[Value::Int(2)]);
+    h.look_until(
+        &a,
+        &both_runtimes,
+        1,
+        &view_line(&[ped_a], "false nil"),
+        "a to lose the vehicle of bucket 2",
+    );
+    h.look_until(
+        &b,
+        &both_runtimes,
+        2,
+        &view_line(&[ped_b], "true red"),
+        "b to see the vehicle of bucket 2",
+    );
+
+    // Back in bucket 0, `b` sees `a` and its ped again.
+    h.call("set_bucket", &[Value::Int(2), Value::Int(0)]);
+    h.look_until(
+        &b,
+        &both_runtimes,
+        2,
+        &view_line(&[ped_a, ped_b], "false nil"),
+        "b to see a and its ped after returning to bucket 0",
+    );
+}
+
+#[test]
+fn with_scoping_off_each_player_holds_the_entities_of_its_bucket() {
+    let h = Harness::start(SCOPE_RESOURCE, SCOPE_SERVER, SCOPE_CLIENT, SCOPE_EXPORTS);
+    set_cull_radius(&h, 0);
+    let dir_a = tempfile::tempdir().expect("temp dir");
+    let dir_b = tempfile::tempdir().expect("temp dir");
+    let a = h.connect(&dir_a.path().join("cache"), &dir_a.path().join("data"));
+    let b = h.connect(&dir_b.path().join("cache"), &dir_b.path().join("data"));
+    let both_runtimes = [&*a, &*b];
+    let ped_a = h.number("ped_of", &[Value::Int(1)]);
+    let ped_b = h.number("ped_of", &[Value::Int(2)]);
+    let both = view_line(&[ped_a, ped_b], "false nil");
+    h.look_until(&a, &both_runtimes, 1, &both, "a to see both peds");
+    h.look_until(&b, &both_runtimes, 2, &both, "b to see both peds");
+
+    h.call("set_bucket", &[Value::Int(2), Value::Int(2)]);
+    h.spawn_vehicle([0.0, 0.0, 0.0]);
+    h.call("paint", &[Value::from("red")]);
+    h.look_until(
+        &a,
+        &both_runtimes,
+        1,
+        &view_line(&[ped_a], "true red"),
+        "a to see its bucket: its ped and the vehicle of bucket 0",
+    );
+    h.look_until(
+        &b,
+        &both_runtimes,
+        2,
+        &view_line(&[ped_b], "false nil"),
+        "b to see only its own ped",
+    );
+}
+
+/// A vehicle in bucket 2 with a colour exists before a player joins bucket 0.
+/// The join snapshots of the entities and of the state must not carry it.
+fn a_player_joining_does_not_get_the_entities_of_other_buckets(radius: u32) {
+    let h = Harness::start(SCOPE_RESOURCE, SCOPE_SERVER, SCOPE_CLIENT, SCOPE_EXPORTS);
+    set_cull_radius(&h, radius);
+    let vehicle = h.spawn_vehicle([0.0, 0.0, 0.0]);
+    h.call("paint", &[Value::from("red")]);
+    h.call("set_vehicle_bucket", &[Value::Int(2)]);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let a = h.connect(&dir.path().join("cache"), &dir.path().join("data"));
+    let ped_a = h.number("ped_of", &[Value::Int(1)]);
+
+    h.look_until(
+        &a,
+        &[&*a],
+        1,
+        &view_line(&[ped_a], "false nil"),
+        "a not to get the vehicle or its colour at join",
+    );
+    assert!(a.entity(vehicle).is_none());
+}
+
+#[test]
+fn a_joining_player_gets_no_entities_of_other_buckets_while_scoping() {
+    a_player_joining_does_not_get_the_entities_of_other_buckets(50);
+}
+
+#[test]
+fn a_joining_player_gets_no_entities_of_other_buckets_with_scoping_off() {
+    a_player_joining_does_not_get_the_entities_of_other_buckets(0);
+}
+
+/// A move and a bucket change in the same frame leave every client with the
+/// entities of its final bucket and place.
+fn a_bucket_change_and_a_move_in_one_frame_settle(radius: u32) {
+    let h = Harness::start(SCOPE_RESOURCE, SCOPE_SERVER, SCOPE_CLIENT, SCOPE_EXPORTS);
+    set_cull_radius(&h, radius);
+    let dir_a = tempfile::tempdir().expect("temp dir");
+    let dir_b = tempfile::tempdir().expect("temp dir");
+    let a = h.connect(&dir_a.path().join("cache"), &dir_a.path().join("data"));
+    let b = h.connect(&dir_b.path().join("cache"), &dir_b.path().join("data"));
+    let both_runtimes = [&*a, &*b];
+    let ped_a = h.number("ped_of", &[Value::Int(1)]);
+    let ped_b = h.number("ped_of", &[Value::Int(2)]);
+    let both = view_line(&[ped_a, ped_b], "false nil");
+    h.look_until(&a, &both_runtimes, 1, &both, "a to see both peds");
+
+    // `b` walks away and changes bucket in the same frame: nobody sees `b`.
+    b.handle(ClientInput::Line("far".to_owned()));
+    h.call("set_bucket", &[Value::Int(2), Value::Int(3)]);
+    h.look_until(
+        &a,
+        &both_runtimes,
+        1,
+        &view_line(&[ped_a], "false nil"),
+        "a to lose the ped of b",
+    );
+    h.look_until(
+        &b,
+        &both_runtimes,
+        2,
+        &view_line(&[ped_b], "false nil"),
+        "b to lose the ped of a",
+    );
+
+    // `b` comes back and `a` joins its bucket in the same frame: both see both.
+    b.handle(ClientInput::Line("home".to_owned()));
+    h.call("set_bucket", &[Value::Int(1), Value::Int(3)]);
+    h.look_until(
+        &a,
+        &both_runtimes,
+        1,
+        &both,
+        "a to see b after meeting in bucket 3",
+    );
+    h.look_until(
+        &b,
+        &both_runtimes,
+        2,
+        &both,
+        "b to see a after meeting in bucket 3",
+    );
+}
+
+#[test]
+fn a_bucket_change_and_a_move_in_one_frame_settle_while_scoping() {
+    a_bucket_change_and_a_move_in_one_frame_settle(50);
+}
+
+#[test]
+fn a_bucket_change_and_a_move_in_one_frame_settle_with_scoping_off() {
+    a_bucket_change_and_a_move_in_one_frame_settle(0);
 }

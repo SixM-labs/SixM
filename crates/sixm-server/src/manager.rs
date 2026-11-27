@@ -22,6 +22,7 @@ use sixm_resources::{Catalog, DependencyError, ResourceError, ScanIssue};
 use tracing::{debug, error, info, warn};
 
 use crate::access::AccessStore;
+use crate::buckets::BucketSettings;
 use crate::commands::CommandSource;
 use crate::convars::Convars;
 use crate::entities::{EntityStore, EntityUpdate};
@@ -102,6 +103,8 @@ pub struct ResourceManager {
     pub(crate) entities: RefCell<EntityStore>,
     /// The radius in use, and the entities each player holds.
     pub(crate) scopes: RefCell<Scopes>,
+    /// Population and entity lockdown settings of each routing bucket.
+    pub(crate) bucket_settings: RefCell<BucketSettings>,
     /// Reused between frames to hold the transforms sent to clients.
     pub(crate) entity_updates: RefCell<Vec<EntityUpdate>>,
     /// Access control entries and principal links, changed by the `add_ace` family.
@@ -148,6 +151,7 @@ impl ResourceManager {
             state: RefCell::default(),
             entities: RefCell::default(),
             scopes: RefCell::default(),
+            bucket_settings: RefCell::default(),
             entity_updates: RefCell::default(),
             access: RefCell::default(),
             host_functions: RefCell::default(),
@@ -1090,5 +1094,50 @@ impl ServerHost for ResourceManager {
 
     fn web_reply(&self, request: u64, reply: WebReply) -> Result<(), ScriptError> {
         self.reply_web(request, reply)
+    }
+
+    fn player_routing_bucket(&self, player: u32) -> Option<u32> {
+        self.routed_player(player)
+    }
+
+    fn set_player_routing_bucket(&self, player: u32, bucket: u32) -> bool {
+        self.route_player(player, bucket)
+    }
+
+    fn entity_routing_bucket(&self, entity: u32) -> Option<u32> {
+        self.routed_entity(entity)
+    }
+
+    fn set_entity_routing_bucket(&self, entity: u32, bucket: u32) -> bool {
+        self.route_entity(entity, bucket)
+    }
+
+    fn players_in_routing_bucket(&self, bucket: u32) -> Vec<u32> {
+        self.players_in_bucket(bucket)
+    }
+
+    fn set_routing_bucket_population_enabled(&self, bucket: u32, enabled: bool) {
+        self.bucket_settings
+            .borrow_mut()
+            .set_population(bucket, enabled);
+    }
+
+    fn routing_bucket_population_enabled(&self, bucket: u32) -> bool {
+        self.bucket_settings.borrow().population_enabled(bucket)
+    }
+
+    fn set_routing_bucket_entity_lockdown_mode(
+        &self,
+        bucket: u32,
+        mode: &str,
+    ) -> Result<(), ScriptError> {
+        self.bucket_settings.borrow_mut().set_lockdown(bucket, mode)
+    }
+
+    fn routing_bucket_entity_lockdown_mode(&self, bucket: u32) -> String {
+        self.bucket_settings
+            .borrow()
+            .lockdown_mode(bucket)
+            .to_owned()
     }
 }

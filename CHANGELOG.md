@@ -22,6 +22,11 @@ may change the protocol and the API.
   memory; a background thread appends CRC-checked records to one log per
   resource and compacts it, so the frame never waits for the disk. The server
   folder is `sixm_kvpPath`.
+- Routing buckets on the server: `SetPlayerRoutingBucket`,
+  `GetPlayerRoutingBucket`, `SetEntityRoutingBucket`, `GetEntityRoutingBucket`,
+  `GetPlayersInRoutingBucket`, and the stored population and entity lockdown
+  settings. A player holds only the entities, transforms and entity state of its
+  own bucket, and its ped moves with it. Bucket 0 costs nothing extra.
 
 ## [0.1.0]
 
