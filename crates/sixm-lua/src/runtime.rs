@@ -62,7 +62,8 @@ pub struct LuaRuntime {
 impl LuaRuntime {
     /// Creates the runtime for one instance of `resource`, whose files live under `root`.
     ///
-    /// `declared_exports` lists the manifest's `server_export` names. A global
+    /// `declared_exports` lists the export names the manifest declares for this
+    /// side: `server_export` on the server, `export` on a client. A global
     /// function with one of those names is callable as an export.
     pub fn new(
         resource: ResourceName,

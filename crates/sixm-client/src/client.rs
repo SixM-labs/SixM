@@ -37,6 +37,9 @@ pub struct SyncedResource {
     pub name: String,
     /// The resource's files, in load order.
     pub files: Vec<SyncedFile>,
+    /// Names of the client exports the manifest declares with `export`. A global
+    /// function with one of these names is callable as an export.
+    pub exports: Vec<String>,
 }
 
 /// How many files a sync needed.
@@ -271,6 +274,7 @@ impl Client {
             SyncedResource {
                 name: entry.name.clone(),
                 files,
+                exports: entry.exports.clone(),
             },
             stats,
         ))
@@ -298,7 +302,10 @@ impl Client {
 fn merge_frame(listed: &mut Vec<ResourceEntry>, frame: Vec<ResourceEntry>) {
     for entry in frame {
         match listed.last_mut() {
-            Some(last) if last.name == entry.name => last.files.extend(entry.files),
+            Some(last) if last.name == entry.name => {
+                last.files.extend(entry.files);
+                last.exports.extend(entry.exports);
+            }
             _ => listed.push(entry),
         }
     }

@@ -26,8 +26,8 @@ mod wire;
 pub use client::{ClientEvent, NetClient};
 pub use error::NetError;
 pub use files::{
-    FILE_KIND_CLIENT, FILE_KIND_FILE, FILE_KIND_SHARED, FileEntry, FileHash, MAX_FILE_SIZE,
-    PublishedFile, PublishedResource, ResourceEntry, hash_hex,
+    FILE_KIND_CLIENT, FILE_KIND_FILE, FILE_KIND_SHARED, FileEntry, FileHash, MAX_EXPORT_NAME_LEN,
+    MAX_EXPORTS, MAX_FILE_SIZE, PublishedFile, PublishedResource, ResourceEntry, hash_hex,
 };
 pub use identity::{Fingerprint, Identity, ParseFingerprintError};
 pub use protocol::PROTOCOL_VERSION;

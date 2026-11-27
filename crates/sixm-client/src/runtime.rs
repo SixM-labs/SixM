@@ -283,14 +283,19 @@ impl ClientRuntime {
         };
         let instance = self.next_instance.get();
         self.next_instance.set(instance + 1);
-        let runtime =
-            match LuaRuntime::new(name.clone(), instance, root, Vec::new(), self.me.clone()) {
-                Ok(runtime) => runtime,
-                Err(err) => {
-                    error!("[{name}] cannot create the runtime: {err}");
-                    return;
-                }
-            };
+        let runtime = match LuaRuntime::new(
+            name.clone(),
+            instance,
+            root,
+            resource.exports.clone(),
+            self.me.clone(),
+        ) {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                error!("[{name}] cannot create the runtime: {err}");
+                return;
+            }
+        };
 
         self.running.borrow_mut().push(Rc::clone(&runtime));
         self.rebuild_snapshot();

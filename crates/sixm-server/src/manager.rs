@@ -12,7 +12,7 @@ use sixm_core::{
     ScriptError, ScriptRuntime, ServerHost, Value,
 };
 use sixm_lua::LuaRuntime;
-use sixm_net::PublishedResource;
+use sixm_net::{MAX_EXPORT_NAME_LEN, MAX_EXPORTS, PublishedResource};
 use sixm_resources::{Catalog, DependencyError, ResourceError, ScanIssue};
 use tracing::{error, info, warn};
 
@@ -423,15 +423,20 @@ impl ResourceManager {
     /// The client files of `name`, hashed and ready to advertise.
     fn client_resource(&self, name: &ResourceName) -> PublishedResource {
         let catalog = self.catalog.borrow();
-        let files = match catalog.get(name) {
-            Some(info) => info
-                .client_files(|dependency| catalog.get(dependency).map(|other| other.root.clone())),
-            None => Ok(Vec::new()),
+        let (files, exports) = match catalog.get(name) {
+            Some(info) => (
+                info.client_files(|dependency| {
+                    catalog.get(dependency).map(|other| other.root.clone())
+                }),
+                info.manifest.exports.clone(),
+            ),
+            None => (Ok(Vec::new()), Vec::new()),
         };
         let files = files.unwrap_or_else(|err| {
             error!("[{name}] cannot expand its client files, none are sent: {err}");
             Vec::new()
         });
+        let exports = advertisable_exports(name, exports);
         let mut hashes = self.hashes.borrow_mut();
         PublishedResource {
             name: name.to_string(),
@@ -439,6 +444,7 @@ impl ResourceManager {
                 .into_iter()
                 .filter_map(|file| hashes.publish(file))
                 .collect(),
+            exports,
         }
     }
 
@@ -517,6 +523,29 @@ impl ResourceManager {
             self.release_ref(&command.handler);
         }
     }
+}
+
+/// The client exports of `name` if clients can receive them: at most
+/// [`MAX_EXPORTS`] names, each of 1 to [`MAX_EXPORT_NAME_LEN`] bytes. Otherwise
+/// the error is logged and no exports are sent, rather than a part of them.
+fn advertisable_exports(name: &ResourceName, exports: Vec<String>) -> Vec<String> {
+    if exports.len() > MAX_EXPORTS {
+        error!(
+            "[{name}] declares {} exports, more than the {MAX_EXPORTS} limit, none are sent",
+            exports.len()
+        );
+        return Vec::new();
+    }
+    if let Some(export) = exports
+        .iter()
+        .find(|export| export.is_empty() || export.len() > MAX_EXPORT_NAME_LEN)
+    {
+        error!(
+            "[{name}] declares export `{export}`, which is not 1 to {MAX_EXPORT_NAME_LEN} bytes, none are sent"
+        );
+        return Vec::new();
+    }
+    exports
 }
 
 impl Host for ResourceManager {
