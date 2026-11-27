@@ -1,0 +1,52 @@
+[package]
+name = "sixm-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "GPL-3.0-only"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sixm-net = { path = "../crates/sixm-net" }
+sixm-resources = { path = "../crates/sixm-resources" }
+
+[[bin]]
+name = "decode_client_message"
+path = "fuzz_targets/decode_client_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_server_message"
+path = "fuzz_targets/decode_server_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "latent_event"
+path = "fuzz_targets/latent_event.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "file_stream_header"
+path = "fuzz_targets/file_stream_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "manifest"
+path = "fuzz_targets/manifest.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

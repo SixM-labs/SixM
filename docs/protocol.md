@@ -318,6 +318,24 @@ resource files can arrive while a latent transfer is in progress.
 | Event flood | More than 1000 events or commands in a second, for five seconds | The player is kicked with `event flood`. |
 | Server shutdown | none | Every player is kicked with `server shutting down`. |
 
+## Fuzzing and hardening
+
+The decoders of untrusted input are fuzzed. Two layers run them:
+
+- `cargo test -p sixm-net` feeds 100,000 seeded inputs per run into the
+  message decoders and the latent event decoder. Half are random bytes, half
+  are valid frames mutated by bit flips, truncation, insertion, splicing and
+  oversized length prefixes. Each input must decode or fail, never panic, and
+  the value, command and transform limits must hold for every accepted message.
+  `cargo test -p sixm-resources` runs 5,000 generated manifests the same way.
+- The cargo-fuzz targets in `fuzz/` (outside the workspace, nightly only) cover
+  `decode_client_message`, `decode_server_message`, `latent_event`,
+  `file_stream_header` and `manifest`, the `fxmanifest.lua` parser. The
+  `fuzz.yml` workflow runs each target for five minutes weekly and on demand.
+
+The value budget bounds the values of one message. Strings and byte strings
+are read from the frame, so their size cannot exceed it.
+
 ## Versioning
 
 - `PROTOCOL_VERSION` is `11`. It is sent in `Hello`. A server refuses any other
