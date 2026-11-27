@@ -108,3 +108,61 @@ fn convars_commands_and_game_timer_work() {
     assert_eq!(*host.commands.borrow(), vec!["say hi".to_owned()]);
     let _ = first;
 }
+
+#[test]
+fn js_quat_and_entity_quaternion_work() {
+    let host = new_host();
+    let rt = start(
+        &host,
+        "quat_js",
+        &["check", "echo"],
+        &[(
+            "index.js",
+            r#"
+            exports("echo", (q) => q);
+            exports("check", () => {
+                const q = quat(1, 0, -0.5, 0.25);
+                const [w, x, y, z] = q;
+                const qVec = quat(0.5, vec3(1, 2, 3));
+                qVec.w = 2;
+                const veh = CreateVehicle("adder", 0, 0, 0, 90, true, false);
+                const [ex, ey, ez, ew] = GetEntityQuaternion(veh);
+                SetEntityQuaternion(veh, 0, 0, 0, 1);
+                return [
+                    w, x, y, z,
+                    q.length,
+                    q.toString(),
+                    JSON.stringify(q),
+                    qVec[0], qVec.x, qVec.z,
+                    Math.abs(ez - Math.SQRT1_2) < 1e-4 && Math.abs(ew - Math.SQRT1_2) < 1e-4,
+                    GetEntityHeading(veh),
+                    ex + ey
+                ];
+            });
+            "#,
+        )],
+    );
+
+    assert_eq!(
+        call(&rt, "echo", &[Value::Quat([1.0, 0.0, 0.5, -0.25])]),
+        vec![Value::Quat([1.0, 0.0, 0.5, -0.25])]
+    );
+    assert_eq!(
+        call(&rt, "check", &[]),
+        vec![Value::Array(vec![
+            Value::Int(1),
+            Value::Int(0),
+            Value::Float(-0.5),
+            Value::Float(0.25),
+            Value::Int(4),
+            Value::from("quat(1.0, 0.0, -0.5, 0.25)"),
+            Value::from(r#"{"w":1,"x":0,"y":-0.5,"z":0.25}"#),
+            Value::Int(2),
+            Value::Int(1),
+            Value::Int(3),
+            Value::Bool(true),
+            Value::Int(0),
+            Value::Int(0),
+        ])]
+    );
+}

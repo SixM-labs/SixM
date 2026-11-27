@@ -205,9 +205,11 @@ want scripts to stay portable back to FiveM.
   `0.0.0.0:30120`) with TLS 1.3 and mandatory client certificates. There is no
   ENet-style plaintext UDP fallback, and `endpoint_add_tcp` is an alias that
   sets the same address for both UDP (QUIC) and TCP (HTTP).
-- **Identifiers:** Every connected player has `license:<sha256>` (derived from
-  the client's certificate in `identity.bin`) and `ip:<address>`. Steam,
-  Discord, XBL, and Cfx.re token identifiers do not exist.
+- **Identifiers & tokens:** Every connected player has `license:<sha256>`
+  (derived from the client's certificate in `identity.bin`) and
+  `ip:<address>`, plus deterministic certificate tokens via
+  `GetNumPlayerTokens` / `GetPlayerToken`. External Steam, Discord, XBL, and
+  Cfx.re account tokens do not exist.
 - **Client `PlayerId()`:** On `sixm-client`, `PlayerId()` always returns `0`
   (remote players are not assigned local player indices). Use
   `GetPlayerServerId(PlayerId())` to get the client's server ID, and

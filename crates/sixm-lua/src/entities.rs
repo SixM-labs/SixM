@@ -12,7 +12,8 @@ use std::rc::Weak;
 
 use mlua::{Function, Lua, Table, Value as LuaValue};
 use sixm_core::{
-    EntityAttachment, EntityInfo, EntityKind, EntityState, entity_bag, entity_of_bag, joaat,
+    EntityAttachment, EntityInfo, EntityKind, EntityState, entity_bag, entity_of_bag,
+    euler_to_quat, joaat, quat_to_euler,
 };
 
 use crate::client::client;
@@ -36,6 +37,11 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
     let rotation = bind_fn(lua, weak, |rt, (entity, _order): (LuaValue, LuaValue)| {
         let rotation = existing(rt, &entity)?.map_or([0.0; 3], |(_, info)| info.rotation);
         rt.lua.create_userdata(Vector::new(rotation))
+    })?;
+    let quaternion = bind_fn(lua, weak, |rt, (entity,): (LuaValue,)| {
+        let [w, x, y, z] =
+            existing(rt, &entity)?.map_or([0.0; 4], |(_, info)| euler_to_quat(info.rotation));
+        Ok((f64::from(x), f64::from(y), f64::from(z), f64::from(w)))
     })?;
     let model = bind_fn(lua, weak, |rt, (entity,): (LuaValue,)| {
         Ok(existing(rt, &entity)?.map_or(0, |(_, info)| signed_hash(info.model)))
@@ -64,14 +70,22 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
         object.raw_set("state", state_bag(rt, &entity_bag(id))?)?;
         Ok(object)
     })?;
+    let entity_script = bind_fn(lua, weak, |rt, (entity,): (LuaValue,)| {
+        let Some(id) = entity_id(&entity) else {
+            return Ok(None);
+        };
+        Ok(rt.host()?.entity_script(id))
+    })?;
 
     let functions = [
         ("DoesEntityExist", does_exist),
         ("GetEntityCoords", coords),
         ("GetEntityHeading", heading),
         ("GetEntityRotation", rotation),
+        ("GetEntityQuaternion", quaternion),
         ("GetEntityModel", model),
         ("GetEntityType", entity_type),
+        ("GetEntityScript", entity_script),
         ("NetworkGetNetworkIdFromEntity", network_id),
         ("NetworkGetEntityFromNetworkId", entity_from_network_id),
         ("NetworkDoesNetworkIdExist", network_id_exists),
@@ -263,11 +277,25 @@ fn movement_functions(
             move_entity(rt, &entity, Transform::Rotation(rotation), apply)
         },
     )?;
+    let set_quaternion = bind_fn(
+        lua,
+        weak,
+        move |rt, (entity, x, y, z, w): (LuaValue, LuaValue, LuaValue, LuaValue, LuaValue)| {
+            let q = [
+                real(&w, "w")?,
+                real(&x, "x")?,
+                real(&y, "y")?,
+                real(&z, "z")?,
+            ];
+            move_entity(rt, &entity, Transform::Rotation(quat_to_euler(q)), apply)
+        },
+    )?;
     Ok(vec![
         ("SetEntityCoords", set_coords),
         ("SetEntityCoordsNoOffset", set_coords_no_offset),
         ("SetEntityHeading", set_heading),
         ("SetEntityRotation", set_rotation_function),
+        ("SetEntityQuaternion", set_quaternion),
     ])
 }
 
@@ -495,9 +523,28 @@ fn server_owner_functions(
             .set_entity_orphan_mode(id, &mode)
             .map_err(lua_err)
     })?;
+    let first_owner = bind_fn(lua, weak, |rt, (entity,): (LuaValue,)| {
+        let Some(id) = entity_id(&entity) else {
+            return Ok(-1_i64);
+        };
+        Ok(server(&*rt.host()?)?
+            .entity_first_owner(id)
+            .map_or(-1, i64::from))
+    })?;
+    let set_cull_radius = bind_fn(lua, weak, |rt, (entity, radius): (LuaValue, LuaValue)| {
+        let radius = real(&radius, "radius")?;
+        let Some(id) = existing_id(rt, &entity)? else {
+            return Ok(());
+        };
+        server(&*rt.host()?)?
+            .set_entity_cull_radius(id, radius)
+            .map_err(lua_err)
+    })?;
     Ok(vec![
         ("SetEntityOwner", set_owner),
         ("SetEntityOrphanMode", orphan_mode),
+        ("NetworkGetFirstEntityOwner", first_owner),
+        ("SetEntityDistanceCullingRadius", set_cull_radius),
     ])
 }
 
@@ -727,9 +774,12 @@ fn client_spawn(
         ));
     }
     let model = model_of(model)?;
-    let id = client(&*rt.host()?)?
+    let host = rt.host()?;
+    let client = client(&*host)?;
+    let id = client
         .create_network_entity(kind, model, position, rotation)
         .map_err(lua_err)?;
+    client.set_entity_script(id, rt.resource.as_ref());
     Ok(i64::from(id))
 }
 
@@ -783,7 +833,9 @@ fn spawn(
         owner: None,
     };
     let host = rt.host()?;
-    let id = server(&*host)?.create_entity(info).map_err(lua_err)?;
+    let srv = server(&*host)?;
+    let id = srv.create_entity(info).map_err(lua_err)?;
+    srv.set_entity_script(id, rt.resource.as_ref());
     Ok(i64::from(id))
 }
 

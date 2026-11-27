@@ -122,6 +122,62 @@ pub fn is_finite(components: [f32; 3]) -> bool {
     components.iter().all(|component| component.is_finite())
 }
 
+/// Converts entity Euler angles `[pitch, roll, yaw]` in degrees (`Rz(yaw) * Rx(pitch) * Ry(roll)`)
+/// into a unit quaternion in `[w, x, y, z]` order.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "entity transforms are stored as f32"
+)]
+pub fn euler_to_quat(rotation: [f32; 3]) -> [f32; 4] {
+    let half_pitch = f64::from(rotation[0]).to_radians() * 0.5;
+    let half_roll = f64::from(rotation[1]).to_radians() * 0.5;
+    let half_yaw = f64::from(rotation[2]).to_radians() * 0.5;
+
+    let (sx, cx) = half_pitch.sin_cos();
+    let (sy, cy) = half_roll.sin_cos();
+    let (sz, cz) = half_yaw.sin_cos();
+
+    let w = cz * cx * cy - sz * sx * sy;
+    let x = cz * sx * cy - sz * cx * sy;
+    let y = cz * cx * sy + sz * sx * cy;
+    let z = sz * cx * cy + cz * sx * sy;
+
+    [w as f32, x as f32, y as f32, z as f32]
+}
+
+/// Converts a quaternion in `[w, x, y, z]` order into entity Euler angles
+/// `[pitch, roll, yaw]` in degrees matching [`euler_to_quat`].
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "entity transforms are stored as f32"
+)]
+pub fn quat_to_euler(quat: [f32; 4]) -> [f32; 3] {
+    let [w, x, y, z] = quat.map(f64::from);
+    let norm = (w * w + x * x + y * y + z * z).sqrt();
+    if norm <= 1e-12 || !norm.is_finite() {
+        return [0.0; 3];
+    }
+    let (w, x, y, z) = (w / norm, x / norm, y / norm, z / norm);
+
+    let sin_pitch = (2.0 * (y * z + w * x)).clamp(-1.0, 1.0);
+    let pitch = sin_pitch.asin();
+
+    let (roll, yaw) = if (1.0 - sin_pitch.abs()) < 1e-6 {
+        let yaw = (2.0 * (x * y + w * z)).atan2(1.0 - 2.0 * (y * y + z * z));
+        (0.0, yaw)
+    } else {
+        let roll = (2.0 * (w * y - x * z)).atan2(1.0 - 2.0 * (x * x + y * y));
+        let yaw = (2.0 * (w * z - x * y)).atan2(1.0 - 2.0 * (x * x + z * z));
+        (roll, yaw)
+    };
+
+    [
+        pitch.to_degrees() as f32,
+        roll.to_degrees() as f32,
+        yaw.to_degrees() as f32,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,6 +205,28 @@ mod tests {
         assert!(is_finite([0.0, -1.5, 1e30]));
         assert!(!is_finite([f32::NAN, 0.0, 0.0]));
         assert!(!is_finite([0.0, f32::INFINITY, 0.0]));
+    }
+
+    #[test]
+    fn euler_and_quat_round_trip() {
+        let cases = [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 90.0],
+            [25.0, -15.0, 130.0],
+            [-40.0, 10.0, -65.0],
+        ];
+        for euler in cases {
+            let q = euler_to_quat(euler);
+            let back = quat_to_euler(q);
+            for (got, expected) in back.into_iter().zip(euler) {
+                assert!(
+                    (got - expected).abs() < 1e-3,
+                    "{euler:?} -> {q:?} -> {back:?}"
+                );
+            }
+        }
+        assert_eq!(euler_to_quat([0.0, 0.0, 0.0]), [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(quat_to_euler([0.0, 0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
     }
 
     #[test]

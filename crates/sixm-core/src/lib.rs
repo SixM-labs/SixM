@@ -26,13 +26,14 @@ pub use adapter::{AdapterError, AdapterSink, GameAdapter, MirrorChange, NativeFn
 pub use console::{TokenError, tokenize};
 pub use entity::{
     DEFAULT_ENTITY_HEALTH, EntityAttachment, EntityInfo, EntityKind, EntityState, MAX_ENTITIES,
-    entity_bag, entity_of_bag, is_finite,
+    entity_bag, entity_of_bag, euler_to_quat, is_finite, quat_to_euler,
 };
 pub use files::normalize_resource_path;
 pub use hash::joaat;
 pub use runtime::{
     ClientHost, ClientTarget, ConvarKind, EventContext, EventSource, Host, HttpRequest, PlayerInfo,
     ResourceState, ScriptError, ScriptRuntime, ServerHost, WebReply, WebRequest, WebResponse,
+    convar_filter_matches,
 };
 pub use state::{GLOBAL_BAG, MAX_STATE_NAME_LEN, player_bag, player_of_bag};
 pub use value::{FuncRef, ResourceName, Value};

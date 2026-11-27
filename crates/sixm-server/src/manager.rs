@@ -280,12 +280,19 @@ impl ResourceManager {
         if kind == ConvarKind::Replicated {
             check_replicated(name, value)?;
         }
+        let previous_value = self.convars.borrow().get(name).map(str::to_owned);
         let previous = self.convars.borrow_mut().set(name, value, kind);
         let key = name.to_ascii_lowercase();
         match (kind, previous) {
             (ConvarKind::Replicated, _) => self.broadcast_convar(&key, Some(value)),
             (_, Some(ConvarKind::Replicated)) => self.broadcast_convar(&key, None),
             _ => {}
+        }
+        if previous_value.as_deref() != Some(value) {
+            let replicated = kind == ConvarKind::Replicated;
+            for runtime in self.snapshot().iter() {
+                runtime.deliver_convar_change(name, Some(value), replicated);
+            }
         }
         Ok(())
     }
@@ -1106,6 +1113,21 @@ impl Host for ResourceManager {
     fn entities(&self, kind: Option<EntityKind>) -> Vec<u32> {
         self.entities.borrow().ids(kind)
     }
+
+    fn registered_commands(&self) -> Vec<String> {
+        let mut names: Vec<String> = crate::commands::BUILT_IN
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        names.extend(self.commands.borrow().keys().cloned());
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
+
+    fn entity_script(&self, entity: u32) -> Option<String> {
+        self.entities.borrow().script(entity)
+    }
 }
 
 /// Whether `path` has a `.js` extension (case-insensitive).
@@ -1289,6 +1311,60 @@ impl ServerHost for ResourceManager {
 
     fn detach_entity(&self, entity: u32) -> Result<(), ScriptError> {
         self.entities.borrow_mut().detach(entity)
+    }
+
+    fn start_resource(&self, caller: &str, resource: &str) -> bool {
+        if !self.resource_may(caller, "command.start") {
+            warn!("resource `{caller}` may not run `StartResource`");
+            return false;
+        }
+        if self.is_running(resource) {
+            return false;
+        }
+        match self.start(resource) {
+            Ok(()) => self.is_running(resource),
+            Err(err) => {
+                error!("StartResource `{resource}` failed: {err}");
+                false
+            }
+        }
+    }
+
+    fn stop_resource(&self, caller: &str, resource: &str) -> bool {
+        if !self.resource_may(caller, "command.stop") {
+            warn!("resource `{caller}` may not run `StopResource`");
+            return false;
+        }
+        if !self.is_running(resource) {
+            return false;
+        }
+        match self.stop(resource) {
+            Ok(()) => !self.is_running(resource),
+            Err(err) => {
+                error!("StopResource `{resource}` failed: {err}");
+                false
+            }
+        }
+    }
+
+    fn entity_first_owner(&self, entity: u32) -> Option<u32> {
+        self.entities.borrow().creator(entity)
+    }
+
+    fn set_entity_cull_radius(&self, entity: u32, radius: f32) -> Result<(), ScriptError> {
+        self.entities.borrow_mut().set_cull_radius(entity, radius)
+    }
+
+    fn set_entity_script(&self, entity: u32, script: &str) {
+        self.entities.borrow_mut().set_script(entity, script);
+    }
+
+    fn player_last_msg(&self, player: u32) -> Option<std::time::Duration> {
+        self.player_last_message(player)
+    }
+
+    fn player_tokens(&self, player: u32) -> Vec<String> {
+        self.player_tokens_of(player)
     }
 
     fn routing_bucket_entity_lockdown_mode(&self, bucket: u32) -> String {

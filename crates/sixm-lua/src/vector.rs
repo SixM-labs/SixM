@@ -17,6 +17,9 @@ const MAX_LEN: usize = 4;
 const NAMES: [&str; MAX_LEN] = ["x", "y", "z", "w"];
 /// Letters that name the components, in the same order as [`NAMES`].
 const LETTERS: &[u8; MAX_LEN] = b"xyzw";
+/// Field names and order of a [`Quat`].
+const QUAT_NAMES: [&str; 4] = ["w", "x", "y", "z"];
+const QUAT_LETTERS: &[u8; 4] = b"wxyz";
 
 /// A `vector2`, `vector3` or `vector4` as scripts see it.
 ///
@@ -210,6 +213,10 @@ pub(crate) fn install(lua: &Lua, globals: &Table, original_type: Function) -> ml
             lua.create_function(move |_, args: MultiValue| construct(name, len, args))?;
         globals.raw_set(name, constructor)?;
     }
+    globals.raw_set(
+        "quat",
+        lua.create_function(|_, args: MultiValue| construct_quat(args))?,
+    )?;
 
     // `type` is called constantly, so the usual types are answered here instead
     // of calling back into the original. It only handles what this mapping
@@ -223,10 +230,15 @@ pub(crate) fn install(lua: &Lua, globals: &Table, original_type: Function) -> ml
             Some(LuaValue::Table(_)) => "table",
             Some(LuaValue::Function(_)) => "function",
             Some(LuaValue::Thread(_)) => "thread",
-            Some(LuaValue::UserData(data)) => match data.borrow::<Vector>() {
-                Ok(vector) => vector.name(),
-                Err(_) => "userdata",
-            },
+            Some(LuaValue::UserData(data)) => {
+                if let Ok(vector) = data.borrow::<Vector>() {
+                    vector.name()
+                } else if data.is::<Quat>() {
+                    "quat"
+                } else {
+                    "userdata"
+                }
+            }
             Some(LuaValue::LightUserData(_) | LuaValue::Error(_)) => "userdata",
             _ => return original_type.call(args),
         };
@@ -435,4 +447,212 @@ fn describe_key(key: &LuaValue) -> String {
         LuaValue::Integer(int) => int.to_string(),
         other => other.type_name().to_owned(),
     }
+}
+
+/// A quaternion stored in `[w, x, y, z]` order, matching FiveM's `quat(w, x, y, z)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Quat {
+    c: [f32; 4],
+}
+
+impl Quat {
+    pub(crate) fn new(c: [f32; 4]) -> Self {
+        Self { c }
+    }
+
+    pub(crate) fn fields(&self) -> impl Iterator<Item = (&'static str, f32)> + '_ {
+        QUAT_NAMES.iter().copied().zip(self.c.iter().copied())
+    }
+
+    pub(crate) fn to_value(self) -> Value {
+        Value::Quat(self.c)
+    }
+
+    fn length(&self) -> f64 {
+        self.c
+            .iter()
+            .map(|c| f64::from(*c) * f64::from(*c))
+            .sum::<f64>()
+            .sqrt()
+    }
+
+    fn mul_quat(self, rhs: Self) -> Self {
+        let [aw, ax, ay, az] = self.c;
+        let [bw, bx, by, bz] = rhs.c;
+        Self {
+            c: [
+                aw * bw - ax * bx - ay * by - az * bz,
+                aw * bx + ax * bw + ay * bz - az * by,
+                aw * by - ax * bz + ay * bw + az * bx,
+                aw * bz + ax * by - ay * bx + az * bw,
+            ],
+        }
+    }
+
+    fn rotate_vec3(self, v: [f32; 3]) -> Vector {
+        let [qw, qx, qy, qz] = self.c;
+        let cx = qy * v[2] - qz * v[1];
+        let cy = qz * v[0] - qx * v[2];
+        let cz = qx * v[1] - qy * v[0];
+        let rx = qy * cz - qz * cy;
+        let ry = qz * cx - qx * cz;
+        let rz = qx * cy - qy * cx;
+        Vector::new([
+            v[0] + 2.0 * (qw * cx + rx),
+            v[1] + 2.0 * (qw * cy + ry),
+            v[2] + 2.0 * (qw * cz + rz),
+        ])
+    }
+}
+
+impl fmt::Display for Quat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "quat({:?}, {:?}, {:?}, {:?})",
+            self.c[0], self.c[1], self.c[2], self.c[3]
+        )
+    }
+}
+
+fn read_quat(value: &LuaValue) -> Option<Quat> {
+    match value {
+        LuaValue::UserData(data) => data.borrow::<Quat>().ok().map(|q| *q),
+        _ => None,
+    }
+}
+
+fn quat_field_index(key: &LuaValue) -> Option<usize> {
+    match key {
+        LuaValue::Integer(int) => integer_index(*int, 4),
+        LuaValue::String(text) => {
+            let bytes = text.as_bytes();
+            let [letter] = &*bytes else {
+                return None;
+            };
+            QUAT_LETTERS.iter().position(|known| known == letter)
+        }
+        _ => None,
+    }
+}
+
+impl UserData for Quat {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_function(MetaMethod::Add, |_, (left, right): (LuaValue, LuaValue)| {
+            let (Some(a), Some(b)) = (read_quat(&left), read_quat(&right)) else {
+                return Err(mlua::Error::runtime("cannot add quat with non-quat"));
+            };
+            Ok(Quat::new([
+                a.c[0] + b.c[0],
+                a.c[1] + b.c[1],
+                a.c[2] + b.c[2],
+                a.c[3] + b.c[3],
+            ]))
+        });
+        methods.add_meta_function(MetaMethod::Sub, |_, (left, right): (LuaValue, LuaValue)| {
+            let (Some(a), Some(b)) = (read_quat(&left), read_quat(&right)) else {
+                return Err(mlua::Error::runtime("cannot subtract quat with non-quat"));
+            };
+            Ok(Quat::new([
+                a.c[0] - b.c[0],
+                a.c[1] - b.c[1],
+                a.c[2] - b.c[2],
+                a.c[3] - b.c[3],
+            ]))
+        });
+        methods.add_meta_function(
+            MetaMethod::Mul,
+            |lua, (left, right): (LuaValue, LuaValue)| match (
+                read_quat(&left),
+                read_quat(&right),
+                read(&right),
+                number_of(&left),
+                number_of(&right),
+            ) {
+                (Some(a), Some(b), _, _, _) => {
+                    Ok(LuaValue::UserData(lua.create_userdata(a.mul_quat(b))?))
+                }
+                (Some(a), None, Some(v), _, _) if v.len == 3 => Ok(LuaValue::UserData(
+                    lua.create_userdata(a.rotate_vec3([v.c[0], v.c[1], v.c[2]]))?,
+                )),
+                (Some(a), _, _, _, Some(s)) => Ok(LuaValue::UserData(
+                    lua.create_userdata(Quat::new(a.c.map(|v| v * s)))?,
+                )),
+                (_, Some(b), _, Some(s), _) => Ok(LuaValue::UserData(
+                    lua.create_userdata(Quat::new(b.c.map(|v| s * v)))?,
+                )),
+                _ => Err(mlua::Error::runtime("unsupported quat multiplication")),
+            },
+        );
+        methods.add_meta_function(MetaMethod::Div, |_, (left, right): (LuaValue, LuaValue)| {
+            let (Some(a), Some(s)) = (read_quat(&left), number_of(&right)) else {
+                return Err(mlua::Error::runtime("cannot divide quat by non-number"));
+            };
+            Ok(Quat::new(a.c.map(|v| v / s)))
+        });
+        methods.add_meta_method(MetaMethod::Unm, |_, this, (): ()| {
+            Ok(Quat::new(this.c.map(|v| -v)))
+        });
+        methods.add_meta_method(MetaMethod::Len, |_, this, (): ()| Ok(this.length()));
+        methods.add_meta_method(MetaMethod::Eq, |_, this, other: LuaValue| {
+            Ok(read_quat(&other) == Some(*this))
+        });
+        methods.add_meta_method(MetaMethod::ToString, |_, this, (): ()| Ok(this.to_string()));
+        methods.add_meta_method(MetaMethod::Index, |_, this, key: LuaValue| {
+            Ok(quat_field_index(&key).map_or(LuaValue::Nil, |idx| {
+                LuaValue::Number(f64::from(this.c[idx]))
+            }))
+        });
+        methods.add_meta_method_mut(
+            MetaMethod::NewIndex,
+            |_, this, (key, value): (LuaValue, LuaValue)| {
+                let Some(idx) = quat_field_index(&key) else {
+                    return Err(mlua::Error::runtime(format!(
+                        "quat has no field {}",
+                        describe_key(&key)
+                    )));
+                };
+                let number = number_of(&value).ok_or_else(|| {
+                    mlua::Error::runtime(format!(
+                        "quat component must be a number, got {}",
+                        value.type_name()
+                    ))
+                })?;
+                this.c[idx] = number;
+                Ok(())
+            },
+        );
+    }
+}
+
+fn construct_quat(args: MultiValue) -> mlua::Result<Quat> {
+    let args = args.into_vec();
+    match args.as_slice() {
+        [single] => {
+            if let Some(q) = read_quat(single) {
+                return Ok(q);
+            }
+            if let Some(n) = number_of(single) {
+                return Ok(Quat::new([n, n, n, n]));
+            }
+        }
+        [w, v] => {
+            if let (Some(w), Some(vec)) = (number_of(w), read(v))
+                && vec.len == 3
+            {
+                return Ok(Quat::new([w, vec.c[0], vec.c[1], vec.c[2]]));
+            }
+        }
+        [w, x, y, z] => {
+            if let (Some(w), Some(x), Some(y), Some(z)) =
+                (number_of(w), number_of(x), number_of(y), number_of(z))
+            {
+                return Ok(Quat::new([w, x, y, z]));
+            }
+        }
+        _ => {}
+    }
+    Err(mlua::Error::runtime(
+        "quat: expected (w, x, y, z), (w, vector3), or (quat)",
+    ))
 }

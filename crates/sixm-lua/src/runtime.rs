@@ -16,6 +16,7 @@ use crate::events::Events;
 use crate::exports::Exports;
 use crate::kvp::Finds;
 use crate::natives;
+use crate::preprocess::lua_backticks;
 use crate::promise::Promises;
 use crate::refs::RefTable;
 use crate::sandbox;
@@ -63,6 +64,7 @@ pub struct LuaRuntime {
     pub(crate) promises: RefCell<Promises>,
     pub(crate) events: RefCell<Events>,
     pub(crate) state: RefCell<ChangeHandlers>,
+    pub(crate) convar_listeners: RefCell<natives::ConvarListeners>,
     pub(crate) exports: RefCell<Exports>,
     pub(crate) refs: RefCell<RefTable>,
     /// Releases requested while `refs` was borrowed, applied at the next safe point.
@@ -107,6 +109,7 @@ impl LuaRuntime {
             promises: RefCell::default(),
             events: RefCell::default(),
             state: RefCell::default(),
+            convar_listeners: RefCell::default(),
             exports: RefCell::default(),
             refs: RefCell::default(),
             deferred_releases: RefCell::default(),
@@ -123,13 +126,14 @@ impl LuaRuntime {
         let source = std::fs::read(path).map_err(|err| {
             ScriptError::Runtime(format!("cannot read {}: {err}", path.display()))
         })?;
+        let source = lua_backticks(&source);
         let chunk_name = match path.strip_prefix(&self.root) {
             Ok(relative) => format!("@{}/{}", self.resource, relative.display()),
             Err(_) => format!("@{}", path.display()),
         };
         let main = self
             .lua
-            .load(source)
+            .load(source.as_ref())
             .set_name(chunk_name)
             .into_function()
             .into_script()?;
@@ -170,10 +174,20 @@ impl LuaRuntime {
         let promises = std::mem::take(&mut *self.promises.borrow_mut());
         let events = std::mem::take(&mut *self.events.borrow_mut());
         let state = std::mem::take(&mut *self.state.borrow_mut());
+        let convar_listeners = std::mem::take(&mut *self.convar_listeners.borrow_mut());
         let exports = std::mem::take(&mut *self.exports.borrow_mut());
         let refs = std::mem::take(&mut *self.refs.borrow_mut());
         let deferred = std::mem::take(&mut *self.deferred_releases.borrow_mut());
-        drop((sched, promises, events, state, exports, refs, deferred));
+        drop((
+            sched,
+            promises,
+            events,
+            state,
+            convar_listeners,
+            exports,
+            refs,
+            deferred,
+        ));
 
         if let Err(err) = self.drop_globals() {
             tracing::warn!(target: "sixm::script", "[{}] shutdown: {err}", self.resource);
@@ -252,6 +266,12 @@ impl ScriptRuntime for LuaRuntime {
     fn deliver_state_change(&self, bag: &str, key: &str, value: &Value, replicated: bool) {
         if !self.shut.get() {
             self.dispatch_state_change(bag, key, value, replicated);
+        }
+    }
+
+    fn deliver_convar_change(&self, name: &str, value: Option<&str>, replicated: bool) {
+        if !self.shut.get() {
+            self.dispatch_convar_change(name, value, replicated);
         }
     }
 

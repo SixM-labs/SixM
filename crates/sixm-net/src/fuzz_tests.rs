@@ -67,6 +67,7 @@ fn sample_values() -> Vec<Value> {
         )]),
         Value::Vector2([0.5, 0.25]),
         Value::Vector4([1.0, 0.0, 0.0, 1.0]),
+        Value::Quat([0.0, 0.0, 0.0, 1.0]),
     ]
 }
 

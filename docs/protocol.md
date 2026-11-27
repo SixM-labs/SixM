@@ -369,7 +369,7 @@ are read from the frame, so their size cannot exceed it.
 
 ## Versioning
 
-- `PROTOCOL_VERSION` is `13`. It is sent in `Hello`. A server refuses any other
+- `PROTOCOL_VERSION` is `14`. It is sent in `Hello`. A server refuses any other
   value.
 - The ALPN string is `sixm/1`. It does not change with the protocol version.
 - Enum order, field order and limits can change between protocol versions.

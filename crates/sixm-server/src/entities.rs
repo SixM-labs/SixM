@@ -29,7 +29,7 @@ pub(crate) type EntityUpdate = EntityTransform;
 
 /// An entity, its teleport epoch, and which of its parts changed since the
 /// last frame.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Slot {
     info: EntityInfo,
     state: EntityState,
@@ -47,6 +47,10 @@ struct Slot {
     /// Whether the entity is handed to another player when its creator leaves,
     /// rather than deleted.
     migrate_on_orphan: bool,
+    /// Resource name that created the entity, if created by a server script.
+    script: Option<String>,
+    /// Optional per-entity culling radius override in metres.
+    cull_radius: Option<f32>,
 }
 
 impl Slot {
@@ -116,6 +120,10 @@ pub(crate) struct EntityStore {
     /// it uses them. A block is `(next, end)`: the ids from `next` up to `end`,
     /// `end` not included, are not yet used.
     leases: BTreeMap<u32, VecDeque<(u32, u32)>>,
+    /// Entities with an explicit `SetEntityDistanceCullingRadius` override.
+    custom_cull: HashSet<u32>,
+    /// Set when any entity's custom cull radius changes since the last scope refresh.
+    custom_cull_dirty: bool,
 }
 
 impl Default for EntityStore {
@@ -132,6 +140,8 @@ impl Default for EntityStore {
             buckets: BTreeMap::new(),
             created: BTreeMap::new(),
             leases: BTreeMap::new(),
+            custom_cull: HashSet::new(),
+            custom_cull_dirty: false,
         }
     }
 }
@@ -246,16 +256,16 @@ impl EntityStore {
     /// Clears the scope dirty flags after a frame's scope refresh.
     pub(crate) fn clear_scope_dirty(&mut self) {
         self.dirty_owners.clear();
+        self.custom_cull_dirty = false;
         if let Some(grid) = self.grid.as_mut() {
             grid.clear_dirty();
         }
     }
 
     /// Fills `out` with the scope of `player` in `bucket`: the entities within
-    /// `radius` metres of `center`, and the entities it owns, that are in the
-    /// bucket. The list is in ascending order and has no duplicates. Without a
-    /// center, only the owned entities are listed. Nothing is allocated when
-    /// `out` has room already.
+    /// `radius` metres of `center` (or their custom culling radius), and the
+    /// entities it owns, that are in the bucket. The list is in ascending order
+    /// and has no duplicates. Without a center, only the owned entities are listed.
     pub(crate) fn scope_into(
         &self,
         player: u32,
@@ -266,12 +276,30 @@ impl EntityStore {
     ) {
         out.clear();
         if let (Some(center), Some(grid)) = (center, self.grid.as_ref()) {
-            let limit = radius * radius;
+            let default_limit = radius * radius;
+            let has_custom = !self.custom_cull.is_empty();
             grid.for_each_near(center, |id, position| {
+                let limit = if has_custom {
+                    self.cull_radius(id).map_or(default_limit, |r| r * r)
+                } else {
+                    default_limit
+                };
                 if squared_distance(position, center) <= limit && self.in_bucket(id, bucket) {
                     out.push(id);
                 }
             });
+            if has_custom {
+                for &id in &self.custom_cull {
+                    if let Some(custom_radius) = self.cull_radius(id)
+                        && custom_radius > radius
+                        && let Some(position) = self.position(id)
+                        && squared_distance(position, center) <= custom_radius * custom_radius
+                        && self.in_bucket(id, bucket)
+                    {
+                        out.push(id);
+                    }
+                }
+            }
         }
         out.extend(
             self.owned(player)
@@ -340,6 +368,8 @@ impl EntityStore {
                 state_dirty: 0,
                 creator,
                 migrate_on_orphan,
+                script: None,
+                cull_radius: None,
             },
         );
         if let Some(grid) = self.grid.as_mut() {
@@ -362,6 +392,7 @@ impl EntityStore {
         let slot = self.by_id.remove(&id)?;
         let info = slot.info;
         self.buckets.remove(&id);
+        self.custom_cull.remove(&id);
         let has_grid = self.grid.is_some();
         if let Some(grid) = self.grid.as_mut() {
             grid.remove(id);
@@ -418,6 +449,57 @@ impl EntityStore {
     /// The ids of the entities `creator` created, in creation order.
     pub(crate) fn created_by(&self, creator: u32) -> &[u32] {
         self.created.get(&creator).map_or(&[], Vec::as_slice)
+    }
+
+    /// Original creator of `id`, if it was created by a client (retained even after owner transfer).
+    pub(crate) fn creator(&self, id: u32) -> Option<u32> {
+        self.by_id.get(&id).and_then(|slot| slot.creator)
+    }
+
+    /// Records the resource name that created `id`.
+    pub(crate) fn set_script(&mut self, id: u32, script: &str) {
+        if let Some(slot) = self.by_id.get_mut(&id) {
+            slot.script = Some(script.to_owned());
+        }
+    }
+
+    /// Name of the resource that created `id`, if known.
+    pub(crate) fn script(&self, id: u32) -> Option<String> {
+        self.by_id.get(&id).and_then(|slot| slot.script.clone())
+    }
+
+    /// Per-entity culling radius override, if set.
+    pub(crate) fn cull_radius(&self, id: u32) -> Option<f32> {
+        self.by_id.get(&id).and_then(|slot| slot.cull_radius)
+    }
+
+    /// Sets per-entity distance culling radius (`<= 0` resets to global).
+    pub(crate) fn set_cull_radius(&mut self, id: u32, radius: f32) -> Result<(), ScriptError> {
+        if !radius.is_finite() {
+            return Err(ScriptError::Runtime(
+                "distance culling radius must be finite".to_owned(),
+            ));
+        }
+        let slot = self
+            .by_id
+            .get_mut(&id)
+            .ok_or_else(|| ScriptError::Runtime(format!("entity {id} does not exist")))?;
+        let next = (radius > 0.0).then_some(radius);
+        if slot.cull_radius.map(f32::to_bits) != next.map(f32::to_bits) {
+            slot.cull_radius = next;
+            if next.is_some() {
+                self.custom_cull.insert(id);
+            } else {
+                self.custom_cull.remove(&id);
+            }
+            self.custom_cull_dirty = true;
+        }
+        Ok(())
+    }
+
+    /// Whether any custom per-entity cull radius changed since the last scope refresh.
+    pub(crate) fn has_custom_cull_dirty(&self) -> bool {
+        self.custom_cull_dirty
     }
 
     /// Whether the entity `id` is handed on when its creator leaves.

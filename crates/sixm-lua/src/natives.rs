@@ -5,7 +5,9 @@ use std::rc::{Rc, Weak};
 use std::time::Instant;
 
 use mlua::{Function, Lua, LuaString, MultiValue, Table, Value as LuaValue};
-use sixm_core::{ConvarKind, EventSource, game_timer_ms, joaat, normalize_resource_path};
+use sixm_core::{
+    ConvarKind, EventSource, convar_filter_matches, game_timer_ms, joaat, normalize_resource_path,
+};
 
 use crate::client;
 use crate::entities;
@@ -49,6 +51,7 @@ pub(crate) fn install(runtime: &Rc<LuaRuntime>, helpers: &Helpers) -> mlua::Resu
         Side::Server => {
             players::install(lua, weak, &globals)?;
             entities::install_server(lua, weak, &globals)?;
+            resources::install_server(lua, weak, &globals)?;
             http::install(lua, weak, &globals)?;
             web::install(lua, weak, &globals)?;
             install_server_convars(lua, weak, &globals)?;
@@ -253,8 +256,44 @@ fn install_host(
     for (name, function) in host_functions {
         globals.raw_set(name, function)?;
     }
-
+    install_convar_listeners(lua, weak, globals)?;
     globals.raw_set("json", json::table(lua)?)?;
+    Ok(())
+}
+
+fn install_convar_listeners(
+    lua: &Lua,
+    weak: &Weak<LuaRuntime>,
+    globals: &Table,
+) -> mlua::Result<()> {
+    let add_convar_listener = bind_fn(
+        lua,
+        weak,
+        |rt, (filter, func): (Option<String>, Function)| {
+            Ok(rt
+                .convar_listeners
+                .borrow_mut()
+                .add(filter.unwrap_or_default(), func))
+        },
+    )?;
+    let remove_convar_listener = bind_fn(lua, weak, |rt, (cookie,): (i64,)| {
+        let removed = rt.convar_listeners.borrow_mut().remove(cookie);
+        drop(removed);
+        Ok(())
+    })?;
+    let registered_commands = bind_fn(lua, weak, |rt, (): ()| {
+        let names = rt.host()?.registered_commands();
+        let list = rt.lua.create_table_with_capacity(names.len(), 0)?;
+        for (idx, name) in names.into_iter().enumerate() {
+            let entry = rt.lua.create_table_with_capacity(0, 1)?;
+            entry.raw_set("name", name)?;
+            list.raw_seti(idx + 1, entry)?;
+        }
+        Ok(list)
+    })?;
+    globals.raw_set("AddConvarChangeListener", add_convar_listener)?;
+    globals.raw_set("RemoveConvarChangeListener", remove_convar_listener)?;
+    globals.raw_set("GetRegisteredCommands", registered_commands)?;
     Ok(())
 }
 
@@ -321,4 +360,78 @@ fn resource_root(rt: &LuaRuntime, name: &str) -> mlua::Result<Option<PathBuf>> {
         return Ok(Some(rt.root.clone()));
     }
     Ok(rt.host()?.resource_path(name))
+}
+
+struct ConvarListener {
+    cookie: i64,
+    filter: String,
+    func: Function,
+}
+
+#[derive(Default)]
+pub(crate) struct ConvarListeners {
+    listeners: Vec<ConvarListener>,
+    last_cookie: i64,
+}
+
+impl ConvarListeners {
+    fn add(&mut self, filter: String, func: Function) -> i64 {
+        self.last_cookie += 1;
+        let cookie = self.last_cookie;
+        self.listeners.push(ConvarListener {
+            cookie,
+            filter,
+            func,
+        });
+        cookie
+    }
+
+    fn remove(&mut self, cookie: i64) -> Option<ConvarListener> {
+        let idx = self.listeners.iter().position(|l| l.cookie == cookie)?;
+        Some(self.listeners.remove(idx))
+    }
+
+    fn matching(&self, name: &str) -> Vec<Function> {
+        self.listeners
+            .iter()
+            .filter(|l| convar_filter_matches(&l.filter, name))
+            .map(|l| l.func.clone())
+            .collect()
+    }
+}
+
+impl LuaRuntime {
+    pub(crate) fn dispatch_convar_change(
+        &self,
+        name: &str,
+        _value: Option<&str>,
+        _replicated: bool,
+    ) {
+        let functions = self.convar_listeners.borrow().matching(name);
+        if functions.is_empty() {
+            return;
+        }
+        let outcome: mlua::Result<()> = (|| {
+            let args = MultiValue::from_vec(vec![
+                LuaValue::String(self.lua.create_string(name)?),
+                LuaValue::String(self.empty_string.clone()),
+            ]);
+            let globals = self.lua.globals();
+            let saved: LuaValue = globals.raw_get("source")?;
+            let result = functions.into_iter().try_for_each(|func| {
+                let (slot, _) = self.spawn(func, EventSource::Local, None)?;
+                self.run(slot, Instant::now(), args.clone());
+                Ok(())
+            });
+            globals.raw_set("source", saved)?;
+            result
+        })();
+        if let Err(err) = outcome {
+            tracing::error!(
+                target: "sixm::script",
+                "[{}] convar change of `{name}`: {err}",
+                self.resource
+            );
+        }
+    }
 }

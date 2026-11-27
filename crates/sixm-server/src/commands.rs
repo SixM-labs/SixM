@@ -24,7 +24,7 @@ use crate::perf::{format_millis, per_second};
 const MAX_EXEC_DEPTH: usize = 16;
 
 /// Built-in command names, as listed by `help`.
-const BUILT_IN: [&str; 24] = [
+pub(crate) const BUILT_IN: [&str; 24] = [
     "add_ace",
     "add_principal",
     "endpoint_add_tcp",

@@ -353,6 +353,16 @@ pub trait Host {
         value: Value,
         replicated: bool,
     ) -> Result<(), ScriptError>;
+
+    /// Names of every built-in and script-registered console command.
+    fn registered_commands(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Name of the resource that created `entity`, when known by the host.
+    fn entity_script(&self, _entity: u32) -> Option<String> {
+        None
+    }
 }
 
 /// Services only a server provides: the connected players and the messages
@@ -535,6 +545,39 @@ pub trait ServerHost {
     /// Detaches `entity` from its parent entity if attached. Fails for an
     /// unknown entity.
     fn detach_entity(&self, entity: u32) -> Result<(), ScriptError>;
+
+    /// Starts `resource` on behalf of caller resource `caller` (`command.start`).
+    fn start_resource(&self, _caller: &str, _resource: &str) -> bool {
+        false
+    }
+
+    /// Stops `resource` on behalf of caller resource `caller` (`command.stop`).
+    fn stop_resource(&self, _caller: &str, _resource: &str) -> bool {
+        false
+    }
+
+    /// Server player id of the client that first created `entity`, if any.
+    fn entity_first_owner(&self, _entity: u32) -> Option<u32> {
+        None
+    }
+
+    /// Overrides the culling radius of `entity` in metres; `<= 0` resets it to global.
+    fn set_entity_cull_radius(&self, _entity: u32, _radius: f32) -> Result<(), ScriptError> {
+        Ok(())
+    }
+
+    /// Records the resource name that created `entity`.
+    fn set_entity_script(&self, _entity: u32, _script: &str) {}
+
+    /// Time elapsed since the last network message received from `player`.
+    fn player_last_msg(&self, _player: u32) -> Option<Duration> {
+        None
+    }
+
+    /// Deterministic tokens proving a player's client certificate identity.
+    fn player_tokens(&self, _player: u32) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Services only a client provides: the connection to the server.
@@ -591,6 +634,9 @@ pub trait ClientHost {
     fn adapter_natives(&self) -> Option<NativeRegistry> {
         None
     }
+
+    /// Records the resource name that created a client-side `entity`.
+    fn set_entity_script(&self, _entity: u32, _script: &str) {}
 }
 
 /// One running resource inside one scripting language.
@@ -659,7 +705,61 @@ pub trait ScriptRuntime: fmt::Debug {
     /// Each handler runs as its own task, like an event handler.
     fn deliver_state_change(&self, bag: &str, key: &str, value: &Value, replicated: bool);
 
+    /// Runs this runtime's convar change listeners that match `name`.
+    fn deliver_convar_change(&self, _name: &str, _value: Option<&str>, _replicated: bool) {}
+
     /// Drops all tasks, handlers and references. The runtime is unusable
     /// afterwards; the host removes it.
     fn shutdown(&self);
+}
+
+/// Case-insensitive glob matching for `AddConvarChangeListener` filters.
+/// Empty filters and `"*"` match every convar; `*` matches zero or more bytes
+/// and `?` matches any single byte.
+pub fn convar_filter_matches(filter: &str, name: &str) -> bool {
+    if filter.is_empty() || filter == "*" {
+        return true;
+    }
+    let f = filter.as_bytes();
+    let n = name.as_bytes();
+    let (mut fi, mut ni) = (0usize, 0usize);
+    let mut star: Option<usize> = None;
+    let mut match_ni = 0usize;
+
+    while ni < n.len() {
+        if fi < f.len() && (f[fi] == b'?' || f[fi].eq_ignore_ascii_case(&n[ni])) {
+            fi += 1;
+            ni += 1;
+        } else if fi < f.len() && f[fi] == b'*' {
+            star = Some(fi);
+            fi += 1;
+            match_ni = ni;
+        } else if let Some(s) = star {
+            fi = s + 1;
+            match_ni += 1;
+            ni = match_ni;
+        } else {
+            return false;
+        }
+    }
+    while fi < f.len() && f[fi] == b'*' {
+        fi += 1;
+    }
+    fi == f.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::convar_filter_matches;
+
+    #[test]
+    fn convar_filter_glob_matching() {
+        assert!(convar_filter_matches("", "sv_hostname"));
+        assert!(convar_filter_matches("*", "sv_hostname"));
+        assert!(convar_filter_matches("sv_*", "SV_HostName"));
+        assert!(convar_filter_matches("*_timeout", "sixm_http_timeout"));
+        assert!(convar_filter_matches("test_?foo", "Test_XFoo"));
+        assert!(!convar_filter_matches("test_?foo", "Test_XYFoo"));
+        assert!(!convar_filter_matches("sv_max*", "sixm_tickRate"));
+    }
 }

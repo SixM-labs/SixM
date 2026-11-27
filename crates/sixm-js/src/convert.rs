@@ -5,7 +5,7 @@ use rquickjs::{Array, ArrayBuffer, Ctx, Filter, FromJs, Object, TypedArray, Valu
 use sixm_core::{FuncRef, ScriptError, Value};
 
 use crate::runtime::{JsRuntime, js_err};
-use crate::vector::read_vector;
+use crate::vector::{make_quat, make_vector, read_quat, read_vector};
 
 /// Whether functions may be converted into references.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -240,6 +240,9 @@ impl JsRuntime {
         if let Some(vector) = read_vector(value) {
             return Ok(vector.to_value());
         }
+        if let Some(q) = read_quat(value) {
+            return Ok(q.to_value());
+        }
         if value.is_promise() {
             return Err(ScriptError::Runtime(
                 "cannot pass a promise value to another resource".to_owned(),
@@ -421,15 +424,10 @@ impl JsRuntime {
                 }
                 obj.into_value()
             }
-            Value::Vector2(c) => {
-                crate::vector::make_vector(ctx, *c).map_err(|err| js_err(ctx, err))?
-            }
-            Value::Vector3(c) => {
-                crate::vector::make_vector(ctx, *c).map_err(|err| js_err(ctx, err))?
-            }
-            Value::Vector4(c) => {
-                crate::vector::make_vector(ctx, *c).map_err(|err| js_err(ctx, err))?
-            }
+            Value::Vector2(c) => make_vector(ctx, *c).map_err(|err| js_err(ctx, err))?,
+            Value::Vector3(c) => make_vector(ctx, *c).map_err(|err| js_err(ctx, err))?,
+            Value::Vector4(c) => make_vector(ctx, *c).map_err(|err| js_err(ctx, err))?,
+            Value::Quat(c) => make_quat(ctx, *c).map_err(|err| js_err(ctx, err))?,
             Value::FuncRef(func) => self.js_function(ctx, func)?,
         })
     }

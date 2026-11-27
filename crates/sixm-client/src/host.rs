@@ -260,6 +260,21 @@ impl Host for ClientRuntime {
         self.deliver_state(bag, key, &value, false);
         Ok(())
     }
+
+    fn registered_commands(&self) -> Vec<String> {
+        let mut names: Vec<String> = crate::console::BUILT_IN
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        names.extend(self.commands.borrow().keys().cloned());
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
+
+    fn entity_script(&self, entity: u32) -> Option<String> {
+        self.entity_scripts.borrow().get(&entity).cloned()
+    }
 }
 
 impl ClientRuntime {
@@ -443,5 +458,11 @@ impl ClientHost for ClientRuntime {
 
     fn adapter_natives(&self) -> Option<NativeRegistry> {
         self.adapter_natives.borrow().clone()
+    }
+
+    fn set_entity_script(&self, entity: u32, script: &str) {
+        self.entity_scripts
+            .borrow_mut()
+            .insert(entity, script.to_owned());
     }
 }
