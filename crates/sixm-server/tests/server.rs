@@ -136,6 +136,8 @@ fn execute_command_runs_after_the_current_call() {
         &[("server.lua", script)],
     );
     fx.manager().start("deferrer").expect("start deferrer");
+    fx.server
+        .execute("add_ace resource.deferrer command.set allow");
 
     fx.server.execute("probe");
     assert_eq!(fx.text("deferrer", "seen"), "unset");

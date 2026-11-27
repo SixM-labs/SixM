@@ -1,16 +1,17 @@
 //! Console commands: the built-in set, `exec`, the access control commands and
 //! dispatch to script commands and convars.
 //!
-//! A line comes from the console or from a connected player. The console may
-//! run everything. A player may run a built-in command, or a restricted script
-//! command, only when its access control entries allow `command.<name>`. A
-//! player never reaches a convar through its bare name.
+//! A line comes from the console, from a connected player or from a script
+//! through `ExecuteCommand`. The console may run everything. A player or a
+//! resource may run a built-in command, or a restricted script command, only
+//! when its access control entries allow `command.<name>`. A player or a
+//! resource never reaches a convar through its bare name.
 
 use std::fs;
 use std::net::SocketAddr;
 use std::time::Instant;
 
-use sixm_core::{ConvarKind, Host, Value};
+use sixm_core::{ConvarKind, Host, ResourceName, Value};
 use tracing::{debug, error, info, warn};
 
 use crate::access::Permission;
@@ -50,17 +51,20 @@ const BUILT_IN: [&str; 24] = [
     "test_ace",
 ];
 
-/// Who typed a command line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Who sent a command line.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CommandSource {
-    /// Standard input, `server.cfg`, `exec`, `+command` and `ExecuteCommand`.
+    /// Standard input, `server.cfg`, `exec` and `+command`.
     Console,
     /// A connected player, by server id.
     Player(u32),
+    /// A script of this resource, through `ExecuteCommand`. The line runs with
+    /// the rights of the principal `resource.<name>`.
+    Resource(ResourceName),
 }
 
 /// Where a command line comes from, and how many `exec` files it is nested in.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct CommandContext {
     pub(crate) source: CommandSource,
     /// The number of `exec` files around the line.
@@ -68,39 +72,31 @@ pub(crate) struct CommandContext {
 }
 
 impl CommandContext {
-    /// The context of a line typed at the console.
-    pub(crate) fn console() -> Self {
-        Self {
-            source: CommandSource::Console,
-            depth: 0,
-        }
-    }
-
-    /// The context of a line that connected player `player` sent.
-    pub(crate) fn player(player: u32) -> Self {
-        Self {
-            source: CommandSource::Player(player),
-            depth: 0,
-        }
+    /// The context of a line that `source` sent.
+    pub(crate) fn new(source: CommandSource) -> Self {
+        Self { source, depth: 0 }
     }
 
     /// The context of a line in a file that `exec` runs from this context.
-    fn nested(self) -> Self {
+    fn nested(&self) -> Self {
         Self {
+            source: self.source.clone(),
             depth: self.depth + 1,
-            ..self
         }
     }
 }
 
 /// Tokenizes `line` and runs it.
-pub(crate) fn run_line(manager: &ResourceManager, line: &str, context: CommandContext) {
+pub(crate) fn run_line(manager: &ResourceManager, line: &str, context: &CommandContext) {
     match tokenize(line) {
         Ok(words) => run_words(manager, &words, line.trim(), context),
-        Err(err) => match context.source {
+        Err(err) => match &context.source {
             CommandSource::Console => error!("{}: {err}", line.trim()),
             CommandSource::Player(player) => {
                 info!("player {player} sent a line that does not tokenize: {err}");
+            }
+            CommandSource::Resource(resource) => {
+                warn!("resource `{resource}` ran a line that does not tokenize: {err}");
             }
         },
     }
@@ -112,13 +108,13 @@ pub(crate) fn run_words(
     manager: &ResourceManager,
     words: &[String],
     raw: &str,
-    context: CommandContext,
+    context: &CommandContext,
 ) {
     let Some((name, args)) = words.split_first() else {
         return;
     };
     let lower = name.to_ascii_lowercase();
-    if BUILT_IN.contains(&lower.as_str()) && !permitted(manager, context.source, &lower) {
+    if BUILT_IN.contains(&lower.as_str()) && !permitted(manager, &context.source, &lower) {
         return;
     }
     match lower.as_str() {
@@ -150,44 +146,54 @@ pub(crate) fn run_words(
         "list_aces" => list_aces(manager, args),
         "list_principals" => list_principals(manager, args),
         "test_ace" => test_ace(manager, args),
-        _ => run_script_or_convar(manager, name, &lower, args, raw, context.source),
+        _ => run_script_or_convar(manager, name, &lower, args, raw, &context.source),
     }
 }
 
 /// Whether `source` may run `command`, a built-in or restricted command in
-/// lower case. The console may run everything. A player is checked against
-/// `command.<name>`, and a refusal is logged with the player id and the name.
-fn permitted(manager: &ResourceManager, source: CommandSource, command: &str) -> bool {
+/// lower case. The console may run everything. A player is checked as
+/// `player.<id>` and a resource as `resource.<name>`, both against
+/// `command.<name>`. A refusal is logged with the sender and the name.
+fn permitted(manager: &ResourceManager, source: &CommandSource, command: &str) -> bool {
     match source {
         CommandSource::Console => true,
         CommandSource::Player(player) => {
-            let allowed = manager.player_may(player, &format!("command.{command}"));
+            let allowed = manager.player_may(*player, &format!("command.{command}"));
             if !allowed {
                 info!("player {player} may not run `{command}`");
+            }
+            allowed
+        }
+        CommandSource::Resource(resource) => {
+            let allowed = manager.resource_may(resource, &format!("command.{command}"));
+            if !allowed {
+                warn!("resource `{resource}` may not run `{command}`");
             }
             allowed
         }
     }
 }
 
-/// The first argument of a script command: the player's id, or `0` for the console.
-fn caller_id(source: CommandSource) -> Value {
+/// The first argument of a script command: the player's id, or `0` for the
+/// console and for a resource's line.
+fn caller_id(source: &CommandSource) -> Value {
     Value::Int(match source {
-        CommandSource::Console => 0,
-        CommandSource::Player(player) => i64::from(player),
+        CommandSource::Console | CommandSource::Resource(_) => 0,
+        CommandSource::Player(player) => i64::from(*player),
     })
 }
 
 /// Runs a script command, or prints or sets an existing convar, or reports an
 /// unknown name. `lower` is `name` in lower case. A restricted script command
-/// is checked for a player. A player may not read or set a convar by its name.
+/// is checked for a player or a resource. A player or a resource may not read
+/// or set a convar by its name.
 fn run_script_or_convar(
     manager: &ResourceManager,
     name: &str,
     lower: &str,
     args: &[String],
     raw: &str,
-    source: CommandSource,
+    source: &CommandSource,
 ) {
     if let Some(command) = manager.script_command(lower) {
         if command.restricted && !permitted(manager, source, lower) {
@@ -208,6 +214,9 @@ fn run_script_or_convar(
             CommandSource::Player(player) => {
                 info!("player {player} may not read or set the convar `{name}`");
             }
+            CommandSource::Resource(resource) => {
+                warn!("resource `{resource}` may not read or set the convar `{name}`");
+            }
             CommandSource::Console if args.is_empty() => {
                 match manager.convar_kind(name).unwrap_or(ConvarKind::Plain) {
                     ConvarKind::Plain => info!("{name} = \"{value}\""),
@@ -223,6 +232,9 @@ fn run_script_or_convar(
     match source {
         CommandSource::Console => warn!("No such command {name}."),
         CommandSource::Player(player) => debug!("player {player} sent an unknown command `{name}`"),
+        CommandSource::Resource(resource) => {
+            warn!("resource `{resource}` ran an unknown command `{name}`");
+        }
     }
 }
 
@@ -419,7 +431,7 @@ fn quit(manager: &ResourceManager, args: &[String]) {
 
 /// `exec <file>`: runs each line of a file, as the source that runs `exec`. The
 /// path is relative to the working directory.
-fn exec(manager: &ResourceManager, args: &[String], context: CommandContext) {
+fn exec(manager: &ResourceManager, args: &[String], context: &CommandContext) {
     let Some(file) = args.first() else {
         warn!("usage: exec <file>");
         return;
@@ -441,7 +453,7 @@ fn exec(manager: &ResourceManager, args: &[String], context: CommandContext) {
             break;
         }
         match tokenize(line) {
-            Ok(words) => run_words(manager, &words, line.trim(), context.nested()),
+            Ok(words) => run_words(manager, &words, line.trim(), &context.nested()),
             Err(err) => warn!("{file}:{}: {err}", index + 1),
         }
     }

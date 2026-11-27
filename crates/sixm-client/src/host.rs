@@ -76,7 +76,8 @@ impl Host for ClientRuntime {
         }
     }
 
-    fn execute_command(&self, line: &str) {
+    /// The client runs every line itself, so `_invoker` does not change how it runs.
+    fn execute_command(&self, line: &str, _invoker: Option<&ResourceName>) {
         self.queued.borrow_mut().push_back(line.to_owned());
     }
 
