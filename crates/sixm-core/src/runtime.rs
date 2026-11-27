@@ -254,6 +254,19 @@ pub trait ServerHost {
     /// across connections from the same client. Empty for an unknown player.
     fn player_identifiers(&self, player: u32) -> Vec<String>;
 
+    /// Whether `principal` may use `object` under the server's access control
+    /// entries (`add_ace`, `add_principal`).
+    ///
+    /// Objects are dotted paths: an entry for `command` also covers
+    /// `command.stop`. The most specific path that has any entry for the
+    /// principal or one of its parents decides, and at that path a deny beats an
+    /// allow. Without any entry the answer is no.
+    ///
+    /// Every principal inherits from `builtin.everyone`. A connected player
+    /// `player.<id>` also inherits from `identifier.<identifier>` for each of
+    /// its identifiers, so entries can name a player by `license`.
+    fn is_ace_allowed(&self, principal: &str, object: &str) -> bool;
+
     /// Disconnects a player with a reason shown to them. Takes effect after
     /// the current script call returns.
     fn drop_player(&self, player: u32, reason: &str);
