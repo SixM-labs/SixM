@@ -19,8 +19,8 @@ not implemented yet. For exact function signatures, see
 - Manifests use `fxmanifest.lua` (with `__resource.lua` fallback).
 - `start`, `stop`, `restart` and `ensure` accept a `[category]` argument as well as a
   resource name. Manifest `server_only 'yes'` keeps a resource away from clients.
-  Only the exact string `'yes'` enables the flag. A Lua boolean such as
-  `true` raises a manifest error. Another
+  Only the exact string `'yes'` enables the flag. Other strings leave it
+  disabled. A Lua boolean such as `true` raises a manifest error. Another
   client-synced resource can explicitly include a file from it with a path such
   as `@server_only_res/data/config.json`; the file is sent as part of that
   other resource, while the `server_only` resource itself remains unsynced.
@@ -85,6 +85,46 @@ See [manifest.md](../manifest.md) for all manifest rules.
   `player:<id>` and `entity:<id>` bag names.
 - Clients cannot write replicated state (`bag:set(k, v, false)` keeps local
   client state only).
+
+### Script API compatibility additions
+
+- **Lua vectors:** `vector(...)` flattens numbers and vectors, then chooses
+  `vector2`, `vector3` or `vector4` from the component count. Global `dot`,
+  `cross`, and `norm` helpers complement vector methods. `inv` and `slerp`
+  operate on quaternions. JavaScript already has vector methods such as
+  `.dot()` and `.cross()`.
+- **Legacy helpers:** `Citizen.Trace(text)` writes one text argument without
+  `print`'s tab joining and drops one trailing newline. Lua
+  `PerformHttpRequestAwait(url, method, data, headers, options)`
+  returns the four HTTP results and yields in a thread or the script's main
+  chunk. It errors in a context that cannot yield. JavaScript also accepts
+  `addEventListener` and `addNetEventListener` aliases. Raw event listeners
+  can use `addRawEventListener` or `addRawEventHandler` to receive the msgpack
+  argument array as a `Uint8Array` and the event source.
+- **State bag natives:** `GetStateBagValue`, `StateBagHasKey`, and
+  `GetStateBagKeys` address `global`, `player:<id>`, and `entity:<id>` bags
+  directly. `GetStateBagValue` returns `nil` in Lua and `undefined` in
+  JavaScript for a missing bag or key. `StateBagHasKey` returns `false` when
+  the bag or key is missing. `GetStateBagKeys` returns `nil` or `undefined` for
+  an unknown bag. `SetStateBagValue` follows `bag:set` validation and also
+  supports the FiveM msgpack-byte signature. Its `replicated` flag defaults to
+  `false`. On clients, `replicated = false` writes local-only state and
+  replicated writes fail. `EnsureEntityStateBag` is a compatibility no-op.
+- **ACE and server information:** `IsAceAllowed(object)` checks the calling
+  resource's `resource.<name>` principal. Use `IsPlayerAceAllowed` to check a
+  player's permissions. `GetGameName()` returns `sixm` on the server and
+  `headless` on the client. `GetGameBuildNumber()` returns `0`, and
+  `GetInstanceId()` is the process id, stable until that process exits.
+  `GetPlayerGuid` is the hex fingerprint after the player's `license:` prefix.
+  `GetPlayerTimeOnline` counts whole seconds from admission after deferrals.
+  `GetPlayerFromIndex` uses a zero-based index and returns a string player id.
+  `GetHostId` is the lowest connected player id. `SetGameType` and `SetMapName`
+  set the `gametype` and `mapname` values shown in `/info.json`. For a resource,
+  `GetResourceCommands` returns its sorted, lowercase command names, or an
+  empty list if the resource is unknown. See
+  [Lua API: convars and commands](../lua-api.md#convars-and-commands),
+  [Lua API: players](../lua-api.md#players-server-only), and [Lua API:
+  resources](../lua-api.md#resources-and-files).
 
 ### Routing buckets
 

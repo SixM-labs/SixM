@@ -293,7 +293,7 @@ equivalent / no effect / absent".
 | A5 | done | Claude (Haiku impl, Sonnet review) | `git log --grep "^A5:"` |
 | A6 | done | Claude (Haiku impl), ChatGPT (Luna fixes, Terra review) | `git log --grep "^A6:"` |
 | A7 | done | ChatGPT (Luna impl, Terra review) | `git log --grep "^A7:"` |
-| A8 | todo | | |
+| A8 | done on merge | ChatGPT (Luna docs, Terra review) | `git log --grep "^A8:"` |
 | B1 | todo | | |
 | B2 | todo | | |
 | B3 | todo | | |
@@ -320,6 +320,8 @@ equivalent / no effect / absent".
 | G2 | todo | | |
 
 Status values: `todo`, `in progress`, `wip (see log)`, `done`, `blocked (see log)`.
+A8 stays `in progress` until the Phase A pull request merges after both CI
+jobs pass. The merge makes the status `done`.
 
 ## 5. Handoff log
 
@@ -354,3 +356,7 @@ what is next, anything surprising.
   follows c707449. The example registers seven FiveM channels and the
   loopback test verifies that the former vehicle channel names are no
   longer registered. Next: A8 and the Phase A pull request.
+- 2026-11-28, ChatGPT, `feat/fivem-parity-a`: `A8: finalize Phase A migration
+  notes` follows 50df184. Changelog and migration guide cover all Phase A
+  checkpoints. Both CI matrix jobs are required for the Phase A merge.
+  Next after merge: draft B1–B4 on `feat/fivem-parity-b` from updated `main`.
