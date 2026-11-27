@@ -13,6 +13,7 @@ use sixm_core::{EventContext, EventSource, Host, ResourceName, ScriptError, Scri
 use crate::events::Events;
 use crate::exports::Exports;
 use crate::natives;
+use crate::promise::Promises;
 use crate::refs::RefTable;
 use crate::sandbox;
 use crate::scheduler::Sched;
@@ -49,8 +50,11 @@ pub struct LuaRuntime {
     pub(crate) empty_string: mlua::LuaString,
     /// Source of the task being resumed, inherited by the tasks it creates.
     pub(crate) current_source: Cell<EventSource>,
+    /// `(slot, sequence)` of the task being resumed, the one `Await` parks.
+    pub(crate) current_task: Cell<Option<(usize, u64)>>,
     pub(crate) shut: Cell<bool>,
     pub(crate) sched: RefCell<Sched>,
+    pub(crate) promises: RefCell<Promises>,
     pub(crate) events: RefCell<Events>,
     pub(crate) state: RefCell<ChangeHandlers>,
     pub(crate) exports: RefCell<Exports>,
@@ -88,8 +92,10 @@ impl LuaRuntime {
             task_wrapper: helpers.task_wrapper.clone(),
             empty_string,
             current_source: Cell::new(EventSource::Local),
+            current_task: Cell::new(None),
             shut: Cell::new(false),
             sched: RefCell::default(),
+            promises: RefCell::default(),
             events: RefCell::default(),
             state: RefCell::default(),
             exports: RefCell::default(),
@@ -151,12 +157,13 @@ impl LuaRuntime {
     /// finalizer that releases a reference never meets a live borrow.
     fn clear_state(&self) {
         let sched = std::mem::take(&mut *self.sched.borrow_mut());
+        let promises = std::mem::take(&mut *self.promises.borrow_mut());
         let events = std::mem::take(&mut *self.events.borrow_mut());
         let state = std::mem::take(&mut *self.state.borrow_mut());
         let exports = std::mem::take(&mut *self.exports.borrow_mut());
         let refs = std::mem::take(&mut *self.refs.borrow_mut());
         let deferred = std::mem::take(&mut *self.deferred_releases.borrow_mut());
-        drop((sched, events, state, exports, refs, deferred));
+        drop((sched, promises, events, state, exports, refs, deferred));
 
         if let Err(err) = self.drop_globals() {
             tracing::warn!(target: "sixm::script", "[{}] shutdown: {err}", self.resource);

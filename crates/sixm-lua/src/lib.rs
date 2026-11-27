@@ -13,6 +13,7 @@ mod exports;
 mod json;
 mod natives;
 mod players;
+mod promise;
 mod refs;
 mod runtime;
 mod sandbox;
