@@ -281,11 +281,11 @@ fn report(result: Result<(), ManagerError>) {
 }
 
 /// `endpoint_add_udp <ip:port>`: sets the address the server listens on. It
-/// applies at the next start. `endpoint_add_tcp` is an alias, since SixM only
-/// speaks UDP.
+/// applies at the next start. `endpoint_add_tcp` is an alias: TCP (HTTP) and
+/// UDP (the game) share this address.
 fn endpoint(manager: &ResourceManager, args: &[String], alias: bool) {
     if alias {
-        info!("SixM uses UDP only; endpoint_add_tcp is treated as endpoint_add_udp");
+        info!("endpoint_add_tcp sets the address for both TCP (HTTP) and UDP (game)");
     }
     let Some(address) = args.first() else {
         warn!("usage: endpoint_add_udp <ip:port>");

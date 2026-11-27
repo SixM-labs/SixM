@@ -9,6 +9,13 @@ may change the protocol and the API.
 
 ### Added
 
+- HTTP on the server's TCP port (the game address): the built-in `/info.json`,
+  `/players.json` and `/dynamic.json`, and `SetHttpHandler` for resources under
+  `/<resource>/...`. Request bodies, connections, timeouts and the request rate
+  per client address are limited. `sv_exposePlayerIdentifiers` controls the
+  identifiers in `/players.json`, `sv_httpEnabled` switches HTTP off and
+  `sixm_httpHandlerTimeout` sets the handler timeout. A busy TCP port leaves the
+  server running without HTTP.
 - Resource key-value storage (`sixm-kvp`) on the server and the client:
   `SetResourceKvp`, the typed variants, `GetResourceKvp*`, `DeleteResourceKvp`,
   `StartFindKvp`/`FindKvp`/`EndFindKvp` and `FlushResourceKvp`. Reads stay in

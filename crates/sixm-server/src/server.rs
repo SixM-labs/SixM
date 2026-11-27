@@ -6,7 +6,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use sixm_net::{NetError, NetEvent};
+use sixm_net::{NetError, NetEvent, WebExchange};
 use tracing::{error, info, warn};
 
 use crate::commands::{self, CommandContext, CommandSource};
@@ -17,7 +17,7 @@ use crate::manager::ResourceManager;
 const MAX_QUEUED_COMMANDS: usize = 1000;
 
 /// Input for the server loop.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub enum Input {
     /// A console line, read from stdin.
     Line(String),
@@ -25,6 +25,8 @@ pub enum Input {
     Quit(String),
     /// Something that happened on the network. Sent by the network thread.
     Net(NetEvent),
+    /// An HTTP request from the listener, to be answered by the loop.
+    Web(WebExchange),
 }
 
 /// A SixM server: the resource manager, the console, networking and the frame loop.
@@ -80,6 +82,7 @@ impl Server {
     pub fn tick(&self, now: Instant) {
         let started = Instant::now();
         self.manager.deliver_http();
+        self.manager.expire_web(now);
         self.manager.tick_all(now);
         self.drain_commands();
         self.manager.expire_deferrals(now);
@@ -106,6 +109,10 @@ impl Server {
             Input::Line(line) => self.execute(&line),
             Input::Net(event) => {
                 self.manager.handle_net(event);
+                self.drain_commands();
+            }
+            Input::Web(exchange) => {
+                self.manager.handle_web(exchange);
                 self.drain_commands();
             }
             Input::Quit(reason) => {

@@ -13,7 +13,8 @@ use std::time::Instant;
 use sixm_core::{
     ClientHost, ClientTarget, ConvarKind, EntityInfo, EntityKind, EventContext, EventSource,
     FuncRef, GLOBAL_BAG, Host, HttpRequest, PlayerInfo, ResourceName, ResourceState, ScriptError,
-    ScriptRuntime, ServerHost, Value, entity_bag, entity_of_bag, is_finite, player_of_bag,
+    ScriptRuntime, ServerHost, Value, WebReply, entity_bag, entity_of_bag, is_finite,
+    player_of_bag,
 };
 use sixm_kvp::KvpStore;
 use sixm_lua::LuaRuntime;
@@ -92,6 +93,10 @@ pub struct TestHost {
     /// HTTP requests started by scripts, as `(resource, request, callback)`.
     /// Nothing performs them: a test delivers the outcome by calling `callback`.
     pub http_requests: RefCell<Vec<(ResourceName, HttpRequest, FuncRef)>>,
+    /// HTTP handlers registered by `SetHttpHandler`, as `(resource, function)`.
+    pub web_handlers: RefCell<Vec<(ResourceName, FuncRef)>>,
+    /// Steps of the answers that handlers gave, as `(request, step)`, in order.
+    pub web_replies: RefCell<Vec<(u64, WebReply)>>,
     /// Access grants as `(principal, object)` pairs. A principal has exactly the
     /// objects it is granted: the test host does not model inheritance.
     pub grants: RefCell<Vec<(String, String)>>,
@@ -456,6 +461,17 @@ impl ServerHost for TestHost {
 
     fn player_ped(&self, player: u32) -> Option<u32> {
         self.player_peds.borrow().get(&player).copied()
+    }
+
+    fn set_web_handler(&self, resource: &ResourceName, handler: FuncRef) {
+        self.web_handlers
+            .borrow_mut()
+            .push((resource.clone(), handler));
+    }
+
+    fn web_reply(&self, request: u64, reply: WebReply) -> Result<(), ScriptError> {
+        self.web_replies.borrow_mut().push((request, reply));
+        Ok(())
     }
 
     fn player_routing_bucket(&self, player: u32) -> Option<u32> {

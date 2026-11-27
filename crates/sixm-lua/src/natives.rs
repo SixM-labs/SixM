@@ -22,6 +22,7 @@ use crate::sandbox::Helpers;
 use crate::scheduler::delay_from_value;
 use crate::state;
 use crate::vector;
+use crate::web;
 
 /// Process-wide clock behind `GetGameTimer`.
 static START: OnceLock<Instant> = OnceLock::new();
@@ -53,6 +54,7 @@ pub(crate) fn install(runtime: &Rc<LuaRuntime>, helpers: &Helpers) -> mlua::Resu
             players::install(lua, weak, &globals)?;
             entities::install_server(lua, weak, &globals)?;
             http::install(lua, weak, &globals)?;
+            web::install(lua, weak, &globals)?;
             install_server_convars(lua, weak, &globals)?;
         }
         Side::Client { local_player } => {

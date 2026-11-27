@@ -20,6 +20,13 @@ pub(crate) const ENDPOINT: &str = "endpoint_add_udp";
 const MAX_CLIENTS: &str = "sv_maxclients";
 /// Convar naming the server, shown to players when they connect.
 const SERVER_NAME: &str = "sv_hostname";
+/// Whether `/players.json` lists identifiers. Off unless set to `true`.
+const EXPOSE_IDENTIFIERS: &str = "sv_exposePlayerIdentifiers";
+/// Whether the HTTP listener runs. On unless set to `false` or `0`.
+const HTTP_ENABLED: &str = "sv_httpEnabled";
+/// Convar naming how many seconds a resource's HTTP handler may take to
+/// complete its response.
+const HTTP_HANDLER_TIMEOUT: &str = "sixm_httpHandlerTimeout";
 /// Convar naming how many seconds a deferred connection may wait for `done`.
 const DEFERRAL_TIMEOUT: &str = "sixm_deferralTimeout";
 /// Convar naming how many seconds an HTTP request from `PerformHttpRequest`
@@ -48,6 +55,11 @@ const MAX_CLIENTS_LIMIT: i64 = 1024;
 const DEFAULT_SERVER_NAME: &str = "SixM Server";
 /// Deferral timeout in seconds when `sixm_deferralTimeout` is not set.
 const DEFAULT_DEFERRAL_TIMEOUT: i64 = 120;
+/// Handler timeout in seconds when `sixm_httpHandlerTimeout` is not set, and
+/// the clamp. The listener's own limit in `sixm-net` is above the largest value.
+const DEFAULT_HTTP_HANDLER_TIMEOUT: i64 = 25;
+const MIN_HTTP_HANDLER_TIMEOUT: i64 = 1;
+const MAX_HTTP_HANDLER_TIMEOUT: i64 = 120;
 /// HTTP request timeout in seconds when `sixm_httpTimeout` is not set.
 const DEFAULT_HTTP_TIMEOUT: i64 = 30;
 /// Smallest and largest HTTP timeout in seconds the server honours.
@@ -148,6 +160,15 @@ impl Convars {
             .map(|previous| previous.kind)
     }
 
+    /// Every server-info convar as `(name, value)`, in name order.
+    pub(crate) fn server_info(&self) -> Vec<(String, String)> {
+        self.values
+            .iter()
+            .filter(|(_, entry)| entry.kind == ConvarKind::ServerInfo)
+            .map(|(name, entry)| (name.clone(), entry.value.clone()))
+            .collect()
+    }
+
     /// Every replicated convar as `(name, value)`, in name order.
     pub(crate) fn replicated(&self) -> Vec<(String, String)> {
         self.values
@@ -233,6 +254,37 @@ impl Convars {
         usize::try_from(workers.clamp(MIN_HTTP_WORKERS, MAX_HTTP_WORKERS)).unwrap_or(1)
     }
 
+    /// Whether the HTTP listener runs, from `sv_httpEnabled`. Only `false` and
+    /// `0` turn it off.
+    pub(crate) fn http_enabled(&self) -> bool {
+        self.get(HTTP_ENABLED).is_none_or(|value| {
+            let value = value.trim();
+            !(value.eq_ignore_ascii_case("false") || value == "0")
+        })
+    }
+
+    /// How long a resource's HTTP handler may take to complete its response,
+    /// from `sixm_httpHandlerTimeout`. Clamped to `1` to `120` seconds; a value
+    /// that is not a number means 25.
+    pub(crate) fn http_handler_timeout(&self) -> Duration {
+        let seconds = self
+            .get(HTTP_HANDLER_TIMEOUT)
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(DEFAULT_HTTP_HANDLER_TIMEOUT);
+        Duration::from_secs(
+            seconds
+                .clamp(MIN_HTTP_HANDLER_TIMEOUT, MAX_HTTP_HANDLER_TIMEOUT)
+                .unsigned_abs(),
+        )
+    }
+
+    /// Whether `/players.json` lists player identifiers, from
+    /// `sv_exposePlayerIdentifiers`. Only the value `true` turns it on.
+    pub(crate) fn expose_player_identifiers(&self) -> bool {
+        self.get(EXPOSE_IDENTIFIERS)
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+    }
+
     /// The model name of each player's ped, from `sixm_playerModel`.
     pub(crate) fn player_model(&self) -> &str {
         self.get(PLAYER_MODEL).unwrap_or(DEFAULT_PLAYER_MODEL)
@@ -273,6 +325,40 @@ mod tests {
             convars.set(HTTP_WORKERS, value, ConvarKind::Plain);
             assert_eq!(convars.http_workers(), expected, "{value}");
         }
+    }
+
+    #[test]
+    fn http_handler_timeout_default_clamp_and_fall_back() {
+        let mut convars = Convars::new();
+        assert_eq!(convars.http_handler_timeout(), Duration::from_secs(25));
+        for (value, expected) in [("1", 1), ("0", 1), ("500", 120), ("slow", 25)] {
+            convars.set(HTTP_HANDLER_TIMEOUT, value, ConvarKind::Plain);
+            assert_eq!(
+                convars.http_handler_timeout(),
+                Duration::from_secs(expected),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn http_is_on_unless_switched_off() {
+        let mut convars = Convars::new();
+        assert!(convars.http_enabled());
+        for (value, expected) in [("false", false), ("0", false), ("true", true), ("1", true)] {
+            convars.set(HTTP_ENABLED, value, ConvarKind::Plain);
+            assert_eq!(convars.http_enabled(), expected, "{value}");
+        }
+    }
+
+    #[test]
+    fn identifiers_are_hidden_unless_exposed() {
+        let mut convars = Convars::new();
+        assert!(!convars.expose_player_identifiers());
+        convars.set(EXPOSE_IDENTIFIERS, "true", ConvarKind::Plain);
+        assert!(convars.expose_player_identifiers());
+        convars.set(EXPOSE_IDENTIFIERS, "1", ConvarKind::Plain);
+        assert!(!convars.expose_player_identifiers());
     }
 
     #[test]
