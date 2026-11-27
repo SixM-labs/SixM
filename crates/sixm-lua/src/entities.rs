@@ -14,7 +14,7 @@ use mlua::{Function, Lua, Table, Value as LuaValue};
 use sixm_core::{EntityInfo, EntityKind, entity_bag, entity_of_bag, joaat};
 
 use crate::client::client;
-use crate::players::{server, whole_number};
+use crate::players::{player_id, server, whole_number};
 use crate::runtime::{LuaRuntime, bind_fn, lua_err};
 use crate::state::state_bag;
 use crate::vector::{Vector, number_of};
@@ -94,6 +94,7 @@ pub(crate) fn install_server(
         .chain(change_functions(lua, weak)?)
         .chain(owner_functions(lua, weak)?)
         .chain(list_functions(lua, weak)?)
+        .chain(bucket_functions(lua, weak)?)
     {
         globals.raw_set(name, function)?;
     }
@@ -273,6 +274,88 @@ fn owner_functions(
             .map_or(-1, i64::from))
     })?;
     Ok(vec![("NetworkGetEntityOwner", owner)])
+}
+
+/// The routing bucket functions. The server decides the buckets, so these
+/// exist only there. A setter on an unknown player or entity does nothing, and
+/// a read of one gives bucket 0.
+fn bucket_functions(
+    lua: &Lua,
+    weak: &Weak<LuaRuntime>,
+) -> mlua::Result<Vec<(&'static str, Function)>> {
+    let set_player_bucket = bind_fn(lua, weak, |rt, (player, bucket): (LuaValue, LuaValue)| {
+        let bucket = bucket_id(&bucket, "SetPlayerRoutingBucket")?;
+        if let Some(id) = player_id(&player) {
+            server(&*rt.host()?)?.set_player_routing_bucket(id, bucket);
+        }
+        Ok(())
+    })?;
+    let player_bucket = bind_fn(lua, weak, |rt, (player,): (LuaValue,)| {
+        let Some(id) = player_id(&player) else {
+            return Ok(0_i64);
+        };
+        let bucket = server(&*rt.host()?)?.player_routing_bucket(id);
+        Ok(i64::from(bucket.unwrap_or(0)))
+    })?;
+    let set_entity_bucket = bind_fn(lua, weak, |rt, (entity, bucket): (LuaValue, LuaValue)| {
+        let bucket = bucket_id(&bucket, "SetEntityRoutingBucket")?;
+        if let Some(id) = entity_id(&entity) {
+            server(&*rt.host()?)?.set_entity_routing_bucket(id, bucket);
+        }
+        Ok(())
+    })?;
+    let entity_bucket = bind_fn(lua, weak, |rt, (entity,): (LuaValue,)| {
+        let Some(id) = entity_id(&entity) else {
+            return Ok(0_i64);
+        };
+        let bucket = server(&*rt.host()?)?.entity_routing_bucket(id);
+        Ok(i64::from(bucket.unwrap_or(0)))
+    })?;
+    let players_in_bucket = bind_fn(lua, weak, |rt, (bucket,): (LuaValue,)| {
+        let bucket = bucket_id(&bucket, "GetPlayersInRoutingBucket")?;
+        Ok(server(&*rt.host()?)?.players_in_routing_bucket(bucket))
+    })?;
+    let set_population = bind_fn(lua, weak, |rt, (bucket, enabled): (LuaValue, bool)| {
+        let bucket = bucket_id(&bucket, "SetRoutingBucketPopulationEnabled")?;
+        server(&*rt.host()?)?.set_routing_bucket_population_enabled(bucket, enabled);
+        Ok(())
+    })?;
+    let population = bind_fn(lua, weak, |rt, (bucket,): (LuaValue,)| {
+        let bucket = bucket_id(&bucket, "GetRoutingBucketPopulationEnabled")?;
+        Ok(server(&*rt.host()?)?.routing_bucket_population_enabled(bucket))
+    })?;
+    let set_lockdown = bind_fn(lua, weak, |rt, (bucket, mode): (LuaValue, String)| {
+        let bucket = bucket_id(&bucket, "SetRoutingBucketEntityLockdownMode")?;
+        server(&*rt.host()?)?
+            .set_routing_bucket_entity_lockdown_mode(bucket, &mode)
+            .map_err(lua_err)
+    })?;
+    let lockdown = bind_fn(lua, weak, |rt, (bucket,): (LuaValue,)| {
+        let bucket = bucket_id(&bucket, "GetRoutingBucketEntityLockdownMode")?;
+        Ok(server(&*rt.host()?)?.routing_bucket_entity_lockdown_mode(bucket))
+    })?;
+    Ok(vec![
+        ("SetPlayerRoutingBucket", set_player_bucket),
+        ("GetPlayerRoutingBucket", player_bucket),
+        ("SetEntityRoutingBucket", set_entity_bucket),
+        ("GetEntityRoutingBucket", entity_bucket),
+        ("GetPlayersInRoutingBucket", players_in_bucket),
+        ("SetRoutingBucketPopulationEnabled", set_population),
+        ("GetRoutingBucketPopulationEnabled", population),
+        ("SetRoutingBucketEntityLockdownMode", set_lockdown),
+        ("GetRoutingBucketEntityLockdownMode", lockdown),
+    ])
+}
+
+/// Reads a routing bucket: a whole number from 0 to 4294967295.
+fn bucket_id(value: &LuaValue, function: &str) -> mlua::Result<u32> {
+    whole_number(value)
+        .and_then(|number| u32::try_from(number).ok())
+        .ok_or_else(|| {
+            mlua::Error::runtime(format!(
+                "{function}: the bucket must be a whole number from 0 to 4294967295"
+            ))
+        })
 }
 
 /// The functions that list the entities of each kind.
