@@ -40,6 +40,8 @@ pub(crate) fn install(runtime: &Rc<LuaRuntime>, helpers: &Helpers) -> mlua::Resu
     )?;
     globals.raw_set("source", "")?;
     install_scheduling(lua, weak, &globals, helpers)?;
+    let citizen: Table = globals.raw_get("Citizen")?;
+    crate::promise::install(runtime, &globals, &citizen)?;
     install_events(lua, weak, &globals)?;
     install_host(lua, weak, &globals, runtime.side)?;
     entities::install(lua, weak, &globals)?;

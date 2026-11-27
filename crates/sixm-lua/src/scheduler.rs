@@ -27,6 +27,8 @@ struct Task {
     seq: u64,
     /// The handler, passed as the first resume argument to the task wrapper.
     pending: Option<Function>,
+    /// Arguments for the next resume, set when a promise wakes the task.
+    wake: MultiValue,
 }
 
 /// Scheduler state. Lives in a `RefCell` and is never borrowed across a Lua call.
@@ -43,11 +45,23 @@ pub(crate) struct Sched {
     next_seq: u64,
     /// Pending `SetTimeout` tasks, keyed by id, so `ClearTimeout` can find them.
     timeouts: HashMap<u64, usize>,
+    /// Set by `Await` just before it yields, so the yield parks the task without a deadline.
+    parked_on_promise: bool,
 }
 
 impl Sched {
     fn is_live(&self, slot: usize, seq: u64) -> bool {
         matches!(self.tasks.get(slot), Some(Some(task)) if task.seq == seq)
+    }
+
+    /// Takes the arguments queued for a live task. `None` when the task has finished.
+    fn take_wake(&mut self, slot: usize, seq: u64) -> Option<MultiValue> {
+        match self.tasks.get_mut(slot) {
+            Some(Some(task)) if task.seq == seq => {
+                Some(std::mem::replace(&mut task.wake, MultiValue::new()))
+            }
+            _ => None,
+        }
     }
 
     fn timer_due(&self, now: Instant) -> bool {
@@ -80,6 +94,7 @@ impl LuaRuntime {
             invoker,
             seq,
             pending: Some(handler),
+            wake: MultiValue::new(),
         };
         let slot = if let Some(slot) = sched.free_slots.pop() {
             sched.tasks[slot] = Some(task);
@@ -94,6 +109,26 @@ impl LuaRuntime {
     /// Queues an existing task to run on the next frame.
     pub(crate) fn schedule_next_frame(&self, slot: usize, seq: u64) {
         self.sched.borrow_mut().next_frame.push((slot, seq));
+    }
+
+    /// Queues a task to run on the next frame with `args` as its resume arguments.
+    /// Does nothing when the task has finished.
+    pub(crate) fn schedule_wake(&self, slot: usize, seq: u64, args: MultiValue) {
+        let mut guard = self.sched.borrow_mut();
+        let sched = &mut *guard;
+        if !sched.is_live(slot, seq) {
+            return;
+        }
+        if let Some(Some(task)) = sched.tasks.get_mut(slot) {
+            task.wake = args;
+        }
+        sched.next_frame.push((slot, seq));
+    }
+
+    /// Tells the scheduler that the task yielding now waits on a promise, so it
+    /// is not put on a timer or the next-frame list. A promise wakes it.
+    pub(crate) fn mark_parked_on_promise(&self) {
+        self.sched.borrow_mut().parked_on_promise = true;
     }
 
     /// Creates a `SetTimeout` task that starts after `delay` and returns its id.
@@ -117,9 +152,17 @@ impl LuaRuntime {
         true
     }
 
-    /// Runs the frame: first every task queued for the next frame, then every timer that is due.
+    /// Runs the frame: sweeps references, runs the queued tasks and due timers,
+    /// then reports the promises rejected in the previous frame that nothing handled.
     pub(crate) fn run_frame(&self, now: Instant) {
         self.sweep_refs();
+        let rejected = self.take_rejected();
+        self.run_queued(now);
+        self.report_unhandled(rejected);
+    }
+
+    /// Runs every task queued for the next frame, then every timer that is due.
+    fn run_queued(&self, now: Instant) {
         let frame = {
             let mut sched = self.sched.borrow_mut();
             if sched.next_frame.is_empty() && !sched.timer_due(now) {
@@ -129,8 +172,9 @@ impl LuaRuntime {
             std::mem::replace(&mut sched.next_frame, spare)
         };
         for &(slot, seq) in &frame {
-            if self.sched.borrow().is_live(slot, seq) {
-                self.run(slot, now, MultiValue::new());
+            let wake = self.sched.borrow_mut().take_wake(slot, seq);
+            if let Some(args) = wake {
+                self.run(slot, now, args);
             }
         }
         let mut frame = frame;
@@ -192,10 +236,11 @@ impl LuaRuntime {
                         task.source,
                         task.invoker.clone(),
                         task.pending.take(),
+                        task.seq,
                     )
                 })
         };
-        let Some((thread, source, invoker, pending)) = taken else {
+        let Some((thread, source, invoker, pending, seq)) = taken else {
             return;
         };
         let resume_args = match pending {
@@ -209,9 +254,11 @@ impl LuaRuntime {
         };
 
         let outer = self.current_source.replace(source);
+        let outer_task = self.current_task.replace(Some((slot, seq)));
         let outer_invoker = std::mem::replace(&mut *self.current_invoker.borrow_mut(), invoker);
         let result = self.step(slot, thread, source, now, resume_args);
         *self.current_invoker.borrow_mut() = outer_invoker;
+        self.current_task.set(outer_task);
         self.current_source.set(outer);
         if let Err(err) = result {
             tracing::error!(target: "sixm::script", "[{}] {err}", self.resource);
@@ -250,6 +297,9 @@ impl LuaRuntime {
     fn park(&self, slot: usize, now: Instant, yielded: Option<&LuaValue>) {
         let delay = yielded.map_or(Duration::ZERO, delay_from_value);
         let mut sched = self.sched.borrow_mut();
+        if std::mem::take(&mut sched.parked_on_promise) {
+            return;
+        }
         let Some(seq) = sched
             .tasks
             .get(slot)

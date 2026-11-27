@@ -29,6 +29,49 @@ Frames run at `sixm_tickRate` (see [server.md](server.md) and
 deadline has passed. It does not wait for the next frame. A wait of zero, or of
 no delay, resumes on the next frame.
 
+## Promises
+
+A promise is a value that settles once, later. Promises belong to the resource
+that made them. They cannot be passed through exports, events or state bags:
+the call fails with "cannot pass a userdata value".
+
+| Name | Side | Signature and result |
+|---|---|---|
+| `promise.new` | both | `promise.new()`. Returns a pending promise. |
+| `promise.all` | both | `promise.all(list)`. Returns a promise that fulfils with an array of the values, in order, once every entry is fulfilled. It rejects with the first rejection. An empty list fulfils at once with an empty table. An entry that is not a promise counts as fulfilled. |
+| `promise.first` | both | `promise.first(list)`. Settles like the first entry to settle. An empty list stays pending. |
+| `Await` / `Citizen.Await` | both | `Await(p)`. Returns the value of `p`, or raises its reason as an error. In a thread, a pending `p` parks the thread until it settles. Outside a thread it raises an error. |
+
+Methods of a promise:
+
+| Method | Result |
+|---|---|
+| `p:resolve(value)` | Fulfils `p` with `value`. If `value` is a promise, `p` adopts its eventual state. |
+| `p:reject(reason)` | Rejects `p` with `reason`. |
+| `p:next(onFulfilled, onRejected)` | Returns a new promise. Either callback may be `nil`. |
+
+- Only the first `resolve` or `reject` counts. Later calls do nothing.
+- Resolving a promise with itself rejects it.
+- A callback given to `next` runs as its own thread on the next frame. It never
+  runs inside `resolve`. Its return value fulfils the new promise, and a
+  returned promise is adopted. An error it raises rejects the new promise with
+  that error. A missing callback passes the value or the reason through.
+- A callback may call `Await` or `Wait`.
+- A thread parked in `Await` does not run on any frame until its promise
+  settles. It then resumes on the next frame with the outcome.
+- A rejection that no `next` or `Await` handles by the end of the frame after
+  the rejection is logged once as a warning, with the resource name and the
+  reason.
+
+A function that returns its result through a callback can be wrapped in a
+promise:
+
+```lua
+local p = promise.new()
+exports.other:get(function(v) p:resolve(v) end)
+local v = Citizen.Await(p)
+```
+
 ## Events
 
 | Name | Side | Signature and result |
@@ -346,7 +389,7 @@ receives every entity: there is no distance scoping yet.
 | `IsDuplicityVersion` | both | `IsDuplicityVersion()`. Returns `true` on the server and `false` on the client. |
 | `print` | both | Writes a line to the log, prefixed with the resource name. Arguments are joined with tabs. |
 | `source` | both | Global. See the events section. |
-| `Citizen` | both | A table with `Wait`, `CreateThread`, `CreateThreadNow`, `SetTimeout` and `ClearTimeout`. |
+| `Citizen` | both | A table with `Wait`, `CreateThread`, `CreateThreadNow`, `SetTimeout`, `ClearTimeout` and `Await`. The `promise` table is a global, see [Promises](#promises). |
 
 ## Sandbox differences
 
