@@ -9,7 +9,7 @@ use crate::files::{FileHash, ResourceEntry};
 use crate::wire::{Args, StateValue};
 
 /// Version of the wire protocol. A client must send it in its `Hello`.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Application protocol identifier negotiated during the TLS handshake.
 pub(crate) const ALPN: &[u8] = b"sixm/1";
@@ -74,6 +74,49 @@ pub(crate) const MAX_TRANSFORMS_PER_MESSAGE: usize = 1024;
 
 /// Reason sent to every player and pending connection at shutdown.
 pub(crate) const SHUTTING_DOWN: &str = "server shutting down";
+
+/// Largest encoded size of a latent event's name and arguments, in bytes. The
+/// sender refuses a larger event, and the receiver aborts a stream that
+/// announces one.
+pub const MAX_LATENT_EVENT_LEN: usize = 16 * 1024 * 1024;
+
+/// Lowest pacing rate of a latent event, in bytes per second. Lower rates are
+/// raised to it.
+pub const MIN_LATENT_RATE: u64 = 1024;
+
+/// Default latent event pacing rate used when callers pass zero.
+pub const DEFAULT_LATENT_RATE: u64 = 25_000;
+
+/// Highest pacing rate of a latent event, in bytes per second. Higher rates are
+/// lowered to it.
+pub const MAX_LATENT_RATE: u64 = 100 * 1024 * 1024;
+
+/// Latent streams one connection may have in progress at once. A stream beyond
+/// that is stopped by the receiver.
+pub(crate) const MAX_LATENT_STREAMS: usize = 4;
+
+/// Latent events queued for one connection before the player is kicked.
+pub(crate) const LATENT_QUEUE_LEN: usize = 16;
+
+/// Reason sent to players whose latent event queue overflowed.
+pub(crate) const LATENT_QUEUE_OVERFLOW: &str = "latent queue overflow";
+
+/// Time added to the time a latent stream needs at [`MIN_LATENT_RATE`], so that
+/// a short stream is not cut off by timer granularity.
+pub(crate) const LATENT_GRACE: Duration = Duration::from_secs(5);
+
+/// Application error code with which a receiver stops a latent stream it refuses
+/// because too many are in progress.
+pub(crate) const LATENT_REFUSED: u32 = 3;
+
+/// Application error code with which a receiver stops a latent stream it aborts.
+pub(crate) const LATENT_ABORTED: u32 = 4;
+
+/// First byte of every unidirectional stream: a file transfer from the server.
+pub(crate) const STREAM_KIND_FILE: u8 = 1;
+
+/// First byte of every unidirectional stream: a latent event.
+pub(crate) const STREAM_KIND_LATENT: u8 = 2;
 
 /// Messages a client sends on the stream. Decoding is done by the wire module,
 /// which must know every variant's tag.

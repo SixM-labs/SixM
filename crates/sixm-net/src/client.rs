@@ -23,6 +23,7 @@ use crate::entities::EntityEntry;
 use crate::error::NetError;
 use crate::files::{FileHash, MAX_FILE_SIZE, ResourceEntry, hash_hex};
 use crate::identity::{Credentials, Fingerprint, Identity};
+use crate::latent::{self, LatentJob};
 use crate::protocol::{
     ClientMessage, MAX_FRAME, MAX_PLAYER_NAME_LEN, PROTOCOL_VERSION, SERVER_NAME, ServerMessage,
 };
@@ -95,6 +96,7 @@ pub struct NetClient {
     server_name: String,
     fingerprint: Fingerprint,
     commands: Option<mpsc::UnboundedSender<Arc<[u8]>>>,
+    latent: Option<mpsc::Sender<LatentJob>>,
     events: Receiver<ClientEvent>,
     pending: Pending,
     thread: Option<JoinHandle<()>>,
@@ -179,6 +181,7 @@ impl NetClient {
         let credentials = Credentials::load(identity)?;
         let fingerprint = credentials.fingerprint();
         let (commands, command_rx) = mpsc::unbounded_channel();
+        let (latent_tx, latent_rx) = mpsc::channel(crate::protocol::LATENT_QUEUE_LEN);
         let (events_tx, events) = std_mpsc::channel();
         let (ready_tx, ready_rx) = sync_channel(1);
         let pending = Pending::default();
@@ -189,6 +192,7 @@ impl NetClient {
                 let link = Link {
                     ready: ready_tx,
                     commands: command_rx,
+                    latent: latent_rx,
                     events: events_tx,
                     pending: thread_pending,
                     on_deferral: Box::new(on_deferral),
@@ -202,6 +206,7 @@ impl NetClient {
                 server_name: welcome.server_name,
                 fingerprint,
                 commands: Some(commands),
+                latent: Some(latent_tx),
                 events,
                 pending,
                 thread: Some(thread),
@@ -241,6 +246,24 @@ impl NetClient {
             .ok_or(NetError::Closed)?
             .send(frame)
             .map_err(|_| NetError::Closed)
+    }
+
+    /// Sends an event over its own paced QUIC stream so it does not block normal events.
+    /// `bps` is bytes per second, clamped to [`crate::MIN_LATENT_RATE`]..
+    /// [`crate::MAX_LATENT_RATE`]; zero selects [`crate::DEFAULT_LATENT_RATE`].
+    pub fn send_latent_event(&self, name: &str, args: &[Value], bps: u64) -> Result<(), NetError> {
+        let queue = self.latent.as_ref().ok_or(NetError::Closed)?;
+        let permit = queue.try_reserve().map_err(|err| match err {
+            mpsc::error::TrySendError::Full(()) => NetError::QueueFull,
+            mpsc::error::TrySendError::Closed(()) => NetError::Closed,
+        })?;
+        let body = latent::encode_body(name, args)?;
+        let job = LatentJob {
+            body: Arc::new(body),
+            bytes_per_second: latent::pacing_rate(bps),
+        };
+        permit.send(job);
+        Ok(())
     }
 
     /// Sends a console line to the server, which runs it with this player's
@@ -354,6 +377,7 @@ struct Established {
 struct Link {
     ready: SyncSender<Result<Welcome, NetError>>,
     commands: mpsc::UnboundedReceiver<Arc<[u8]>>,
+    latent: mpsc::Receiver<LatentJob>,
     events: Sender<ClientEvent>,
     pending: Pending,
     /// Called with every progress message received during the handshake.
@@ -371,6 +395,7 @@ fn run_thread(
     let Link {
         ready,
         commands,
+        latent,
         events,
         pending,
         mut on_deferral,
@@ -400,7 +425,7 @@ fn run_thread(
                 return;
             }
         };
-        session(established, commands, events, pending).await;
+        session(established, commands, latent, events, pending).await;
     });
 }
 
@@ -532,6 +557,7 @@ async fn greet(
 async fn session(
     established: Established,
     mut commands: mpsc::UnboundedReceiver<Arc<[u8]>>,
+    mut latent_jobs: mpsc::Receiver<LatentJob>,
     events: Sender<ClientEvent>,
     pending: Pending,
 ) {
@@ -545,10 +571,26 @@ async fn session(
     let mut reader = tokio::spawn(pump_events(
         recv,
         connection.clone(),
-        events,
+        events.clone(),
         Arc::clone(&pending),
     ));
-    let files = tokio::spawn(accept_files(connection.clone(), Arc::clone(&pending)));
+    let files = tokio::spawn(accept_streams(
+        connection.clone(),
+        Arc::clone(&pending),
+        events.clone(),
+    ));
+    let latent_connection = connection.clone();
+    let latent_sender = tokio::spawn(async move {
+        let mut seq = 0;
+        while let Some(job) = latent_jobs.recv().await {
+            if latent::send(&latent_connection, &mut seq, &job, None)
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
     loop {
         tokio::select! {
             outgoing = commands.recv() => match outgoing {
@@ -564,16 +606,93 @@ async fn session(
     }
     reader.abort();
     files.abort();
+    latent_sender.abort();
     // Waiters for files that will never arrive see the connection end.
     lock(&pending).clear();
     close_connection(&connection, 0, "client disconnected");
     let _ = tokio::time::timeout(DISCONNECT_GRACE, endpoint.wait_idle()).await;
+    let _ = reader.await;
+    let _ = files.await;
+    let _ = latent_sender.await;
 }
 
 /// Accepts the unidirectional streams that carry requested files, one task each.
-async fn accept_files(connection: Connection, pending: Pending) {
-    while let Ok(recv) = connection.accept_uni().await {
-        tokio::spawn(receive_file(recv, Arc::clone(&pending)));
+async fn accept_streams(connection: Connection, pending: Pending, events: Sender<ClientEvent>) {
+    let slots = Arc::new(tokio::sync::Semaphore::new(
+        crate::protocol::MAX_LATENT_STREAMS,
+    ));
+    let sequencer = Arc::new(Mutex::new(latent::Sequencer::default()));
+    let mut tasks = tokio::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            Some(_) = tasks.join_next(), if !tasks.is_empty() => {},
+            incoming = connection.accept_uni(), if tasks.len() < crate::protocol::MAX_LATENT_STREAMS + crate::protocol::MAX_CONCURRENT_TRANSFERS => match incoming {
+                Ok(recv) => { tasks.spawn(dispatch_stream(recv, Arc::clone(&pending), events.clone(), Arc::clone(&slots), Arc::clone(&sequencer), connection.clone())); },
+                Err(_) => break,
+            },
+            _ = connection.closed() => break,
+        }
+    }
+    tasks.abort_all();
+}
+
+async fn dispatch_stream(
+    mut recv: RecvStream,
+    pending: Pending,
+    events: Sender<ClientEvent>,
+    slots: Arc<tokio::sync::Semaphore>,
+    sequencer: Arc<Mutex<latent::Sequencer>>,
+    connection: Connection,
+) {
+    let Some(kind) = latent::read_kind(&mut recv).await else {
+        protocol_violation(
+            &connection,
+            &events,
+            "server stream ended before its kind byte",
+        );
+        return;
+    };
+    match kind {
+        crate::protocol::STREAM_KIND_FILE => receive_file(recv, pending).await,
+        crate::protocol::STREAM_KIND_LATENT => {
+            let Some(arrival) = latent::receive(recv, slots, None).await else {
+                protocol_violation(
+                    &connection,
+                    &events,
+                    "server latent stream ended before its sequence header",
+                );
+                return;
+            };
+            {
+                let ready = match sequencer
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(arrival)
+                {
+                    Ok(ready) => ready,
+                    Err(err) => {
+                        protocol_violation(&connection, &events, &err.to_string());
+                        return;
+                    }
+                };
+                for item in ready {
+                    if events
+                        .send(ClientEvent::Event {
+                            name: item.name,
+                            args: item.args,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+        _ => protocol_violation(
+            &connection,
+            &events,
+            "unexpected server unidirectional stream",
+        ),
     }
 }
 

@@ -395,6 +395,22 @@ fn shutdown_kicks_every_player() {
     }
 }
 
+#[test]
+fn ping_tracks_the_lifetime_of_a_connection() {
+    let server = start();
+    let addr = server.net.local_addr();
+    let handle =
+        thread::spawn(move || NetClient::connect(addr, "jo", &Identity::Ephemeral, TIMEOUT));
+    let (id, _) = expect_connecting(&server);
+    assert!(server.net.connection_ping(id).is_some());
+    server.net.accept(id, 7);
+    let client = handle.join().expect("thread").expect("accepted");
+    assert!(server.net.connection_ping(id).is_some());
+    client.disconnect();
+    expect_disconnected(&server, 7);
+    assert_eq!(server.net.connection_ping(id), None);
+}
+
 fn nested_values() -> Vec<Value> {
     vec![
         Value::Nil,
@@ -1043,6 +1059,9 @@ fn many_requests_on_one_connection_are_all_served() {
                 .await
                 .expect("a transfer starts in time")
                 .expect("transfer stream opens");
+            let mut kind = [0_u8; 1];
+            stream.read_exact(&mut kind).await.expect("stream kind");
+            assert_eq!(kind[0], 1);
             let mut header = [0_u8; 40];
             stream.read_exact(&mut header).await.expect("header");
             let mut hash = [0_u8; 32];
@@ -1063,6 +1082,191 @@ fn many_requests_on_one_connection_are_all_served() {
             assert_eq!(body, &contents[index]);
         }
     });
+}
+
+#[test]
+fn latent_events_travel_both_ways_in_order() {
+    let server = start();
+    let client = join(&server, "latent", 91);
+    for name in ["client-a", "client-b", "client-c"] {
+        client
+            .send_latent_event(name, &[Value::Int(7)], u64::MAX)
+            .expect("latent event queues");
+    }
+    for expected in ["client-a", "client-b", "client-c"] {
+        match next_event(&server) {
+            NetEvent::Event {
+                player: 91,
+                name,
+                args,
+            } => {
+                assert_eq!(name, expected);
+                assert_eq!(args, [Value::Int(7)]);
+            }
+            other => panic!("expected latent event, got {other:?}"),
+        }
+    }
+    for name in ["server-a", "server-b", "server-c"] {
+        server
+            .net
+            .send_latent_event(Some(91), name, &[Value::Int(8)], u64::MAX)
+            .expect("latent event queues");
+    }
+    for expected in ["server-a", "server-b", "server-c"] {
+        match client_event(&client) {
+            ClientEvent::Event { name, args } => {
+                assert_eq!(name, expected);
+                assert_eq!(args, [Value::Int(8)]);
+            }
+            other => panic!("expected latent event, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn latent_broadcast_reaches_every_connected_player() {
+    let server = start();
+    let first = join(&server, "first", 93);
+    let second = join(&server, "second", 94);
+    server
+        .net
+        .send_latent_event(None, "broadcast", &[Value::Int(3)], u64::MAX)
+        .expect("latent broadcast queues");
+    for client in [&first, &second] {
+        match client_event(client) {
+            ClientEvent::Event { name, args } => {
+                assert_eq!(name, "broadcast");
+                assert_eq!(args, [Value::Int(3)]);
+            }
+            other => panic!("expected latent broadcast, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn server_keeps_sending_after_client_stops_one_latent_stream() {
+    let server = start();
+    new_runtime().block_on(async {
+        let (mut raw, id, _) = raw_hello(&server, "stop-one").await;
+        server.net.accept(id, 1);
+        read_payload(&mut raw.recv).await;
+
+        let data = Value::String(vec![0; 32 * 1024].into_boxed_slice());
+        server
+            .net
+            .send_latent_event(Some(1), "slow", &[data], 4096)
+            .expect("slow event queued");
+        let mut slow = raw.connection.accept_uni().await.expect("first stream");
+        let mut prefix = [0; 13];
+        slow.read_exact(&mut prefix)
+            .await
+            .expect("complete latent header");
+        slow.stop(0u8.into()).expect("stop this transfer");
+        server
+            .net
+            .send_latent_event(Some(1), "next", &[], 25000)
+            .expect("next event queued");
+        let mut next = tokio::time::timeout(TIMEOUT, raw.connection.accept_uni())
+            .await
+            .expect("next stream in time")
+            .expect("connection remains open");
+        next.read_exact(&mut prefix)
+            .await
+            .expect("second latent header");
+        assert_eq!(prefix[0], 2);
+        assert_eq!(&prefix[1..9], &1_u64.to_le_bytes());
+        let expected = postcard::to_allocvec(&("next", Vec::<u8>::new())).expect("body");
+        assert_eq!(
+            next.read_to_end(128).await.expect("complete event"),
+            expected
+        );
+    });
+}
+
+#[test]
+fn aborted_latent_stream_does_not_block_the_next_sequence() {
+    let server = start();
+    let runtime = new_runtime();
+    runtime.block_on(async {
+        let (mut raw, id, _) = raw_hello(&server, "latent-abort").await;
+        server.net.accept(id, 95);
+        let _welcome = read_payload(&mut raw.recv).await;
+
+        let mut rejected = raw.connection.open_uni().await.expect("stream opens");
+        let mut header = vec![2_u8];
+        header.extend_from_slice(&0_u64.to_le_bytes());
+        header.extend_from_slice(
+            &u32::try_from(sixm_net::MAX_LATENT_EVENT_LEN + 1)
+                .unwrap()
+                .to_le_bytes(),
+        );
+        rejected
+            .write_all(&header)
+            .await
+            .expect("oversized header writes");
+        assert!(
+            rejected
+                .stopped()
+                .await
+                .expect("stop is acknowledged")
+                .is_some()
+        );
+
+        let body = postcard::to_allocvec(&("resumed", Vec::<u8>::new())).expect("body encodes");
+        let mut accepted = raw.connection.open_uni().await.expect("next stream opens");
+        let mut header = vec![2_u8];
+        header.extend_from_slice(&1_u64.to_le_bytes());
+        header.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
+        accepted.write_all(&header).await.expect("header writes");
+        accepted.write_all(&body).await.expect("body writes");
+        accepted.finish().expect("stream finishes");
+        match next_event(&server) {
+            NetEvent::Event {
+                player: 95,
+                name,
+                args,
+            } => {
+                assert_eq!(name, "resumed");
+                assert_eq!(args, Vec::<Value>::new());
+            }
+            other => panic!("next latent sequence was blocked: {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn normal_events_flow_while_a_latent_event_is_paced() {
+    let server = start();
+    let client = join(&server, "paced", 92);
+    let large = Value::String(vec![b'x'; 100_000].into_boxed_slice());
+    let started = std::time::Instant::now();
+    client
+        .send_latent_event("slow", &[large], 30_000)
+        .expect("latent event queues");
+    client
+        .send_event("normal", &[])
+        .expect("normal event queues");
+    match next_event(&server) {
+        NetEvent::Event {
+            player: 92, name, ..
+        } => assert_eq!(name, "normal"),
+        other => panic!("normal event was delayed by latent stream: {other:?}"),
+    }
+    match next_event(&server) {
+        NetEvent::Event {
+            player: 92,
+            name,
+            args,
+        } => {
+            assert_eq!(name, "slow");
+            assert_eq!(
+                args,
+                [Value::String(vec![b'x'; 100_000].into_boxed_slice())]
+            );
+        }
+        other => panic!("expected latent event after paced transfer, got {other:?}"),
+    }
+    assert!(started.elapsed() >= Duration::from_secs(3));
 }
 
 fn vehicle_entry(id: u32) -> EntityEntry {

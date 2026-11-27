@@ -29,7 +29,9 @@ AddEventHandler('playerConnecting', function(name, setKickReason)
     end
 end)
 
+local joining_ping
 AddEventHandler('playerJoining', function()
+    joining_ping = GetPlayerPing(source)
     note('joined:' .. source .. ':' .. GetPlayerName(source) .. ':' .. #GetPlayers())
 end)
 
@@ -61,6 +63,14 @@ function broadcast(text)
     TriggerClientEvent('net:all', -1, text)
 end
 
+function latent(text)
+    TriggerLatentClientEvent('net:latent', -1, 25000, text)
+end
+
+function pings()
+    note('pings:' .. joining_ping .. ':' .. GetPlayerPing(999))
+end
+
 function kick(id, reason)
     DropPlayer(id, reason)
 end
@@ -81,7 +91,16 @@ fn harness() -> Loopback {
     Loopback::new(&[Resource {
         name: "net",
         script: NET_SCRIPT,
-        exports: &["log", "names", "broadcast", "kick", "bad_send", "late"],
+        exports: &[
+            "log",
+            "names",
+            "broadcast",
+            "latent",
+            "pings",
+            "kick",
+            "bad_send",
+            "late",
+        ],
     }])
 }
 
@@ -171,6 +190,28 @@ fn trigger_client_event_to_all_reaches_every_client() {
         h.expect_event(&bob, "net:all"),
         vec![Value::from("hello all")]
     );
+}
+
+#[test]
+fn latent_client_event_reaches_every_client_and_ping_is_reported_in_milliseconds() {
+    let h = harness();
+    let alice = h.connect("Alice").expect("Alice is admitted");
+    let bob = h.connect("Bob").expect("Bob is admitted");
+    h.call("latent", &[Value::from("paced")]);
+    assert_eq!(
+        h.expect_event(&alice, "net:latent"),
+        vec![Value::from("paced")]
+    );
+    assert_eq!(
+        h.expect_event(&bob, "net:latent"),
+        vec![Value::from("paced")]
+    );
+    h.call("pings", &[]);
+    let reported = h.log();
+    let pings = reported.split("pings:").nth(1).expect("ping report");
+    let (player_ping, unknown_ping) = pings.split_once(':').expect("both ping values");
+    assert!(player_ping.parse::<u64>().is_ok());
+    assert_eq!(unknown_ping.split_whitespace().next(), Some("-1"));
 }
 
 #[test]

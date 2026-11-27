@@ -344,6 +344,38 @@ fn client_script_runs_on_join_and_its_server_event_reaches_the_handler() {
 }
 
 #[test]
+fn latent_payload_larger_than_a_frame_round_trips_through_lua() {
+    let h = Harness::bare("latent");
+    let text = manifest(&["server.lua"], &["report"], &[]) + "client_script 'client.lua'\n";
+    let server = r"
+        local result = ''
+        RegisterNetEvent('upload', function(bytes)
+            TriggerLatentClientEvent('echo', source, 16000000, bytes, source)
+        end)
+        RegisterNetEvent('result', function(text) result = text end)
+        function report() return result end
+    ";
+    let client = r"
+        local payload = string.rep('x', 1024 * 1024 + 1)
+        RegisterNetEvent('echo', function(bytes, sender)
+            TriggerServerEvent('result', ('%s/%s/%s'):format(bytes == payload, sender, source))
+        end)
+        TriggerLatentServerEvent('upload', 16000000, payload)
+    ";
+    h.add(
+        "latent",
+        &text,
+        &[("server.lua", server), ("client.lua", client)],
+    );
+    h.start("latent");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let runtime = h.connect(&dir.path().join("cache"), &dir.path().join("data"));
+    h.wait_for_report(&runtime, "the complete Lua echo", |log| {
+        log == "true/1/65535"
+    });
+}
+
+#[test]
 fn server_event_reaches_client_handler_with_source_65535() {
     let s = session();
     s.h.wait_for_report(&s.runtime, "the pong", |log| {

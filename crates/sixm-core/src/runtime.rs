@@ -1,6 +1,6 @@
 use std::cell::Cell;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::entity::{EntityInfo, EntityKind};
 use crate::value::{FuncRef, ResourceName, Value};
@@ -266,12 +266,26 @@ pub trait ServerHost {
         args: &[Value],
     ) -> Result<(), ScriptError>;
 
+    /// Sends a paced event to one player or every player.
+    fn trigger_latent_client_event(
+        &self,
+        event: &str,
+        target: ClientTarget,
+        args: &[Value],
+        bps: u64,
+    ) -> Result<(), ScriptError>;
+
     /// Server ids of the connected players, in join order.
     fn players(&self) -> Vec<u32>;
 
     /// Name and network endpoint of a connected player. A player who is
     /// connecting is known from the start of `playerConnecting`.
     fn player_info(&self, player: u32) -> Option<PlayerInfo>;
+
+    /// Round-trip latency for a connected player, if known.
+    fn player_ping(&self, _player: u32) -> Option<Duration> {
+        None
+    }
 
     /// The identifiers of a connected or connecting player, such as
     /// `license:<hex>` and `ip:<address>`, in a fixed order. `license` comes
@@ -334,6 +348,14 @@ pub trait ServerHost {
 pub trait ClientHost {
     /// Sends an event to the server. Fails for function references.
     fn trigger_server_event(&self, event: &str, args: &[Value]) -> Result<(), ScriptError>;
+
+    /// Sends a paced event to the server.
+    fn trigger_latent_server_event(
+        &self,
+        event: &str,
+        args: &[Value],
+        bps: u64,
+    ) -> Result<(), ScriptError>;
 
     /// This client's server id.
     fn local_player(&self) -> u32;

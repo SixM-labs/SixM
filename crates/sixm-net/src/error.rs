@@ -73,4 +73,7 @@ pub enum NetError {
     /// The connection or the network thread is gone.
     #[error("connection closed")]
     Closed,
+    /// A bounded outgoing queue has no room for another message.
+    #[error("outgoing queue is full")]
+    QueueFull,
 }

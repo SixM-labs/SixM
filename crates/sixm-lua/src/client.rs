@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use mlua::{MultiValue, Table};
+use mlua::{MultiValue, Table, Value as LuaValue};
 use sixm_core::{ClientHost, Host, player_bag};
 
 use crate::players::{player_id, whole_number};
@@ -31,6 +31,18 @@ pub(crate) fn install(
             .trigger_server_event(&name, &values)
             .map_err(lua_err)
     })?;
+    let trigger_latent_server_event = bind_fn(
+        lua,
+        weak,
+        |rt, (name, bps, args): (String, LuaValue, MultiValue)| {
+            let bps = latent_bps(&bps)?;
+            let values = rt.to_network_values(&args.into_vec()).map_err(lua_err)?;
+            let host = rt.host()?;
+            client(&*host)?
+                .trigger_latent_server_event(&name, &values, bps)
+                .map_err(lua_err)
+        },
+    )?;
     let player_id_function = bind_fn(lua, weak, |_, (): ()| Ok(LOCAL_PLAYER_HANDLE))?;
     let get_player_server_id = bind_fn(lua, weak, move |_, (player,): (mlua::Value,)| {
         Ok((player_id(&player) == Some(LOCAL_PLAYER_HANDLE)).then_some(local_player))
@@ -48,6 +60,7 @@ pub(crate) fn install(
 
     let functions = [
         ("TriggerServerEvent", trigger_server_event),
+        ("TriggerLatentServerEvent", trigger_latent_server_event),
         ("PlayerId", player_id_function),
         ("GetPlayerServerId", get_player_server_id),
         ("PlayerPedId", player_ped_id),
@@ -58,6 +71,24 @@ pub(crate) fn install(
     }
     globals.raw_set("LocalPlayer", local)?;
     Ok(())
+}
+
+pub(crate) fn latent_bps(value: &LuaValue) -> mlua::Result<u64> {
+    if matches!(value, LuaValue::Number(rate) if rate.is_finite() && *rate <= 0.0) {
+        return Ok(25_000);
+    }
+    if !matches!(value, LuaValue::Integer(_) | LuaValue::Number(_)) {
+        return Err(mlua::Error::runtime(
+            "expected a numeric bytes-per-second rate",
+        ));
+    }
+    let rate = whole_number(value)
+        .ok_or_else(|| mlua::Error::runtime("expected an exactly representable integer rate"))?;
+    Ok(if rate > 0 {
+        rate.unsigned_abs()
+    } else {
+        25_000
+    })
 }
 
 /// The id of the local player's ped, or 0 until the server has sent it.

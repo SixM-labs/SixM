@@ -24,6 +24,7 @@ use crate::entities::EntityEntry;
 use crate::error::NetError;
 use crate::files::{MAX_RESOURCE_NAME_LEN, PublishedResource, ResourceEntry, check_published};
 use crate::identity::{Credentials, Fingerprint, Identity};
+use crate::latent::{self, LatentJob};
 use crate::protocol::{
     MAX_FRAME, OUTBOUND_QUEUE_LEN, SEND_QUEUE_OVERFLOW, SHUTTING_DOWN, ServerMessage,
 };
@@ -128,6 +129,11 @@ enum Command {
         player: u32,
         frame: Arc<[u8]>,
     },
+    Latent {
+        player: Option<u32>,
+        job: LatentJob,
+        _permit: tokio::sync::OwnedSemaphorePermit,
+    },
     Broadcast {
         frame: Arc<[u8]>,
     },
@@ -141,11 +147,15 @@ enum Command {
     },
 }
 
+/// QUIC handles indexed by connection ID for on-demand RTT queries.
+pub(crate) type PlayerConnections = Arc<RwLock<HashMap<ConnectionId, quinn::Connection>>>;
+
 /// Handle to the server's network thread.
 ///
 /// Dropping the handle, or calling [`NetServer::shutdown`], closes every
 /// connection and joins the network thread.
 pub struct NetServer {
+    player_connections: PlayerConnections,
     commands: Option<mpsc::UnboundedSender<Command>>,
     local_addr: SocketAddr,
     fingerprint: Fingerprint,
@@ -154,10 +164,25 @@ pub struct NetServer {
     advertised: Arc<RwLock<Advertised>>,
     /// Traffic totals, updated by the connections.
     traffic: Arc<Counters>,
+    latent_pending: Arc<tokio::sync::Semaphore>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl NetServer {
+    /// The live QUIC round-trip estimate, available from the connecting callback.
+    pub fn connection_ping(&self, id: ConnectionId) -> Option<Duration> {
+        let connection = self
+            .player_connections
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .cloned()?;
+        connection
+            .close_reason()
+            .is_none()
+            .then(|| connection.rtt())
+    }
+
     /// Starts listening on `config.bind` and spawns the network thread.
     ///
     /// The certificate comes from `config.identity`; its fingerprint is
@@ -179,7 +204,12 @@ impl NetServer {
         let fingerprint = credentials.fingerprint();
         let advertised = Arc::new(RwLock::new(Advertised::default()));
         let traffic = Arc::new(Counters::default());
+        let latent_pending = Arc::new(tokio::sync::Semaphore::new(
+            crate::protocol::LATENT_QUEUE_LEN,
+        ));
+        let player_connections = PlayerConnections::default();
         let shared = Arc::new(Shared {
+            player_connections: Arc::clone(&player_connections),
             on_event: Arc::new(on_event),
             server_name: config.server_name,
             handshake_timeout: config.handshake_timeout,
@@ -195,12 +225,14 @@ impl NetServer {
             .map_err(NetError::Io)?;
         let local_addr = ready_rx.recv().map_err(|_| NetError::Closed)??;
         Ok(Self {
+            player_connections,
             commands: Some(commands),
             local_addr,
             fingerprint,
             max_frame,
             advertised,
             traffic,
+            latent_pending,
             thread: Some(thread),
         })
     }
@@ -261,6 +293,30 @@ impl NetServer {
     pub fn broadcast_event(&self, name: &str, args: &[Value]) -> Result<(), NetError> {
         let frame = encode_event(ServerMessage::EVENT_TAG, name, args, self.max_frame)?;
         self.post(Command::Broadcast { frame })
+    }
+
+    /// Sends an event over its own paced QUIC stream to one player, or to all players when `player` is `None`.
+    /// `bps` is bytes per second, clamped to [`crate::MIN_LATENT_RATE`]..
+    /// [`crate::MAX_LATENT_RATE`]; zero selects [`crate::DEFAULT_LATENT_RATE`].
+    pub fn send_latent_event(
+        &self,
+        player: Option<u32>,
+        name: &str,
+        args: &[Value],
+        bps: u64,
+    ) -> Result<(), NetError> {
+        let body = latent::encode_body(name, args)?;
+        let permit = Arc::clone(&self.latent_pending)
+            .try_acquire_owned()
+            .map_err(|_| NetError::QueueFull)?;
+        self.post(Command::Latent {
+            player,
+            job: LatentJob {
+                body: Arc::new(body),
+                bytes_per_second: latent::pacing_rate(bps),
+            },
+            _permit: permit,
+        })
     }
 
     /// Sends one state bag key to one player. A nil `value` tells the player
@@ -561,6 +617,7 @@ struct Entry {
     /// The channel to the connection task, until the connection is decided.
     instructions: Option<mpsc::UnboundedSender<Instruction>>,
     outbound: mpsc::Sender<Arc<[u8]>>,
+    latent: mpsc::Sender<LatentJob>,
     kick: Arc<watch::Sender<Option<Arc<str>>>>,
 }
 
@@ -620,6 +677,25 @@ impl Supervisor {
                     self.enqueue(id, Arc::clone(&frame));
                 }
             }
+            Command::Latent {
+                player,
+                job,
+                _permit: _,
+            } => {
+                let ids: Vec<ConnectionId> = match player {
+                    Some(player) => self.players.get(&player).copied().into_iter().collect(),
+                    None => self.players.values().copied().collect(),
+                };
+                for id in ids {
+                    if let Some(entry) = self.connections.get(&id) {
+                        if entry.latent.try_send(job.clone()).is_err() {
+                            entry.kick.send_replace(Some(Arc::from(
+                                crate::protocol::LATENT_QUEUE_OVERFLOW,
+                            )));
+                        }
+                    }
+                }
+            }
             Command::Kick { player, reason } => {
                 if let Some(&id) = self.players.get(&player) {
                     self.kick_connection(id, &reason);
@@ -642,12 +718,14 @@ impl Supervisor {
         self.next_id += 1;
         let (instructions_tx, instructions_rx) = mpsc::unbounded_channel();
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_QUEUE_LEN);
+        let (latent_tx, latent_rx) = mpsc::channel(crate::protocol::LATENT_QUEUE_LEN);
         let (kick_tx, _) = watch::channel(None);
         let kick = Arc::new(kick_tx);
         let ticket = Ticket {
             id,
             instructions: instructions_rx,
             outbound: outbound_rx,
+            latent: latent_rx,
             reply: outbound_tx.clone(),
             kick: Arc::clone(&kick),
         };
@@ -666,6 +744,7 @@ impl Supervisor {
                 player: None,
                 instructions: Some(instructions_tx),
                 outbound: outbound_tx,
+                latent: latent_tx,
                 kick,
             },
         );
@@ -741,6 +820,11 @@ impl Supervisor {
             }
         };
         let Some(id) = id else { return };
+        self.shared
+            .player_connections
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
         if let Some(entry) = self.connections.remove(&id) {
             if let Some(player) = entry.player {
                 if self.players.get(&player) == Some(&id) {

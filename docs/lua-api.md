@@ -84,6 +84,9 @@ local v = Citizen.Await(p)
 | `WasEventCanceled` | both | `WasEventCanceled()`. Returns whether the current dispatch was canceled. Handlers in other resources see the flag too. |
 | `TriggerServerEvent` | client | `TriggerServerEvent(name, ...)`. Sends an event to the server. Function values cannot be sent. |
 | `TriggerClientEvent` | server | `TriggerClientEvent(name, target, ...)`. Sends an event to one player id, or to every player with `-1`. Function values cannot be sent. |
+| `TriggerLatentServerEvent` | client | `TriggerLatentServerEvent(name, bytesPerSecond, ...)`. Sends an event to the server paced at the requested byte rate. Nonpositive rates select 25,000 bytes per second. Positive rates are clamped to 1 KiB/s through 100 MiB/s. Function values cannot be sent. |
+| `TriggerLatentClientEvent` | server | `TriggerLatentClientEvent(name, target, bytesPerSecond, ...)`. Sends an event to one player id, or to every player with `-1`, paced at the requested byte rate. Nonpositive rates select 25,000 bytes per second. Positive rates are clamped to 1 KiB/s through 100 MiB/s. Function values cannot be sent. |
+| `GetPlayerPing` | server | `GetPlayerPing(player)`. Returns round-trip latency in milliseconds, or `-1` when the player or ping is unknown. |
 
 ### The `source` global
 

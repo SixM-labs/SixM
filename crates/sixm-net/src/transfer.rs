@@ -13,7 +13,7 @@ use tokio::sync::{Semaphore, mpsc};
 use tracing::{debug, warn};
 
 use crate::files::{FileHash, PublishedResource, ResourceEntry};
-use crate::protocol::{MAX_FRAME, ServerMessage};
+use crate::protocol::{MAX_FRAME, STREAM_KIND_FILE, ServerMessage};
 use crate::traffic::Counters;
 use crate::wire::encode_frame;
 
@@ -118,13 +118,14 @@ pub(crate) async fn serve_file(transfer: Transfer, hash: FileHash) {
     let Ok(mut stream) = connection.open_uni().await else {
         return;
     };
-    let mut header = [0_u8; HEADER_LEN];
-    header[..32].copy_from_slice(&hash);
-    header[32..].copy_from_slice(&source.size.to_le_bytes());
+    let mut header = [0_u8; HEADER_LEN + 1];
+    header[0] = STREAM_KIND_FILE;
+    header[1..33].copy_from_slice(&hash);
+    header[33..].copy_from_slice(&source.size.to_le_bytes());
     if stream.write_all(&header).await.is_err() {
         return;
     }
-    traffic.sent(HEADER_LEN);
+    traffic.sent(HEADER_LEN + 1);
     if copy_exact(&mut file, &mut stream, source.size, &traffic).await {
         let _ = stream.finish();
     } else {
