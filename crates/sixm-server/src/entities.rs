@@ -7,7 +7,7 @@
 //! sent once per frame with its latest transform. The owner of an entity may
 //! move it too, and then the other clients receive the owner's transform.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use sixm_core::{
     EntityInfo, EntityKind, EventSource, MAX_ENTITIES, ScriptError, Value, entity_bag, is_finite,
@@ -74,6 +74,9 @@ pub(crate) struct EntityStore {
     /// The entities by position, for finding those near a player. Only kept
     /// while scoping is on.
     grid: Option<Grid>,
+    /// Players whose owned list or owned entity bucket changed since the last
+    /// scope refresh. Only tracked while the grid is active.
+    dirty_owners: HashSet<u32>,
     /// The routing bucket of each entity outside bucket 0. Empty while every
     /// entity is in bucket 0, so the bucket checks cost nothing then.
     buckets: BTreeMap<u32, u32>,
@@ -93,6 +96,7 @@ impl Default for EntityStore {
             dirty: Vec::new(),
             owned: BTreeMap::new(),
             grid: None,
+            dirty_owners: HashSet::new(),
             buckets: BTreeMap::new(),
             created: BTreeMap::new(),
             leases: BTreeMap::new(),
@@ -104,6 +108,7 @@ impl EntityStore {
     /// Turns the position index on, with cells `size` metres wide, or off with
     /// `None`. A new index covers every entity at its current position.
     pub(crate) fn set_grid(&mut self, size: Option<f32>) {
+        self.dirty_owners.clear();
         self.grid = size.map(|size| {
             let mut grid = Grid::new(size);
             for (id, slot) in &self.by_id {
@@ -151,13 +156,54 @@ impl EntityStore {
 
     /// Moves the entity `id` to `bucket`. Does nothing for an unknown entity.
     pub(crate) fn set_bucket(&mut self, id: u32, bucket: u32) {
-        if !self.by_id.contains_key(&id) {
+        let Some(slot) = self.by_id.get(&id) else {
             return;
+        };
+        if self.bucket(id) == bucket {
+            return;
+        }
+        if self.grid.is_some()
+            && let Some(owner) = slot.info.owner
+        {
+            self.dirty_owners.insert(owner);
+        }
+        if let Some(grid) = self.grid.as_mut()
+            && let Some(cell) = grid.cell_of_entity(id)
+        {
+            grid.mark_dirty(cell);
         }
         if bucket == 0 {
             self.buckets.remove(&id);
         } else {
             self.buckets.insert(id, bucket);
+        }
+    }
+
+    /// Whether any player's owned entity set or owned entity bucket changed
+    /// since the last scope refresh.
+    pub(crate) fn has_dirty_owners(&self) -> bool {
+        !self.dirty_owners.is_empty()
+    }
+
+    /// Whether `player`'s owned entity set or an owned entity's bucket changed
+    /// since the last scope refresh.
+    pub(crate) fn is_owner_dirty(&self, player: u32) -> bool {
+        self.dirty_owners.contains(&player)
+    }
+
+    /// Whether any entity entered, left, moved, or changed bucket in the nine
+    /// cells around `position` since the last scope refresh.
+    pub(crate) fn any_dirty_near(&self, position: [f32; 3]) -> bool {
+        self.grid
+            .as_ref()
+            .is_some_and(|grid| grid.any_dirty_near(position))
+    }
+
+    /// Clears the scope dirty flags after a frame's scope refresh.
+    pub(crate) fn clear_scope_dirty(&mut self) {
+        self.dirty_owners.clear();
+        if let Some(grid) = self.grid.as_mut() {
+            grid.clear_dirty();
         }
     }
 
@@ -252,6 +298,9 @@ impl EntityStore {
         );
         if let Some(grid) = self.grid.as_mut() {
             grid.insert(id, info.position);
+            if let Some(owner) = info.owner {
+                self.dirty_owners.insert(owner);
+            }
         }
         if let Some(owner) = info.owner {
             self.owned.entry(owner).or_default().push(id);
@@ -266,11 +315,15 @@ impl EntityStore {
         let slot = self.by_id.remove(&id)?;
         let info = slot.info;
         self.buckets.remove(&id);
+        let has_grid = self.grid.is_some();
         if let Some(grid) = self.grid.as_mut() {
             grid.remove(id);
         }
         if let Some(owner) = info.owner {
             self.disown(owner, id);
+            if has_grid {
+                self.dirty_owners.insert(owner);
+            }
         }
         if let Some(creator) = slot.creator {
             self.uncreate(creator, id);
@@ -333,9 +386,15 @@ impl EntityStore {
         }
         if let Some(previous) = previous {
             self.disown(previous, id);
+            if self.grid.is_some() {
+                self.dirty_owners.insert(previous);
+            }
         }
         if let Some(owner) = owner {
             self.owned.entry(owner).or_default().push(id);
+            if self.grid.is_some() {
+                self.dirty_owners.insert(owner);
+            }
         }
         true
     }

@@ -331,6 +331,25 @@ impl NetServer {
         })
     }
 
+    /// Encodes one state bag key as a complete frame. Pair with
+    /// [`send_encoded`](Self::send_encoded) or
+    /// [`broadcast_encoded`](Self::broadcast_encoded) to encode once and send
+    /// the same frame to multiple recipients.
+    pub fn encode_state(&self, bag: &str, key: &str, value: &Value) -> Result<Arc<[u8]>, NetError> {
+        encode_state(bag, key, value, self.max_frame)
+    }
+
+    /// Sends a pre-encoded frame to one player. Sending to a player that is not
+    /// connected is a no-op.
+    pub fn send_encoded(&self, player: u32, frame: Arc<[u8]>) -> Result<(), NetError> {
+        self.post(Command::Send { player, frame })
+    }
+
+    /// Sends a pre-encoded frame to every accepted player.
+    pub fn broadcast_encoded(&self, frame: Arc<[u8]>) -> Result<(), NetError> {
+        self.post(Command::Broadcast { frame })
+    }
+
     /// Sends one state bag key to one player. A nil `value` tells the player
     /// that the key was deleted. The message is encoded on the calling thread.
     pub fn send_state(
@@ -340,8 +359,8 @@ impl NetServer {
         key: &str,
         value: &Value,
     ) -> Result<(), NetError> {
-        let frame = encode_state(bag, key, value, self.max_frame)?;
-        self.post(Command::Send { player, frame })
+        let frame = self.encode_state(bag, key, value)?;
+        self.send_encoded(player, frame)
     }
 
     /// Sends several state bag keys to one player, in order, as the fewest
@@ -361,8 +380,8 @@ impl NetServer {
 
     /// Sends one state bag key to every accepted player. The message is encoded once.
     pub fn broadcast_state(&self, bag: &str, key: &str, value: &Value) -> Result<(), NetError> {
-        let frame = encode_state(bag, key, value, self.max_frame)?;
-        self.post(Command::Broadcast { frame })
+        let frame = self.encode_state(bag, key, value)?;
+        self.broadcast_encoded(frame)
     }
 
     /// Tells every accepted player that the state bag `bag` was removed.
