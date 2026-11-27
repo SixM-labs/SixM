@@ -70,10 +70,12 @@ impl Server {
         self.drain_commands();
     }
 
-    /// Runs one frame at `now`: resumes every running resource, then runs the queued commands.
+    /// Runs one frame at `now`: resumes every running resource, runs the queued
+    /// commands, and refuses the deferred connections that ran out of time.
     pub fn tick(&self, now: Instant) {
         self.manager.tick_all(now);
         self.drain_commands();
+        self.manager.expire_deferrals(now);
         self.manager.flush_entities();
     }
 
@@ -170,11 +172,12 @@ impl Server {
         info!("Server stopped");
     }
 
-    /// Runs queued commands and applies queued kicks until both queues are
-    /// empty, up to [`MAX_QUEUED_COMMANDS`] commands.
+    /// Runs queued commands, applies queued kicks and deferral calls until
+    /// the queues are empty, up to [`MAX_QUEUED_COMMANDS`] commands.
     fn drain_commands(&self) {
         let mut ran = 0;
         loop {
+            self.manager.apply_deferral_calls();
             self.manager.apply_drops();
             let Some(line) = self.manager.pop_command() else {
                 return;

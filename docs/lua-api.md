@@ -119,7 +119,7 @@ Server (`EventSource::Local` unless noted):
 | `onServerResourceStart` | `name` | Same time as `onResourceStart`. |
 | `onResourceStop` | `name` | Before the resource stops. |
 | `onServerResourceStop` | `name` | Same time as `onResourceStop`. |
-| `playerConnecting` | `name`, `setKickReason` | `source` is the new player's id, which is assigned before the handlers run. Call `setKickReason(text)` or `CancelEvent()` to refuse. `setKickReason` is valid only during this event. |
+| `playerConnecting` | `name`, `setKickReason`, `deferrals` | `source` is the new player's id, which is assigned before the handlers run. Call `setKickReason(text)` or `CancelEvent()` to refuse. `setKickReason` is valid only during this event. `deferrals` holds the connection open, see [Deferrals](#deferrals). |
 | `entityCreated` | `entity` | Right after a script created an entity. Its state bag already exists. |
 | `entityRemoved` | `entity` | Before an entity is deleted, while it still exists. |
 | `playerJoining` | none | `source` is the player's id. Fired after admission and after the player's state bag exists. |
@@ -135,6 +135,62 @@ Client (`EventSource::Local`):
 | `onResourceStop` | `name` | Same time as `onClientResourceStop`. |
 
 The client has no `onResourceStarting`. Clients do not cancel starts.
+
+### Deferrals
+
+`playerConnecting` receives a third argument, `deferrals`, a table of three
+functions. They let a handler hold the connection while it does slow work, such
+as a lookup, and tell the player what is happening.
+
+```lua
+AddEventHandler('playerConnecting', function(name, setKickReason, deferrals)
+    deferrals.defer()
+    deferrals.update('Checking your account')
+    CreateThread(function()
+        Wait(500)
+        deferrals.done()
+    end)
+end)
+```
+
+- `deferrals.defer()` holds the connection. It is valid only while the
+  `playerConnecting` handlers run. Once they return, the player is neither
+  admitted nor refused until every deferring handler has called `done`.
+- `deferrals.update(message)` sends a progress text to the connecting client,
+  which shows it and keeps waiting. The text is cut to 4096 bytes on a
+  character boundary. An update made before the connection is deferred is not
+  sent. Updates are valid until the deferral ends.
+- `deferrals.done([reason])` finishes the handler. Each `defer` is matched by
+  one `done` without a reason. A `done` with a non-empty reason refuses the
+  player at once with that reason.
+
+The rules that follow from these:
+
+- Several resources can defer the same player. It is admitted only when every
+  deferring handler has called `done` without a reason. The first `done` with
+  a reason refuses it.
+- When the last deferral finishes without a reason, the player is admitted as
+  it is without deferrals. The player limit (`sv_maxclients`) is checked at
+  that moment, and a full server refuses the player with `Server is full`.
+  An admitted player then joins as usual, with `playerJoining`.
+- `done` without a reason and without a deferral does nothing. `done` with a
+  reason and without a deferral refuses the player. A second `done` does
+  nothing.
+- `setKickReason` and `CancelEvent()` used during the dispatch refuse the
+  player, even if a handler deferred it.
+- A deferred player is known to `GetPlayerName`, the identifier functions and
+  `IsPlayerAceAllowed`. It is not listed by `GetPlayers` and does not count
+  against `sv_maxclients` until it is admitted.
+- A deferral that is not finished within `sixm_deferralTimeout` seconds
+  refuses the player with `connection timed out`. See [server.md](server.md#convars).
+- If the client disconnects while it is deferred, the player is forgotten.
+  `playerJoining` and `playerDropped` do not run for it.
+- `defer` is removed when the `playerConnecting` dispatch ends, and `update` and
+  `done` are removed when the deferral ends, whether it finished, was refused,
+  timed out or was abandoned. A later call through a saved copy of the table is
+  a stale reference error. Catch it with `pcall` if the script may run late.
+- The effects of `done` and `update` happen once the script call that made
+  them has returned. Within that same call the functions still work.
 
 ## Exports
 

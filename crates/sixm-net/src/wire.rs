@@ -30,8 +30,8 @@ use crate::files::{
     MAX_RESOURCE_NAME_LEN, ResourceEntry,
 };
 use crate::protocol::{
-    ClientMessage, MAX_COMMAND_LEN, MAX_DECODED_VALUES, MAX_EVENT_NAME_LEN, MAX_VALUE_DEPTH,
-    ServerMessage,
+    ClientMessage, MAX_COMMAND_LEN, MAX_DECODED_VALUES, MAX_DEFERRAL_MESSAGE_LEN,
+    MAX_EVENT_NAME_LEN, MAX_VALUE_DEPTH, ServerMessage,
 };
 
 const FRAME_HEADER_LEN: usize = 4;
@@ -67,6 +67,7 @@ const SERVER_VARIANTS: &[&str] = &[
     "EntityTransforms",
     "EntityDeleted",
     "EntitySnapshot",
+    "Deferral",
 ];
 /// Most files one snapshot entry carries. Larger resources are split into
 /// several entries of the same name, so one entry always fits a frame.
@@ -440,6 +441,38 @@ pub(crate) fn encode_event(
     validate_event_name(name)?;
     check_values(args)?;
     encode_frame(&EventFrame { tag, name, args }, max_frame)
+}
+
+/// Encodes a progress message for a connection that is held by deferrals.
+/// A message longer than [`MAX_DEFERRAL_MESSAGE_LEN`] bytes is cut at the
+/// last character boundary within the limit.
+pub(crate) fn encode_deferral(message: &str, max_frame: usize) -> Result<Arc<[u8]>, NetError> {
+    let mut end = message.len().min(MAX_DEFERRAL_MESSAGE_LEN);
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    encode_frame(
+        &DeferralFrame {
+            message: &message[..end],
+        },
+        max_frame,
+    )
+}
+
+/// Borrowed encoding of a deferral message, written with its wire tag.
+struct DeferralFrame<'a> {
+    message: &'a str,
+}
+
+impl Serialize for DeferralFrame<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_newtype_variant(
+            MESSAGE_NAME,
+            ServerMessage::DEFERRAL_TAG,
+            "Deferral",
+            self.message,
+        )
+    }
 }
 
 /// Encodes a console line a client sends to the server. The line must be 1 to
@@ -834,6 +867,10 @@ impl<'de> Visitor<'de> for ServerMessageVisitor<'_> {
                     budget: self.budget,
                 })
                 .map(|entities| ServerMessage::EntitySnapshot { entities }),
+            ServerMessage::DEFERRAL_TAG => variant
+                .newtype_variant::<String>()
+                .and_then(checked_deferral::<A::Error>)
+                .map(|message| ServerMessage::Deferral { message }),
             other => Err(de::Error::unknown_variant(
                 &other.to_string(),
                 SERVER_VARIANTS,
@@ -1335,6 +1372,17 @@ impl<'de> Visitor<'de> for FileEntryVisitor {
             hash,
             size,
         })
+    }
+}
+
+/// Checks a decoded deferral message against its limit, as the encoder does.
+fn checked_deferral<E: de::Error>(message: String) -> Result<String, E> {
+    if message.len() > MAX_DEFERRAL_MESSAGE_LEN {
+        Err(E::custom(format!(
+            "deferral message is over {MAX_DEFERRAL_MESSAGE_LEN} bytes"
+        )))
+    } else {
+        Ok(message)
     }
 }
 
@@ -2469,5 +2517,42 @@ mod tests {
             decode_server_message(&frame[FRAME_HEADER_LEN..]),
             Err(NetError::Protocol(reason)) if reason.contains("values")
         ));
+    }
+
+    #[test]
+    fn deferral_frames_carry_tag_16_and_decode_to_their_message() {
+        let frame = encode_deferral("queue position 3", MAX_FRAME).expect("deferral encodes");
+        assert_eq!(frame[FRAME_HEADER_LEN], 16, "the wire tag is 16");
+        assert!(matches!(
+            decode_server_message(&frame[FRAME_HEADER_LEN..]),
+            Ok(ServerMessage::Deferral { message }) if message == "queue position 3"
+        ));
+    }
+
+    #[test]
+    fn over_long_deferral_messages_are_rejected_when_decoded() {
+        let long = DeferralFrame {
+            message: &"x".repeat(MAX_DEFERRAL_MESSAGE_LEN + 1),
+        };
+        let frame = encode_frame(&long, MAX_FRAME).expect("the frame itself fits");
+        assert!(matches!(
+            decode_server_message(&frame[FRAME_HEADER_LEN..]),
+            Err(NetError::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn long_deferral_messages_are_cut_on_a_character_boundary() {
+        // The two-byte `é` starts at byte 4095, so the limit of 4096 bytes
+        // falls inside it and the message is cut before it.
+        let message = format!("{}é", "a".repeat(MAX_DEFERRAL_MESSAGE_LEN - 1));
+        let frame = encode_deferral(&message, MAX_FRAME).expect("deferral encodes");
+        match decode_server_message(&frame[FRAME_HEADER_LEN..]) {
+            Ok(ServerMessage::Deferral { message: cut }) => {
+                assert_eq!(cut.len(), MAX_DEFERRAL_MESSAGE_LEN - 1);
+                assert!(message.starts_with(&cut));
+            }
+            other => panic!("expected a deferral, got {other:?}"),
+        }
     }
 }

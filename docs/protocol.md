@@ -88,6 +88,7 @@ forge a reference into server code.
 | Metadata pairs per resource | 1024 |
 | Metadata key length | 1 to 256 bytes |
 | Metadata value length | 4096 bytes |
+| Deferral message length | 4096 bytes, cut on a character boundary when sent |
 | Resource name length | 256 bytes |
 | Client file name length | 1024 bytes |
 | File size | 64 MiB |
@@ -129,16 +130,26 @@ Server to client (`ServerMessage`):
 | 12 | `EntityTransforms` | list of `(id: u32, position: 3 floats, rotation: 3 floats)` |
 | 13 | `EntityDeleted` | `id: u32` |
 | 14 | `EntitySnapshot` | list of entity entries |
+| 16 | `Deferral` | `message: string`, at most 4096 bytes |
+
+Tag 15 is not used. `Deferral` has tag 16 so that the tag never depends on the
+position of the variant in the enum. See the handshake below.
 
 ### Handshake
 
-1. The client sends `Hello` with `protocol = 6` and its player name. The
+1. The client sends `Hello` with `protocol = 7` and its player name. The
    server has already verified the client certificate, so only a client with a
    certificate gets this far.
 2. A different protocol number is refused with `Rejected`, for example
    `unsupported protocol version 5, server speaks 6`.
 3. A name outside 1 to 64 characters is refused.
 4. The server replies `Welcome`, or `Rejected` with a reason.
+
+   While a script holds the connection with a deferral, the server sends any
+   number of `Deferral` messages before that reply. Each carries a progress
+   text. The client keeps waiting, and each `Deferral` restarts its handshake
+   timeout, so a long queue does not time out. The server never sends
+   `Deferral` after `Welcome`.
 5. The server sends a `Resources` snapshot. It may span several frames, which
    add entries. An empty `Resources` frame ends the snapshot.
 6. The server sends every existing entity as an `EntitySnapshot`, which may
@@ -202,7 +213,7 @@ Clients keep each file in a cache under its hash. See [client.md](client.md).
 
 ## Versioning
 
-- `PROTOCOL_VERSION` is `5`. It is sent in `Hello`. A server refuses any other
+- `PROTOCOL_VERSION` is `7`. It is sent in `Hello`. A server refuses any other
   value.
 - The ALPN string is `sixm/1`. It does not change with the protocol version.
 - Enum order, field order and limits can change between protocol versions.

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use sixm_net::Identity;
 
@@ -18,6 +19,8 @@ pub(crate) const ENDPOINT: &str = "endpoint_add_udp";
 const MAX_CLIENTS: &str = "sv_maxclients";
 /// Convar naming the server, shown to players when they connect.
 const SERVER_NAME: &str = "sv_hostname";
+/// Convar naming how many seconds a deferred connection may wait for `done`.
+const DEFERRAL_TIMEOUT: &str = "sixm_deferralTimeout";
 
 /// Certificate file when `sixm_identityFile` is not set.
 const DEFAULT_IDENTITY_FILE: &str = "cache/server-identity.bin";
@@ -30,6 +33,11 @@ const MIN_CLIENTS: i64 = 1;
 const MAX_CLIENTS_LIMIT: i64 = 1024;
 /// Server name when `sv_hostname` is not set.
 const DEFAULT_SERVER_NAME: &str = "SixM Server";
+/// Deferral timeout in seconds when `sixm_deferralTimeout` is not set.
+const DEFAULT_DEFERRAL_TIMEOUT: i64 = 120;
+/// Smallest and largest deferral timeout in seconds the server honours.
+const MIN_DEFERRAL_TIMEOUT: i64 = 1;
+const MAX_DEFERRAL_TIMEOUT: i64 = 3600;
 
 /// The convar store. Names are case-insensitive and kept in lower case.
 #[derive(Debug)]
@@ -49,6 +57,7 @@ impl Convars {
         convars.set(ENDPOINT, DEFAULT_ENDPOINT);
         convars.set(MAX_CLIENTS, &DEFAULT_MAX_CLIENTS.to_string());
         convars.set(SERVER_NAME, DEFAULT_SERVER_NAME);
+        convars.set(DEFERRAL_TIMEOUT, &DEFAULT_DEFERRAL_TIMEOUT.to_string());
         convars
     }
 
@@ -100,6 +109,21 @@ impl Convars {
     /// The name sent to players in the welcome message.
     pub(crate) fn server_name(&self) -> &str {
         self.get(SERVER_NAME).unwrap_or(DEFAULT_SERVER_NAME)
+    }
+
+    /// How long a connection that `playerConnecting` deferred may wait for
+    /// `done`. Clamped to `1..=3600` seconds; a value that is not a number
+    /// means the default of 120.
+    pub(crate) fn deferral_timeout(&self) -> Duration {
+        let seconds = self
+            .get(DEFERRAL_TIMEOUT)
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(DEFAULT_DEFERRAL_TIMEOUT);
+        Duration::from_secs(
+            seconds
+                .clamp(MIN_DEFERRAL_TIMEOUT, MAX_DEFERRAL_TIMEOUT)
+                .unsigned_abs(),
+        )
     }
 
     /// The most players accepted at once. Clamped to `1..=1024`; a value that

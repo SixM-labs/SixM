@@ -2,17 +2,19 @@
 //! the network.
 //!
 //! The network thread reports through [`Input::Net`], and everything here runs
-//! on the server's loop thread. Decisions about a connection are made during
-//! the `playerConnecting` dispatch, so a connection is always accepted or
-//! refused before the loop returns to the network.
+//! on the server's loop thread. A connection is accepted or refused during the
+//! `playerConnecting` dispatch, or later once the handlers that deferred it
+//! call `done`. Script calls never run inside these functions: deferral calls
+//! are queued and applied by [`ResourceManager::apply_deferral_calls`].
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
 
-use sixm_core::{ClientTarget, EventSource, PlayerInfo, ScriptError, Value};
+use sixm_core::{ClientTarget, EventSource, FuncRef, PlayerInfo, ScriptError, Value};
 use sixm_net::{ConnectionId, Fingerprint, NetError, NetEvent, NetServer, ServerConfig};
 use tracing::{debug, info, warn};
 
@@ -25,6 +27,29 @@ use crate::server::Input;
 const DEFAULT_REFUSAL: &str = "Rejected by the server";
 /// Refusal sent when `sv_maxclients` players are already connected.
 const FULL_REASON: &str = "Server is full";
+/// Refusal sent when a deferred connection is not finished in time.
+const DEFERRAL_TIMEOUT_REASON: &str = "connection timed out";
+
+/// A connection that `playerConnecting` deferred and no `done` has ended yet.
+#[derive(Debug)]
+struct Deferral {
+    /// `defer` calls not yet matched by a `done` without a reason.
+    open: u32,
+    /// When the connection was deferred, for the timeout.
+    since: Instant,
+}
+
+/// A call to one of the deferral functions. The call is queued while the
+/// script runs and applied once the script call returns.
+#[derive(Debug)]
+pub(crate) enum DeferralCall {
+    /// `defer()`: one more handler holds the connection.
+    Defer,
+    /// `update(message)`: progress text for the client.
+    Update(String),
+    /// `done(reason)`: the handler is finished. A reason refuses the player.
+    Done(Option<String>),
+}
 
 /// A player, from the moment its connection is decided on until it leaves.
 #[derive(Debug)]
@@ -41,6 +66,11 @@ pub(crate) struct Player {
     /// Whether `playerConnecting` let the player in. Until then the player is
     /// known to `player_info` and the identifier functions only.
     admitted: bool,
+    /// Set while handlers hold the connection with `defer`.
+    deferral: Option<Deferral>,
+    /// The `update` and `done` functions of the `playerConnecting` table. They
+    /// are removed when the player is admitted or refused.
+    functions: Vec<FuncRef>,
 }
 
 impl Player {
@@ -65,6 +95,8 @@ impl Player {
             identifiers,
             principals,
             admitted: false,
+            deferral: None,
+            functions: Vec::new(),
         }
     }
 }
@@ -128,15 +160,28 @@ impl Players {
             .map(|(id, _)| *id)
     }
 
-    fn insert(&mut self, id: u32, player: Player) {
-        self.by_id.insert(id, player);
+    /// The player, admitted or not, that `id` names, for changing it.
+    fn get_mut(&mut self, id: u32) -> Option<&mut Player> {
+        self.by_id.get_mut(&id)
     }
 
-    /// Admits the pending player `id`.
-    fn admit(&mut self, id: u32) {
-        if let Some(player) = self.by_id.get_mut(&id) {
-            player.admitted = true;
-        }
+    /// The deferred players whose deferral started at least `timeout` before `now`.
+    /// Allocates only when one has expired.
+    fn expired(&self, now: Instant, timeout: Duration) -> Vec<u32> {
+        self.by_id
+            .iter()
+            .filter_map(|(id, player)| {
+                player
+                    .deferral
+                    .as_ref()
+                    .filter(|deferral| now.saturating_duration_since(deferral.since) >= timeout)
+                    .map(|_| *id)
+            })
+            .collect()
+    }
+
+    fn insert(&mut self, id: u32, player: Player) {
+        self.by_id.insert(id, player);
     }
 
     fn remove(&mut self, id: u32) -> Option<Player> {
@@ -153,6 +198,9 @@ pub(crate) struct Network {
     pub(crate) players: RefCell<Players>,
     /// Kicks requested by `DropPlayer`, applied by [`ResourceManager::apply_drops`].
     pub(crate) pending_drops: RefCell<Vec<(u32, String)>>,
+    /// Deferral calls by player, in the order the scripts made them. Shared
+    /// with the deferral functions, which push onto it.
+    pub(crate) deferral_calls: Rc<RefCell<Vec<(u32, DeferralCall)>>>,
 }
 
 impl ResourceManager {
@@ -230,9 +278,9 @@ impl ResourceManager {
         }
     }
 
-    /// Admits or refuses a new connection: assigns its id, runs
-    /// `playerConnecting` with the player already known, then checks the
-    /// player limit.
+    /// Admits, defers or refuses a new connection: assigns its id, runs
+    /// `playerConnecting` with the player already known, applies the deferral
+    /// calls it made and settles the player.
     fn connecting(
         &self,
         connection: ConnectionId,
@@ -250,13 +298,223 @@ impl ResourceManager {
             .borrow_mut()
             .insert(id, Player::pending(name, endpoint, connection, fingerprint));
 
-        if let Some(reason) = self.connecting_refusal(id, name) {
-            self.network.players.borrow_mut().remove(id);
-            self.refuse(connection, name, endpoint, &reason);
+        if let Some(reason) = self.run_connecting(id, name) {
+            self.refuse_pending(id, &reason);
             return;
         }
+        self.apply_deferral_calls();
+        self.settle(id);
+    }
 
-        self.network.players.borrow_mut().admit(id);
+    /// Runs `playerConnecting` for the pending player `id`. Returns the reason
+    /// to refuse the player when a handler canceled the connection or set a
+    /// kick reason. Otherwise the player is left for [`settle`](Self::settle).
+    fn run_connecting(&self, id: u32, name: &str) -> Option<String> {
+        let kick_reason = Rc::new(RefCell::new(None::<String>));
+        let sink = Rc::clone(&kick_reason);
+        let set_kick_reason: HostFn = Rc::new(move |args: &[Value]| {
+            let reason = args
+                .first()
+                .and_then(Value::as_str)
+                .ok_or_else(|| ScriptError::Runtime("setKickReason expects a string".to_owned()))?;
+            *sink.borrow_mut() = Some(reason.to_owned());
+            Ok(Vec::new())
+        });
+        let (defer, update, done) = self.deferral_handlers(id);
+        let (kick_ref, defer_ref, update_ref, done_ref) = {
+            let mut functions = self.host_functions.borrow_mut();
+            (
+                functions.add(set_kick_reason),
+                functions.add(defer),
+                functions.add(update),
+                functions.add(done),
+            )
+        };
+        let table = Value::Map(vec![
+            (Value::from("defer"), Value::FuncRef(defer_ref.clone())),
+            (Value::from("update"), Value::FuncRef(update_ref.clone())),
+            (Value::from("done"), Value::FuncRef(done_ref.clone())),
+        ]);
+        let canceled = self.dispatch(
+            "playerConnecting",
+            EventSource::Player(id),
+            &[Value::from(name), Value::FuncRef(kick_ref.clone()), table],
+        );
+        // Function references are valid only for the dispatch, so
+        // `setKickReason` and `defer` go now. A handler that kept them gets a
+        // stale-reference error. `update` and `done` stay for as long as the
+        // connection is held.
+        {
+            let mut functions = self.host_functions.borrow_mut();
+            functions.remove(&kick_ref);
+            functions.remove(&defer_ref);
+        }
+        let functions = vec![update_ref, done_ref];
+        let leftover = match self.network.players.borrow_mut().get_mut(id) {
+            Some(player) => {
+                player.functions = functions;
+                None
+            }
+            None => Some(functions),
+        };
+        if let Some(functions) = leftover {
+            self.release_functions(&functions);
+        }
+
+        let reason = kick_reason.borrow_mut().take();
+        if canceled || reason.is_some() {
+            return Some(
+                reason
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or_else(|| DEFAULT_REFUSAL.to_owned()),
+            );
+        }
+        None
+    }
+
+    /// The `defer`, `update` and `done` functions of the `playerConnecting`
+    /// table for player `id`. Each one queues its call, to be applied by
+    /// [`apply_deferral_calls`](Self::apply_deferral_calls) after the script
+    /// call returns. A `done` without a reason, or with an empty one, carries no
+    /// reason at all.
+    fn deferral_handlers(&self, id: u32) -> (HostFn, HostFn, HostFn) {
+        let calls = Rc::clone(&self.network.deferral_calls);
+        let defer_calls = Rc::clone(&calls);
+        let defer: HostFn = Rc::new(move |_: &[Value]| {
+            defer_calls.borrow_mut().push((id, DeferralCall::Defer));
+            Ok(Vec::new())
+        });
+        let update_calls = Rc::clone(&calls);
+        let update: HostFn = Rc::new(move |args: &[Value]| {
+            let message = args.first().and_then(Value::as_str).ok_or_else(|| {
+                ScriptError::Runtime("deferrals.update expects a string".to_owned())
+            })?;
+            update_calls
+                .borrow_mut()
+                .push((id, DeferralCall::Update(message.to_owned())));
+            Ok(Vec::new())
+        });
+        let done: HostFn = Rc::new(move |args: &[Value]| {
+            let reason = match args.first() {
+                None | Some(Value::Nil) => None,
+                Some(value) => Some(value.as_str().ok_or_else(|| {
+                    ScriptError::Runtime("deferrals.done expects a string".to_owned())
+                })?),
+            };
+            let reason = reason.filter(|text| !text.is_empty()).map(str::to_owned);
+            calls.borrow_mut().push((id, DeferralCall::Done(reason)));
+            Ok(Vec::new())
+        });
+        (defer, update, done)
+    }
+
+    /// Applies the deferral calls queued since the last time, in the order they
+    /// were made, then settles every player they touched. Runs after each script
+    /// call that can queue them, so no script call is ever made from here.
+    pub(crate) fn apply_deferral_calls(&self) {
+        let calls = std::mem::take(&mut *self.network.deferral_calls.borrow_mut());
+        let mut touched: Vec<u32> = Vec::new();
+        for (player, call) in calls {
+            self.apply_deferral_call(player, call);
+            if !touched.contains(&player) {
+                touched.push(player);
+            }
+        }
+        for player in touched {
+            self.settle(player);
+        }
+    }
+
+    /// Applies one deferral call to player `player`. A call for a player that
+    /// is gone, or that the call does not apply to, does nothing.
+    fn apply_deferral_call(&self, player: u32, call: DeferralCall) {
+        match call {
+            DeferralCall::Defer => {
+                let mut players = self.network.players.borrow_mut();
+                if let Some(found) = players.get_mut(player).filter(|found| !found.admitted) {
+                    found
+                        .deferral
+                        .get_or_insert_with(|| Deferral {
+                            open: 0,
+                            since: Instant::now(),
+                        })
+                        .open += 1;
+                }
+            }
+            DeferralCall::Update(message) => {
+                let connection = self
+                    .network
+                    .players
+                    .borrow()
+                    .get(player)
+                    .filter(|found| !found.admitted && found.deferral.is_some())
+                    .map(|found| found.connection);
+                if let Some(connection) = connection {
+                    self.with_server(|server| {
+                        if let Err(err) = server.update_deferral(connection, &message) {
+                            warn!("cannot send a deferral update to player {player}: {err}");
+                        }
+                    });
+                }
+            }
+            DeferralCall::Done(None) => {
+                let mut players = self.network.players.borrow_mut();
+                if let Some(found) = players.get_mut(player).filter(|found| !found.admitted) {
+                    let ended = found.deferral.as_mut().is_some_and(|deferral| {
+                        deferral.open = deferral.open.saturating_sub(1);
+                        deferral.open == 0
+                    });
+                    if ended {
+                        found.deferral = None;
+                    }
+                }
+            }
+            DeferralCall::Done(Some(reason)) => self.refuse_pending(player, &reason),
+        }
+    }
+
+    /// Admits or refuses the player `id` when nothing holds its connection any
+    /// more: it is admitted, or refused as full when the player limit is
+    /// reached. A player that is admitted, gone or still deferred is left alone.
+    fn settle(&self, id: u32) {
+        let undecided = self
+            .network
+            .players
+            .borrow()
+            .get(id)
+            .is_some_and(|player| !player.admitted && player.deferral.is_none());
+        if !undecided {
+            return;
+        }
+        let full =
+            self.network.players.borrow().admitted_count() >= self.convars.borrow().max_clients();
+        if full {
+            self.refuse_pending(id, FULL_REASON);
+        } else {
+            self.admit(id);
+        }
+    }
+
+    /// Admits the pending player `id`: accepts its connection, sends it the
+    /// resources, entities and state, then runs `playerJoining`.
+    fn admit(&self, id: u32) {
+        let admitted = {
+            let mut players = self.network.players.borrow_mut();
+            players.get_mut(id).map(|player| {
+                player.admitted = true;
+                player.deferral = None;
+                (
+                    player.connection,
+                    player.name.clone(),
+                    player.endpoint,
+                    std::mem::take(&mut player.functions),
+                )
+            })
+        };
+        let Some((connection, name, endpoint, functions)) = admitted else {
+            return;
+        };
+        self.release_functions(&functions);
         self.with_server(|server| server.accept(connection, id));
         self.with_server(|server| {
             if let Err(err) = server.send_resources(id) {
@@ -269,52 +527,70 @@ impl ResourceManager {
         info!("{name} ({id}) joined from {endpoint}");
     }
 
-    /// Runs `playerConnecting` for the pending player `id` and checks the
-    /// player limit. Returns the reason to refuse the player, if there is one.
-    fn connecting_refusal(&self, id: u32, name: &str) -> Option<String> {
-        let kick_reason = Rc::new(RefCell::new(None::<String>));
-        let sink = Rc::clone(&kick_reason);
-        let set_kick_reason: HostFn = Rc::new(move |args: &[Value]| {
-            let reason = args
-                .first()
-                .and_then(Value::as_str)
-                .ok_or_else(|| ScriptError::Runtime("setKickReason expects a string".to_owned()))?;
-            *sink.borrow_mut() = Some(reason.to_owned());
-            Ok(Vec::new())
-        });
-        let function = self.host_functions.borrow_mut().add(set_kick_reason);
-        let canceled = self.dispatch(
-            "playerConnecting",
-            EventSource::Player(id),
-            &[Value::from(name), Value::FuncRef(function.clone())],
-        );
-        // Function references are valid only for the dispatch, so the host
-        // function goes now. A handler that kept it gets a stale-reference error.
-        self.host_functions.borrow_mut().remove(&function);
-
-        let reason = kick_reason.borrow_mut().take();
-        if canceled || reason.is_some() {
-            return Some(
-                reason
-                    .filter(|text| !text.is_empty())
-                    .unwrap_or_else(|| DEFAULT_REFUSAL.to_owned()),
-            );
+    /// Refuses the pending player `id` with `reason`.
+    fn refuse_pending(&self, id: u32, reason: &str) {
+        if let Some(player) = self.end_pending(id) {
+            self.refuse(player.connection, &player.name, player.endpoint, reason);
         }
-
-        let full =
-            self.network.players.borrow().admitted_count() >= self.convars.borrow().max_clients();
-        full.then(|| FULL_REASON.to_owned())
     }
 
-    /// Handles a connection that closed before the server could admit it. If the
-    /// connection was already admitted, the player leaves now: the network never
-    /// reports such a player as disconnected.
+    /// Forgets the pending player `id`, releasing its deferral functions, and
+    /// returns it. An admitted player is left alone.
+    fn end_pending(&self, id: u32) -> Option<Player> {
+        let player = {
+            let mut players = self.network.players.borrow_mut();
+            if players.get(id).is_none_or(|player| player.admitted) {
+                return None;
+            }
+            players.remove(id)
+        };
+        if let Some(player) = &player {
+            self.release_functions(&player.functions);
+        }
+        player
+    }
+
+    /// Removes the host functions in `functions`. A removed reference is a
+    /// stale reference from then on.
+    fn release_functions(&self, functions: &[FuncRef]) {
+        let mut host_functions = self.host_functions.borrow_mut();
+        for function in functions {
+            host_functions.remove(function);
+        }
+    }
+
+    /// Refuses every deferred player whose deferral has run past
+    /// `sixm_deferralTimeout`. Runs every frame; it allocates only when a player
+    /// has expired.
+    pub(crate) fn expire_deferrals(&self, now: Instant) {
+        let timeout = self.convars.borrow().deferral_timeout();
+        let expired = self.network.players.borrow().expired(now, timeout);
+        for player in expired {
+            self.refuse_pending(player, DEFERRAL_TIMEOUT_REASON);
+        }
+    }
+
+    /// Handles a connection that closed before the server decided it. An
+    /// admitted player leaves now. A deferred player is forgotten at once, and
+    /// neither `playerJoining` nor `playerDropped` runs for it.
     fn abandoned(&self, connection: ConnectionId) {
-        let player = self.network.players.borrow().of_connection(connection);
-        if let Some(player) = player {
-            self.player_dropped(player, "connection closed");
-        } else {
-            debug!("connection {connection} closed before it was admitted");
+        let found = {
+            let players = self.network.players.borrow();
+            players
+                .of_connection(connection)
+                .map(|player| (player, players.contains(player)))
+        };
+        match found {
+            Some((player, true)) => self.player_dropped(player, "connection closed"),
+            Some((player, false)) => {
+                if let Some(gone) = self.end_pending(player) {
+                    info!(
+                        "{} ({player}) closed the connection before it was admitted",
+                        gone.name
+                    );
+                }
+            }
+            None => debug!("connection {connection} closed before it was admitted"),
         }
     }
 

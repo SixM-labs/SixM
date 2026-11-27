@@ -9,7 +9,7 @@ use crate::files::{FileHash, ResourceEntry};
 use crate::wire::{Args, StateValue};
 
 /// Version of the wire protocol. A client must send it in its `Hello`.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Application protocol identifier negotiated during the TLS handshake.
 pub(crate) const ALPN: &[u8] = b"sixm/1";
@@ -36,6 +36,9 @@ pub(crate) const MAX_EVENT_NAME_LEN: usize = 256;
 pub(crate) const MAX_COMMAND_LEN: usize = 4096;
 /// Longest player name in characters, after trimming.
 pub(crate) const MAX_PLAYER_NAME_LEN: usize = 64;
+/// Longest progress message of a deferral, in bytes. Longer messages are cut
+/// on a character boundary when they are sent.
+pub(crate) const MAX_DEFERRAL_MESSAGE_LEN: usize = 4096;
 
 /// Time a connection may stay silent before QUIC closes it.
 pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -172,6 +175,11 @@ pub(crate) enum ServerMessage {
     EntitySnapshot {
         entities: Vec<EntityEntry>,
     },
+    /// Progress text for a connection that is held by deferrals. The client
+    /// keeps waiting for `Welcome` and treats the text as a log line.
+    Deferral {
+        message: String,
+    },
 }
 
 impl ServerMessage {
@@ -205,4 +213,8 @@ impl ServerMessage {
     pub(crate) const ENTITY_DELETED_TAG: u32 = 13;
     /// Variant index of [`ServerMessage::EntitySnapshot`] on the wire.
     pub(crate) const ENTITY_SNAPSHOT_TAG: u32 = 14;
+    /// Tag of [`ServerMessage::Deferral`] on the wire. It is 16, not the
+    /// variant's position in the enum, and index 15 stays unused. The frame is
+    /// encoded by `wire::encode_deferral`, never by the derived serializer.
+    pub(crate) const DEFERRAL_TAG: u32 = 16;
 }

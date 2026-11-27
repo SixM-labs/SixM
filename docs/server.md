@@ -181,6 +181,7 @@ Convar names are case-insensitive. Scripts read them with `GetConvar` and
 | `sixm_tickRate` | `20` | Frames per second, clamped to 1 to 1000. A value that is not a number gives 20. |
 | `endpoint_add_udp` | `0.0.0.0:30120` | Listen address. Read when the network starts. An address that does not parse stops the network. |
 | `sv_maxclients` | `32` | Player limit, clamped to 1 to 1024. A value that is not a number gives 32. |
+| `sixm_deferralTimeout` | `120` | Seconds a connection that `playerConnecting` deferred may wait for `done`, clamped to 1 to 3600. A deferral that runs longer is refused with `connection timed out`. A value that is not a number gives 120. |
 | `sv_hostname` | `SixM Server` | Server name sent to players when they connect. |
 
 Any other convar can be set with `set` and read by scripts. The server does
@@ -220,7 +221,7 @@ The server presents a self-signed certificate. Its file is set by
   runs. A refused connection also uses an id.
 - The player limit is `sv_maxclients`. A connection over the limit is refused
   with `Server is full`. Only admitted players count, not players still in
-  `playerConnecting`.
+  `playerConnecting` or held by deferrals.
 - Each player has the identifiers `license:<hex>`, the fingerprint of the
   client's certificate, and `ip:<address>`. See [lua-api.md](lua-api.md).
   Clients must present a certificate, so every player has a `license`.

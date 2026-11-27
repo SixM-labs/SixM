@@ -15,11 +15,11 @@ use std::time::Duration;
 
 use quinn::{Endpoint, Incoming, VarInt};
 use sixm_core::Value;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, watch};
 use tokio::task::{Id, JoinError, JoinSet};
 use tracing::{debug, error, warn};
 
-use crate::connection::{self, Decision, Shared, Ticket};
+use crate::connection::{self, Decision, Instruction, Shared, Ticket};
 use crate::entities::EntityEntry;
 use crate::error::NetError;
 use crate::files::{MAX_RESOURCE_NAME_LEN, PublishedResource, ResourceEntry, check_published};
@@ -30,7 +30,7 @@ use crate::protocol::{
 use crate::transfer::Advertised;
 use crate::transport;
 use crate::wire::{
-    encode_entity_snapshot, encode_entity_transforms, encode_event, encode_frame,
+    encode_deferral, encode_entity_snapshot, encode_entity_transforms, encode_event, encode_frame,
     encode_resources_snapshot, encode_state, encode_state_removed, encode_state_snapshot,
     validate_length,
 };
@@ -81,9 +81,11 @@ impl fmt::Display for ConnectionId {
 /// Something that happened on the network, delivered to the event callback.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NetEvent {
-    /// A connection sent a valid `Hello`. The server must call
-    /// [`NetServer::accept`] or [`NetServer::reject`] for it. `fingerprint` is
-    /// the fingerprint of the client certificate the handshake verified.
+    /// A connection sent a valid `Hello`. The server must eventually call
+    /// [`NetServer::accept`] or [`NetServer::reject`] for it, and may send it
+    /// progress text with [`NetServer::update_deferral`] until then.
+    /// `fingerprint` is the fingerprint of the client certificate the handshake
+    /// verified.
     Connecting {
         connection: ConnectionId,
         name: String,
@@ -125,6 +127,10 @@ enum Command {
     Kick {
         player: u32,
         reason: String,
+    },
+    Update {
+        connection: ConnectionId,
+        frame: Arc<[u8]>,
     },
 }
 
@@ -212,6 +218,15 @@ impl NetServer {
             connection,
             reason: reason.to_owned(),
         });
+    }
+
+    /// Sends progress text to a connection that has not been accepted or
+    /// rejected yet. The client shows it and keeps waiting. The text is cut to
+    /// 4096 bytes on a character boundary. Does nothing once the connection is
+    /// decided.
+    pub fn update_deferral(&self, connection: ConnectionId, message: &str) -> Result<(), NetError> {
+        let frame = encode_deferral(message, self.max_frame)?;
+        self.post(Command::Update { connection, frame })
     }
 
     /// Sends an event to one player. Sending to a player that is not connected
@@ -465,7 +480,8 @@ fn open_endpoint(bind: SocketAddr, credentials: Credentials) -> Result<Endpoint,
 struct Entry {
     task: Id,
     player: Option<u32>,
-    decision: Option<oneshot::Sender<Decision>>,
+    /// The channel to the connection task, until the connection is decided.
+    instructions: Option<mpsc::UnboundedSender<Instruction>>,
     outbound: mpsc::Sender<Arc<[u8]>>,
     kick: Arc<watch::Sender<Option<Arc<str>>>>,
 }
@@ -531,19 +547,28 @@ impl Supervisor {
                     self.kick_connection(id, &reason);
                 }
             }
+            Command::Update { connection, frame } => {
+                if let Some(instructions) = self
+                    .connections
+                    .get(&connection)
+                    .and_then(|entry| entry.instructions.as_ref())
+                {
+                    let _ = instructions.send(Instruction::Update(frame));
+                }
+            }
         }
     }
 
     fn spawn_connection(&mut self, incoming: Incoming) {
         let id = ConnectionId(self.next_id);
         self.next_id += 1;
-        let (decision_tx, decision_rx) = oneshot::channel();
+        let (instructions_tx, instructions_rx) = mpsc::unbounded_channel();
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_QUEUE_LEN);
         let (kick_tx, _) = watch::channel(None);
         let kick = Arc::new(kick_tx);
         let ticket = Ticket {
             id,
-            decision: decision_rx,
+            instructions: instructions_rx,
             outbound: outbound_rx,
             reply: outbound_tx.clone(),
             kick: Arc::clone(&kick),
@@ -561,7 +586,7 @@ impl Supervisor {
             Entry {
                 task,
                 player: None,
-                decision: Some(decision_tx),
+                instructions: Some(instructions_tx),
                 outbound: outbound_tx,
                 kick,
             },
@@ -573,7 +598,7 @@ impl Supervisor {
             debug!(connection = %id, "accept for an unknown connection");
             return;
         };
-        let Some(decision) = entry.decision.take() else {
+        let Some(instructions) = entry.instructions.take() else {
             debug!(connection = %id, "accept for a connection that is already decided");
             return;
         };
@@ -582,22 +607,27 @@ impl Supervisor {
                 player,
                 "player id is already in use, rejecting the connection"
             );
-            let _ = decision.send(Decision::Reject("player id already in use".to_owned()));
+            let _ = instructions.send(Instruction::Decide(Decision::Reject(
+                "player id already in use".to_owned(),
+            )));
             return;
         }
-        if decision.send(Decision::Accept(player)).is_ok() {
+        if instructions
+            .send(Instruction::Decide(Decision::Accept(player)))
+            .is_ok()
+        {
             entry.player = Some(player);
             self.players.insert(player, id);
         }
     }
 
     fn reject(&mut self, id: ConnectionId, reason: String) {
-        let decision = self
+        let instructions = self
             .connections
             .get_mut(&id)
-            .and_then(|entry| entry.decision.take());
-        if let Some(decision) = decision {
-            let _ = decision.send(Decision::Reject(reason));
+            .and_then(|entry| entry.instructions.take());
+        if let Some(instructions) = instructions {
+            let _ = instructions.send(Instruction::Decide(Decision::Reject(reason)));
         } else {
             debug!(connection = %id, "reject for a connection that is already decided");
         }
