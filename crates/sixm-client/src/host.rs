@@ -277,14 +277,16 @@ impl ClientHost for ClientRuntime {
                 "entity {entity} is not owned by this client"
             )));
         }
+        let queued = slot.is_dirty();
         if let Some(position) = position {
             slot.info.position = position;
+            slot.position_dirty = true;
         }
         if let Some(rotation) = rotation {
             slot.info.rotation = rotation;
+            slot.rotation_dirty = true;
         }
-        if !slot.dirty {
-            slot.dirty = true;
+        if !queued && slot.is_dirty() {
             self.owned_moves.borrow_mut().push(entity);
         }
         Ok(())
