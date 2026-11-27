@@ -7,9 +7,11 @@ use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{
     ClientConfig, Connection, ConnectionError, IdleTimeout, ServerConfig, TransportConfig, VarInt,
 };
+use rustls::DistinguishedName;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 
 use crate::error::NetError;
@@ -22,13 +24,14 @@ const MAX_CLOSE_REASON_LEN: usize = 512;
 /// Time allowed for the peer to report how a connection ended.
 pub(crate) const CLOSE_GRACE: Duration = Duration::from_secs(1);
 
-/// Builds the server endpoint configuration for `credentials`.
+/// Builds the server endpoint configuration for `credentials`. Every client
+/// must present a certificate, checked by [`ClientVerifier`].
 pub(crate) fn server_config(credentials: Credentials) -> Result<ServerConfig, NetError> {
     let (certificate, key) = credentials.into_parts();
     let mut tls = rustls::ServerConfig::builder_with_provider(provider())
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|err| NetError::Tls(err.to_string()))?
-        .with_no_client_auth()
+        .with_client_cert_verifier(ClientVerifier::new())
         .with_single_cert(vec![certificate], key)
         .map_err(|err| NetError::Tls(err.to_string()))?;
     tls.alpn_protocols = vec![ALPN.to_vec()];
@@ -39,20 +42,101 @@ pub(crate) fn server_config(credentials: Credentials) -> Result<ServerConfig, Ne
 }
 
 /// Builds the client configuration that checks server certificates with
-/// `verifier`.
-pub(crate) fn client_config(verifier: &Arc<ServerVerifier>) -> Result<ClientConfig, NetError> {
+/// `verifier` and presents `credentials` as the client certificate.
+pub(crate) fn client_config(
+    verifier: &Arc<ServerVerifier>,
+    credentials: Credentials,
+) -> Result<ClientConfig, NetError> {
+    let (certificate, key) = credentials.into_parts();
     let certificate_verifier: Arc<dyn ServerCertVerifier> = verifier.clone();
     let mut tls = rustls::ClientConfig::builder_with_provider(Arc::clone(&verifier.provider))
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|err| NetError::Tls(err.to_string()))?
         .dangerous()
         .with_custom_certificate_verifier(certificate_verifier)
-        .with_no_client_auth();
+        .with_client_auth_cert(vec![certificate], key)
+        .map_err(|err| NetError::Tls(err.to_string()))?;
     tls.alpn_protocols = vec![ALPN.to_vec()];
     let quic = QuicClientConfig::try_from(tls).map_err(|err| NetError::Tls(err.to_string()))?;
     let mut config = ClientConfig::new(Arc::new(quic));
     config.transport_config(Arc::new(transport()?));
     Ok(config)
+}
+
+/// Verifier for the clients' certificates on the server.
+///
+/// Any certificate is accepted: a client is identified by its key, not by an
+/// authority. What makes the client prove it holds that key is the handshake
+/// signature. Both TLS 1.2 and TLS 1.3 signatures are checked with the
+/// provider's algorithms, exactly as [`ServerVerifier`] does for the server.
+#[derive(Debug)]
+pub(crate) struct ClientVerifier {
+    provider: Arc<CryptoProvider>,
+}
+
+impl ClientVerifier {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            provider: provider(),
+        })
+    }
+}
+
+impl ClientCertVerifier for ClientVerifier {
+    fn offer_client_auth(&self) -> bool {
+        true
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        true
+    }
+
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
 }
 
 fn provider() -> Arc<CryptoProvider> {

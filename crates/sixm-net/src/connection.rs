@@ -6,12 +6,14 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use quinn::{Connection, Incoming, RecvStream, SendStream, VarInt};
+use rustls::pki_types::CertificateDer;
 use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 use tracing::{debug, warn};
 
 use crate::error::NetError;
 use crate::files::FileHash;
+use crate::identity::Fingerprint;
 use crate::protocol::{
     ClientMessage, EVENT_FLOOD, MAX_CONCURRENT_TRANSFERS, MAX_PENDING_REQUESTS,
     MAX_PLAYER_NAME_LEN, PROTOCOL_VERSION, SHUTTING_DOWN, ServerMessage, TOO_MANY_REQUESTS,
@@ -28,6 +30,8 @@ const CLOSE_NORMAL: u32 = 0;
 const CLOSE_PROTOCOL: u32 = 1;
 /// Time allowed for a final frame to be acknowledged before closing.
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
+/// Reason for closing a connection that presented no client certificate.
+const NO_CLIENT_CERTIFICATE: &str = "a client certificate is required";
 
 /// Settings and the event callback shared by every connection.
 pub(crate) struct Shared {
@@ -83,6 +87,10 @@ pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket)
             return;
         }
     };
+    let Some(fingerprint) = client_fingerprint(&connection) else {
+        close_connection(&connection, CLOSE_PROTOCOL, NO_CLIENT_CERTIFICATE);
+        return;
+    };
     let hello =
         match tokio::time::timeout_at(deadline, read_hello(&connection, shared.max_frame)).await {
             Ok(Ok(hello)) => hello,
@@ -115,6 +123,7 @@ pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket)
         connection: id,
         name,
         endpoint: connection.remote_address(),
+        fingerprint,
     });
 
     let decided = tokio::select! {
@@ -139,6 +148,16 @@ pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket)
             serve(&shared, accepted).await;
         }
     }
+}
+
+/// The fingerprint of the client certificate the handshake verified, or `None`
+/// when the connection has no peer certificate.
+fn client_fingerprint(connection: &Connection) -> Option<Fingerprint> {
+    let identity = connection.peer_identity()?;
+    let certificates = identity.downcast::<Vec<CertificateDer<'static>>>().ok()?;
+    certificates
+        .first()
+        .map(|certificate| Fingerprint::of(certificate))
 }
 
 /// Returns the trimmed player name if it is 1 to 64 characters long.

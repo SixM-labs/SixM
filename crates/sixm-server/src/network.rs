@@ -25,15 +25,43 @@ const DEFAULT_REFUSAL: &str = "Rejected by the server";
 /// Refusal sent when `sv_maxclients` players are already connected.
 const FULL_REASON: &str = "Server is full";
 
-/// A connected player.
+/// A player, from the moment its connection is decided on until it leaves.
 #[derive(Debug)]
 pub(crate) struct Player {
     pub(crate) name: String,
     pub(crate) endpoint: SocketAddr,
+    /// The connection the player came in on.
+    connection: ConnectionId,
+    /// `license:<fingerprint>` and `ip:<address>`, in that order.
+    identifiers: Vec<String>,
+    /// Whether `playerConnecting` let the player in. Until then the player is
+    /// known to `player_info` and the identifier functions only.
+    admitted: bool,
 }
 
-/// Connected players by server id. Ids count up from 1 and are never reused, so
-/// the map's order is also the order in which players joined.
+impl Player {
+    fn pending(
+        name: &str,
+        endpoint: SocketAddr,
+        connection: ConnectionId,
+        fingerprint: Fingerprint,
+    ) -> Self {
+        Self {
+            name: name.to_owned(),
+            endpoint,
+            connection,
+            identifiers: vec![
+                format!("license:{fingerprint}"),
+                format!("ip:{}", endpoint.ip()),
+            ],
+            admitted: false,
+        }
+    }
+}
+
+/// Players by server id. Ids count up from 1 and are never reused, so the
+/// map's order is also the order in which players joined. A player is listed
+/// and counted against the limit only once it is admitted.
 #[derive(Debug)]
 pub(crate) struct Players {
     /// Next id to hand out. Zero once every id has been used.
@@ -58,20 +86,47 @@ impl Players {
         (id != 0).then_some(id)
     }
 
-    fn count(&self) -> usize {
-        self.by_id.len()
+    /// How many players are admitted.
+    fn admitted_count(&self) -> usize {
+        self.by_id.values().filter(|player| player.admitted).count()
     }
 
+    /// Whether `id` is an admitted player.
     pub(crate) fn contains(&self, id: u32) -> bool {
-        self.by_id.contains_key(&id)
+        self.get(id).is_some_and(|player| player.admitted)
     }
 
+    /// The admitted players' ids, in join order.
+    fn admitted_ids(&self) -> Vec<u32> {
+        self.by_id
+            .iter()
+            .filter(|(_, player)| player.admitted)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// The player, admitted or not, that `id` names.
     fn get(&self, id: u32) -> Option<&Player> {
         self.by_id.get(&id)
     }
 
+    /// The player that came in on `connection`, if there is one.
+    fn of_connection(&self, connection: ConnectionId) -> Option<u32> {
+        self.by_id
+            .iter()
+            .find(|(_, player)| player.connection == connection)
+            .map(|(id, _)| *id)
+    }
+
     fn insert(&mut self, id: u32, player: Player) {
         self.by_id.insert(id, player);
+    }
+
+    /// Admits the pending player `id`.
+    fn admit(&mut self, id: u32) {
+        if let Some(player) = self.by_id.get_mut(&id) {
+            player.admitted = true;
+        }
     }
 
     fn remove(&mut self, id: u32) -> Option<Player> {
@@ -156,26 +211,56 @@ impl ResourceManager {
                 connection,
                 name,
                 endpoint,
-            } => self.connecting(connection, &name, endpoint),
+                fingerprint,
+            } => self.connecting(connection, &name, endpoint, fingerprint),
             NetEvent::Event { player, name, args } => self.player_event(player, &name, &args),
             NetEvent::Disconnected { player, reason } => self.player_dropped(player, &reason),
-            // Connections are decided synchronously in `connecting`, so there is
-            // no pending state to forget here.
-            NetEvent::Abandoned { connection } => {
-                debug!("connection {connection} closed before it was admitted");
-            }
+            NetEvent::Abandoned { connection } => self.abandoned(connection),
         }
     }
 
     /// Admits or refuses a new connection: assigns its id, runs
-    /// `playerConnecting`, then checks the player limit.
-    fn connecting(&self, connection: ConnectionId, name: &str, endpoint: SocketAddr) {
+    /// `playerConnecting` with the player already known, then checks the
+    /// player limit.
+    fn connecting(
+        &self,
+        connection: ConnectionId,
+        name: &str,
+        endpoint: SocketAddr,
+        fingerprint: Fingerprint,
+    ) {
         let allocated = self.network.players.borrow_mut().allocate();
         let Some(id) = allocated else {
             self.refuse(connection, name, endpoint, FULL_REASON);
             return;
         };
+        self.network
+            .players
+            .borrow_mut()
+            .insert(id, Player::pending(name, endpoint, connection, fingerprint));
 
+        if let Some(reason) = self.connecting_refusal(id, name) {
+            self.network.players.borrow_mut().remove(id);
+            self.refuse(connection, name, endpoint, &reason);
+            return;
+        }
+
+        self.network.players.borrow_mut().admit(id);
+        self.with_server(|server| server.accept(connection, id));
+        self.with_server(|server| {
+            if let Err(err) = server.send_resources(id) {
+                warn!("cannot send the resource list to player {id}: {err}");
+            }
+        });
+        self.join_entities(id);
+        self.join_state(id);
+        self.dispatch("playerJoining", EventSource::Player(id), &[]);
+        info!("{name} ({id}) joined from {endpoint}");
+    }
+
+    /// Runs `playerConnecting` for the pending player `id` and checks the
+    /// player limit. Returns the reason to refuse the player, if there is one.
+    fn connecting_refusal(&self, id: u32, name: &str) -> Option<String> {
         let kick_reason = Rc::new(RefCell::new(None::<String>));
         let sink = Rc::clone(&kick_reason);
         let set_kick_reason: HostFn = Rc::new(move |args: &[Value]| {
@@ -198,36 +283,28 @@ impl ResourceManager {
 
         let reason = kick_reason.borrow_mut().take();
         if canceled || reason.is_some() {
-            let text = reason
-                .filter(|text| !text.is_empty())
-                .unwrap_or_else(|| DEFAULT_REFUSAL.to_owned());
-            self.refuse(connection, name, endpoint, &text);
-            return;
+            return Some(
+                reason
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or_else(|| DEFAULT_REFUSAL.to_owned()),
+            );
         }
 
-        let full = self.network.players.borrow().count() >= self.convars.borrow().max_clients();
-        if full {
-            self.refuse(connection, name, endpoint, FULL_REASON);
-            return;
-        }
+        let full =
+            self.network.players.borrow().admitted_count() >= self.convars.borrow().max_clients();
+        full.then(|| FULL_REASON.to_owned())
+    }
 
-        self.with_server(|server| server.accept(connection, id));
-        self.network.players.borrow_mut().insert(
-            id,
-            Player {
-                name: name.to_owned(),
-                endpoint,
-            },
-        );
-        self.with_server(|server| {
-            if let Err(err) = server.send_resources(id) {
-                warn!("cannot send the resource list to player {id}: {err}");
-            }
-        });
-        self.join_entities(id);
-        self.join_state(id);
-        self.dispatch("playerJoining", EventSource::Player(id), &[]);
-        info!("{name} ({id}) joined from {endpoint}");
+    /// Handles a connection that closed before the server could admit it. If the
+    /// connection was already admitted, the player leaves now: the network never
+    /// reports such a player as disconnected.
+    fn abandoned(&self, connection: ConnectionId) {
+        let player = self.network.players.borrow().of_connection(connection);
+        if let Some(player) = player {
+            self.player_dropped(player, "connection closed");
+        } else {
+            debug!("connection {connection} closed before it was admitted");
+        }
     }
 
     /// Refuses a connection that has not joined, and logs why.
@@ -297,16 +374,11 @@ impl ResourceManager {
 
     /// Server ids of the connected players, in join order.
     pub(crate) fn player_ids(&self) -> Vec<u32> {
-        self.network
-            .players
-            .borrow()
-            .by_id
-            .keys()
-            .copied()
-            .collect()
+        self.network.players.borrow().admitted_ids()
     }
 
-    /// Name and endpoint of a connected player.
+    /// Name and endpoint of a player. A player who is still connecting is
+    /// known too.
     pub(crate) fn player_details(&self, player: u32) -> Option<PlayerInfo> {
         self.network
             .players
@@ -316,6 +388,16 @@ impl ResourceManager {
                 name: found.name.clone(),
                 endpoint: found.endpoint.to_string(),
             })
+    }
+
+    /// The identifiers of a player, admitted or not. Empty for an unknown id.
+    pub(crate) fn identifiers_of(&self, player: u32) -> Vec<String> {
+        self.network
+            .players
+            .borrow()
+            .get(player)
+            .map(|found| found.identifiers.clone())
+            .unwrap_or_default()
     }
 
     /// Every connected player with its id, in join order.

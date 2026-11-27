@@ -150,7 +150,7 @@ fn endpoint(manager: &ResourceManager, args: &[String], alias: bool) {
     }
 }
 
-/// `players`: lists the connected players with their server id, name and endpoint.
+/// `players`: lists the connected players with their server id, name, license and endpoint.
 fn players(manager: &ResourceManager) {
     let players = manager.player_list();
     if players.is_empty() {
@@ -159,7 +159,12 @@ fn players(manager: &ResourceManager) {
     }
     info!("{} player(s) connected", players.len());
     for (id, player) in players {
-        info!("{id:>5}  {}  {}", player.name, player.endpoint);
+        let license = manager
+            .identifiers_of(id)
+            .into_iter()
+            .find(|identifier| identifier.starts_with("license:"))
+            .unwrap_or_default();
+        info!("{id:>5}  {}  {license}  {}", player.name, player.endpoint);
     }
 }
 

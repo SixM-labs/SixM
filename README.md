@@ -161,6 +161,16 @@ connections are encrypted but not authenticated, so a man in the middle can
 impersonate the server. An empty `sixm_identityFile` makes a new certificate on
 every start instead.
 
+Clients present a certificate too, and the server requires one. The
+`license` identifier of a player is derived from that certificate, which the
+client keeps in `identity.bin` in its cache folder (`--identity` chooses another
+file). The client proves that it holds the key during the handshake, so the
+same file gives the same `license` on every connection. Losing `identity.bin`
+gives the player a new `license`. The `ip` identifier is the address the player
+connects from, without the port. Scripts read the identifiers with
+`GetPlayerIdentifiers` and `GetPlayerIdentifierByType(player, 'license')`, and
+they are known from the start of `playerConnecting`.
+
 ## State bags
 
 A state bag is a table of keys that the server keeps, and that clients can

@@ -18,6 +18,13 @@ given `PROTOCOL_VERSION`.
 - The server's identity can be pinned by SHA-256 fingerprint of the DER
   certificate. Without a pin, the client accepts any certificate. See
   [server.md](server.md) for the fingerprint.
+- **Client certificate.** The server requires every client to present a
+  certificate in the TLS handshake. The server does not check it against an
+  authority. The client proves that it holds the key by signing the handshake,
+  and the server verifies that signature with the crypto provider's algorithms,
+  as the client does for the server. The SHA-256 fingerprint of the certificate
+  is the player's `license` identifier. A connection without a verified
+  certificate is closed before its `Hello` is read.
 - Idle timeout is 30 seconds. Keep-alive packets are sent every 5 seconds.
 
 ## Streams
@@ -116,7 +123,9 @@ Server to client (`ServerMessage`):
 
 ### Handshake
 
-1. The client sends `Hello` with `protocol = 4` and its player name.
+1. The client sends `Hello` with `protocol = 4` and its player name. The
+   server has already verified the client certificate, so only a client with a
+   certificate gets this far.
 2. A different protocol number is refused with `Rejected`, for example
    `unsupported protocol version 3, server speaks 4`.
 3. A name outside 1 to 64 characters is refused.

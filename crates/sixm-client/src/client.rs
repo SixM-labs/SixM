@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use sixm_core::{EntityInfo, Value};
 use sixm_net::{
     ClientEvent, FILE_KIND_CLIENT, FILE_KIND_FILE, FILE_KIND_SHARED, FileEntry, Fingerprint,
-    NetClient, NetError, ResourceEntry,
+    Identity, NetClient, NetError, ResourceEntry,
 };
 use sixm_resources::ClientFileKind;
 
@@ -108,8 +108,9 @@ pub struct Client {
 }
 
 impl Client {
-    /// Connects as `name` and syncs the resources the server advertises: every
-    /// file missing from the cache in `cache_dir` is downloaded and verified.
+    /// Connects as `name` with the certificate of `identity` and syncs the
+    /// resources the server advertises: every file missing from the cache in
+    /// `cache_dir` is downloaded and verified.
     ///
     /// With a `fingerprint`, only a server whose certificate has that
     /// fingerprint is accepted. `timeout` bounds the handshake and the wait for
@@ -118,12 +119,15 @@ impl Client {
         addr: SocketAddr,
         name: &str,
         fingerprint: Option<Fingerprint>,
+        identity: &Identity,
         cache_dir: impl Into<PathBuf>,
         timeout: Duration,
     ) -> Result<Self, ClientError> {
         let net = match fingerprint {
-            Some(fingerprint) => NetClient::connect_pinned(addr, name, &fingerprint, timeout)?,
-            None => NetClient::connect(addr, name, timeout)?,
+            Some(fingerprint) => {
+                NetClient::connect_pinned(addr, name, &fingerprint, identity, timeout)?
+            }
+            None => NetClient::connect(addr, name, identity, timeout)?,
         };
         let mut client = Self {
             net,
@@ -148,6 +152,11 @@ impl Client {
     /// Name the server sent in its welcome.
     pub fn server_name(&self) -> &str {
         self.net.server_name()
+    }
+
+    /// Fingerprint of the certificate this client presented to the server.
+    pub fn fingerprint(&self) -> Fingerprint {
+        self.net.fingerprint()
     }
 
     /// Sends an event to the server.

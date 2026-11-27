@@ -81,7 +81,7 @@ same name is never reached.
 | `refresh` | Scans `sixm_resourcesPath` again. Running resources are not affected. `start` scans on its own if no scan has run yet. |
 | `endpoint_add_udp <ip:port>` | Stores the listen address in `endpoint_add_udp`. It applies at the next start. The address must parse. |
 | `endpoint_add_tcp <ip:port>` | The same as `endpoint_add_udp`. SixM speaks only UDP, and the command logs a note. |
-| `players` | Lists connected players with their id, name and endpoint. |
+| `players` | Lists connected players with their id, name, `license` identifier and endpoint. |
 | `entities` | Lists every entity with its id, kind, model hash, position and heading. |
 | `state [bag]` | Without a name, lists the state bags. With a name, prints the bag's keys and values. Replicated keys are marked. |
 | `set <name> <value>` | Stores a convar. The value is the rest of the line, joined with single spaces. |
@@ -154,7 +154,11 @@ The server presents a self-signed certificate. Its file is set by
 - Player ids start at 1 and count up. An id is not reused while the server
   runs. A refused connection also uses an id.
 - The player limit is `sv_maxclients`. A connection over the limit is refused
-  with `Server is full`.
+  with `Server is full`. Only admitted players count, not players still in
+  `playerConnecting`.
+- Each player has the identifiers `license:<hex>`, the fingerprint of the
+  client's certificate, and `ip:<address>`. See [lua-api.md](lua-api.md).
+  Clients must present a certificate, so every player has a `license`.
 - A script can refuse a connection in `playerConnecting`. Without a reason the
   client sees `Rejected by the server`.
 - Each player's inbound events are rate limited to 100 events per second

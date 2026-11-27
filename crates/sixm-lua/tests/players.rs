@@ -25,6 +25,12 @@ fn join(host: &TestHost, players: &[(u32, &str)]) {
     host.players.replace(list);
 }
 
+/// Gives player `id` the identifiers `identifiers`, in order.
+fn identify(host: &TestHost, id: u32, identifiers: &[&str]) {
+    let list = identifiers.iter().map(|text| (*text).to_owned()).collect();
+    host.identifiers.borrow_mut().push((id, list));
+}
+
 /// The text of an error value that a `pcall` caught.
 fn error_text(value: &Value) -> String {
     value.as_str().unwrap_or_default().to_owned()
@@ -260,5 +266,98 @@ fn net_event_source_is_a_number_that_player_functions_accept() {
             ClientTarget::Player(7),
             vec![Value::from("alice")],
         )]
+    );
+}
+
+const IDENTIFIER_EXPORTS: &str = "exports('list', function(p) return GetPlayerIdentifiers(p) end)\n\
+     exports('count', function(p) return GetNumPlayerIdentifiers(p) end)\n\
+     exports('at', function(p, i) return GetPlayerIdentifier(p, i) end)\n\
+     exports('byType', function(p, kind) return GetPlayerIdentifierByType(p, kind) end)\n";
+
+#[test]
+fn identifier_functions_list_count_index_and_filter_by_type() {
+    let host = new_host();
+    let rt = start(
+        &host,
+        "ids",
+        &["list", "count", "at", "byType"],
+        &[("main.lua", IDENTIFIER_EXPORTS)],
+    );
+    join(&host, &[(7, "alice")]);
+    identify(&host, 7, &["license:abc", "ip:127.0.0.1"]);
+
+    assert_eq!(
+        call(&rt, "list", &[Value::Int(7)]),
+        vec![Value::Array(vec![
+            Value::from("license:abc"),
+            Value::from("ip:127.0.0.1"),
+        ])]
+    );
+    assert_eq!(
+        call(&rt, "list", &[Value::from("7")]),
+        vec![Value::Array(vec![
+            Value::from("license:abc"),
+            Value::from("ip:127.0.0.1"),
+        ])]
+    );
+    assert_eq!(call(&rt, "count", &[Value::Int(7)]), vec![Value::Int(2)]);
+    assert_eq!(
+        call(&rt, "at", &[Value::Int(7), Value::Int(0)]),
+        vec![Value::from("license:abc")]
+    );
+    assert_eq!(
+        call(&rt, "at", &[Value::Int(7), Value::Int(1)]),
+        vec![Value::from("ip:127.0.0.1")]
+    );
+    assert_eq!(
+        call(&rt, "at", &[Value::Int(7), Value::Int(2)]),
+        vec![Value::Nil]
+    );
+    assert_eq!(
+        call(&rt, "at", &[Value::Int(7), Value::Int(-1)]),
+        vec![Value::Nil]
+    );
+    assert_eq!(
+        call(&rt, "byType", &[Value::Int(7), Value::from("license")]),
+        vec![Value::from("license:abc")]
+    );
+    assert_eq!(
+        call(&rt, "byType", &[Value::Int(7), Value::from("ip")]),
+        vec![Value::from("ip:127.0.0.1")]
+    );
+    assert_eq!(
+        call(&rt, "byType", &[Value::Int(7), Value::from("steam")]),
+        vec![Value::Nil]
+    );
+}
+
+#[test]
+fn identifier_functions_answer_nothing_for_an_unknown_player() {
+    let host = new_host();
+    let rt = start(
+        &host,
+        "ids",
+        &["list", "count", "at", "byType"],
+        &[("main.lua", IDENTIFIER_EXPORTS)],
+    );
+    join(&host, &[(7, "alice")]);
+    identify(&host, 7, &["license:abc"]);
+
+    assert_eq!(
+        call(&rt, "list", &[Value::Int(9)]),
+        vec![Value::Array(Vec::new())]
+    );
+    assert_eq!(call(&rt, "count", &[Value::Int(9)]), vec![Value::Int(0)]);
+    assert_eq!(
+        call(&rt, "at", &[Value::Int(9), Value::Int(0)]),
+        vec![Value::Nil]
+    );
+    assert_eq!(
+        call(&rt, "byType", &[Value::Int(9), Value::from("license")]),
+        vec![Value::Nil]
+    );
+    assert_eq!(
+        call(&rt, "list", &[Value::from("seven")]),
+        vec![Value::Array(Vec::new())]
     );
 }

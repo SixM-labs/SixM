@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use common::Fixture;
 use sixm_client::{Client, ClientNotice, SyncStats};
+use sixm_net::Identity;
 use sixm_resources::ClientFileKind;
 use sixm_server::Input;
 
@@ -54,7 +55,9 @@ impl Harness {
     fn connect(&self, cache: &Path) -> Client {
         let addr = self.addr;
         let cache = cache.to_path_buf();
-        let handle = thread::spawn(move || Client::connect(addr, "tester", None, cache, TIMEOUT));
+        let handle = thread::spawn(move || {
+            Client::connect(addr, "tester", None, &Identity::Ephemeral, cache, TIMEOUT)
+        });
         let deadline = Instant::now() + TIMEOUT;
         while !handle.is_finished() {
             assert!(

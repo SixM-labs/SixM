@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use sixm_core::Value;
-use sixm_net::{ClientEvent, Fingerprint, NetClient};
+use sixm_net::{ClientEvent, Fingerprint, Identity, NetClient};
 
 const LISTEN_FOR: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -32,8 +32,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let values: Vec<Value> = args.map(Value::from).collect();
 
     let client = match fingerprint {
-        Some(fingerprint) => NetClient::connect_pinned(addr, &name, &fingerprint, CONNECT_TIMEOUT)?,
-        None => NetClient::connect(addr, &name, CONNECT_TIMEOUT)?,
+        Some(fingerprint) => NetClient::connect_pinned(
+            addr,
+            &name,
+            &fingerprint,
+            &Identity::Ephemeral,
+            CONNECT_TIMEOUT,
+        )?,
+        None => NetClient::connect(addr, &name, &Identity::Ephemeral, CONNECT_TIMEOUT)?,
     };
     println!(
         "connected as player {} to {}",
