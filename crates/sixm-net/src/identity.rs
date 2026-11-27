@@ -220,9 +220,53 @@ fn create_private(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
-/// Creates or truncates `path`. On Windows the file takes the access list of
-/// its folder, which usually keeps it to the current user.
-#[cfg(not(unix))]
+/// Creates or truncates `path`, then limits it to its owner before anything
+/// is written, so the key never sits in a file other users can read.
+#[cfg(windows)]
+fn create_private(path: &Path) -> io::Result<File> {
+    let file = File::create(path)?;
+    restrict_to_owner(path);
+    Ok(file)
+}
+
+/// Replaces the access list of `path` with one entry: full control for its
+/// owner (`OWNER RIGHTS`, SID `S-1-3-4`), with nothing inherited from the
+/// folder. `icacls` is run from the system folder by its full path, so no
+/// program on `PATH` can stand in for it. A file system without access lists,
+/// or a failure of `icacls`, leaves the folder's access list in place, and is
+/// logged as a warning.
+#[cfg(windows)]
+fn restrict_to_owner(path: &Path) {
+    use std::process::{Command, Stdio};
+
+    let system_root =
+        std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+    let icacls = system_root.join("System32").join("icacls.exe");
+    let outcome = Command::new(&icacls)
+        .arg(path)
+        .args(["/inheritance:r", "/grant:r", "*S-1-3-4:(F)"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match outcome {
+        Ok(status) if status.success() => {}
+        Ok(status) => tracing::warn!(
+            "cannot limit {} to its owner: icacls exited with {status}",
+            path.display()
+        ),
+        Err(err) => tracing::warn!(
+            "cannot limit {} to its owner: cannot run {}: {err}",
+            path.display(),
+            icacls.display()
+        ),
+    }
+}
+
+/// Creates or truncates `path`. Platforms other than Unix and Windows have no
+/// owner-only mode that the standard library can set, so the file takes the
+/// permissions of its folder.
+#[cfg(not(any(unix, windows)))]
 fn create_private(path: &Path) -> io::Result<File> {
     File::create(path)
 }
@@ -231,5 +275,56 @@ fn identity_error(path: &Path, reason: &str) -> NetError {
     NetError::Identity {
         path: path.to_path_buf(),
         reason: reason.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Credentials, Identity};
+
+    /// Creates a persistent identity in a fresh folder and returns its path.
+    fn stored_identity(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        let path = dir.path().join("identity.bin");
+        let first = Credentials::load(&Identity::Persistent(path.clone())).expect("created");
+        let again = Credentials::load(&Identity::Persistent(path.clone())).expect("loaded");
+        assert_eq!(
+            first.fingerprint(),
+            again.fingerprint(),
+            "the file is reused"
+        );
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stored_key_is_readable_by_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = stored_identity(&dir);
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_stored_key_is_limited_to_its_owner() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = stored_identity(&dir);
+        let system_root = std::env::var_os("SystemRoot").expect("SystemRoot is set");
+        let icacls = std::path::Path::new(&system_root)
+            .join("System32")
+            .join("icacls.exe");
+        let output = std::process::Command::new(icacls)
+            .arg(&path)
+            .output()
+            .expect("icacls runs");
+        let listing = String::from_utf8_lossy(&output.stdout);
+        // One entry, for the owner, and nothing inherited from the folder.
+        assert!(listing.contains("OWNER RIGHTS:(F)"), "{listing}");
+        assert!(!listing.contains("(I)"), "{listing}");
     }
 }

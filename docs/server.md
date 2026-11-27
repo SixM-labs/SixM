@@ -239,8 +239,10 @@ The server presents a self-signed certificate. Its file is set by
 - The file is created on the first start, together with its folder if needed.
 - The file holds the certificate and its PKCS#8 private key. Each part is
   preceded by its length as a `u32` in little-endian order.
-- On Unix the file is written with mode `0600`. On Windows that restriction is
-  not applied, so the private key is readable by other users of the machine.
+- On Unix the file is written with mode `0600`. On Windows,
+  before the key is written, its access list is replaced with one entry: full
+  control for the file's owner, with nothing inherited from the folder. A file
+  system without access lists keeps the folder's, with a warning in the log.
 - A file that is not a SixM identity is an error. The network does not start.
   Delete the file to create a new one.
 - The fingerprint is the SHA-256 digest of the certificate, written as 64
