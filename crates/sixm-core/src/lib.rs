@@ -15,12 +15,14 @@
 
 mod console;
 mod files;
+mod hash;
 mod runtime;
 mod state;
 mod value;
 
 pub use console::{TokenError, tokenize};
 pub use files::normalize_resource_path;
+pub use hash::joaat;
 pub use runtime::{
     ClientHost, ClientTarget, EventContext, EventSource, Host, PlayerInfo, ScriptError,
     ScriptRuntime, ServerHost,

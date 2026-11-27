@@ -5,6 +5,7 @@ use sixm_core::{FuncRef, ScriptError, Value};
 
 use crate::refs::FuncHandle;
 use crate::runtime::{IntoScriptResult, LuaRuntime, lua_err};
+use crate::vector::Vector;
 
 /// Whether functions may be converted into references.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -93,6 +94,10 @@ impl LuaRuntime {
             LuaValue::Number(float) => Value::Float(*float),
             LuaValue::String(text) => Value::String(Box::from(&*text.as_bytes())),
             LuaValue::Table(table) => self.table_value(table, depth, functions)?,
+            // A vector is data, so it crosses the network as well as between resources.
+            LuaValue::UserData(data) if data.is::<Vector>() => {
+                data.borrow::<Vector>().into_script()?.to_value()
+            }
             LuaValue::Function(_) | LuaValue::UserData(_) if functions == Functions::Refuse => {
                 return Err(ScriptError::Runtime(
                     "functions cannot be sent over the network".to_owned(),
@@ -175,6 +180,15 @@ impl LuaRuntime {
                     table.raw_set(self.lua_at(key, depth)?, self.lua_at(item, depth)?)?;
                 }
                 LuaValue::Table(table)
+            }
+            Value::Vector2(components) => {
+                LuaValue::UserData(self.lua.create_userdata(Vector::new(*components))?)
+            }
+            Value::Vector3(components) => {
+                LuaValue::UserData(self.lua.create_userdata(Vector::new(*components))?)
+            }
+            Value::Vector4(components) => {
+                LuaValue::UserData(self.lua.create_userdata(Vector::new(*components))?)
             }
             Value::FuncRef(func) => self.lua_function(func)?,
         })

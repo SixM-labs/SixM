@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use mlua::{Function, Lua, LuaString, MultiValue, Table, Value as LuaValue};
-use sixm_core::{EventSource, normalize_resource_path};
+use sixm_core::{EventSource, joaat, normalize_resource_path};
 
 use crate::client;
 use crate::events::handle_table;
@@ -17,6 +17,7 @@ use crate::runtime::{LuaRuntime, Side, bind_fn, lua_err};
 use crate::sandbox::Helpers;
 use crate::scheduler::delay_from_value;
 use crate::state;
+use crate::vector;
 
 /// Process-wide clock behind `GetGameTimer`.
 static START: OnceLock<Instant> = OnceLock::new();
@@ -43,6 +44,7 @@ pub(crate) fn install(runtime: &Rc<LuaRuntime>, helpers: &Helpers) -> mlua::Resu
         Side::Client { local_player } => client::install(runtime, &globals, local_player)?,
     }
     state::install(lua, weak, &globals)?;
+    vector::install(lua, &globals, helpers.type_fn.clone())?;
     globals.raw_set("exports", exports::table(runtime)?)?;
     Ok(())
 }
@@ -207,6 +209,7 @@ fn install_host(
         },
     )?;
     let get_game_timer = bind_fn(lua, weak, |_, (): ()| Ok(game_timer_ms()))?;
+    let get_hash_key = lua.create_function(|_, text: LuaString| Ok(hash_key(&text.as_bytes())))?;
 
     let host_functions = [
         ("GetCurrentResourceName", current_name),
@@ -218,6 +221,7 @@ fn install_host(
         ("ExecuteCommand", execute_command),
         ("RegisterCommand", register_command),
         ("GetGameTimer", get_game_timer),
+        ("GetHashKey", get_hash_key),
         ("IsDuplicityVersion", is_duplicity_version),
     ];
     for (name, function) in host_functions {
@@ -243,6 +247,15 @@ fn print_function(
         tracing::info!(target: "sixm::script", "[{resource}] {}", parts.join("\t"));
         Ok(())
     })
+}
+
+/// The `GetHashKey` value of `text`: its [`joaat`] hash as a signed 32-bit integer.
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "the hash is reinterpreted as signed, as scripts expect from GetHashKey"
+)]
+fn hash_key(text: &[u8]) -> i64 {
+    i64::from(joaat(text) as i32)
 }
 
 /// Milliseconds since the process first asked for the game timer.

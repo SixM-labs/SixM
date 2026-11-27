@@ -7,6 +7,7 @@ use mlua::{Lua, LuaString, Table, Value as LuaValue};
 use serde_json::Value as JsonValue;
 
 use crate::convert::{MAX_DEPTH, sequence_len};
+use crate::vector::Vector;
 
 /// Builds the `json` table.
 pub(crate) fn table(lua: &Lua) -> mlua::Result<Table> {
@@ -37,8 +38,23 @@ fn encode_value(value: &LuaValue, depth: usize) -> Result<JsonValue, String> {
             .ok_or_else(|| "cannot encode NaN or infinity".to_owned())?,
         LuaValue::String(text) => JsonValue::String(utf8(text)?),
         LuaValue::Table(table) => encode_table(table, depth + 1)?,
+        LuaValue::UserData(data) if data.is::<Vector>() => {
+            let vector = data.borrow::<Vector>().map_err(|err| err.to_string())?;
+            encode_vector(&vector)?
+        }
         other => return Err(format!("cannot encode a {} value", other.type_name())),
     })
+}
+
+/// A vector becomes an object with one field per component: `x`, `y`, `z` and `w`.
+fn encode_vector(vector: &Vector) -> Result<JsonValue, String> {
+    let mut object = serde_json::Map::new();
+    for (name, component) in vector.fields() {
+        let number = serde_json::Number::from_f64(f64::from(component))
+            .ok_or_else(|| "cannot encode NaN or infinity".to_owned())?;
+        object.insert(name.to_owned(), JsonValue::Number(number));
+    }
+    Ok(JsonValue::Object(object))
 }
 
 fn encode_table(table: &Table, depth: usize) -> Result<JsonValue, String> {

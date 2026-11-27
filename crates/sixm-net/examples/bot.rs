@@ -118,9 +118,25 @@ impl fmt::Display for Shown<'_> {
                 }
                 f.write_str("}")
             }
+            Value::Vector2(components) => write_vector(f, "vector2", components),
+            Value::Vector3(components) => write_vector(f, "vector3", components),
+            Value::Vector4(components) => write_vector(f, "vector4", components),
             Value::FuncRef(_) => f.write_str("<function>"),
         }
     }
+}
+
+/// Writes a vector the way scripts print it, as `vector3(1.0, 2.5, -3.0)`.
+fn write_vector(f: &mut fmt::Formatter<'_>, name: &str, components: &[f32]) -> fmt::Result {
+    f.write_str(name)?;
+    f.write_str("(")?;
+    for (index, component) in components.iter().enumerate() {
+        if index > 0 {
+            f.write_str(", ")?;
+        }
+        write!(f, "{component:?}")?;
+    }
+    f.write_str(")")
 }
 
 /// Values separated by commas, as in an argument list.

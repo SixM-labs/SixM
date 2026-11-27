@@ -40,7 +40,12 @@ const TAG_FLOAT: u32 = 3;
 const TAG_STRING: u32 = 4;
 const TAG_ARRAY: u32 = 5;
 const TAG_MAP: u32 = 6;
-const VALUE_VARIANTS: &[&str] = &["Nil", "Bool", "Int", "Float", "String", "Array", "Map"];
+const TAG_VECTOR2: u32 = 7;
+const TAG_VECTOR3: u32 = 8;
+const TAG_VECTOR4: u32 = 9;
+const VALUE_VARIANTS: &[&str] = &[
+    "Nil", "Bool", "Int", "Float", "String", "Array", "Map", "Vector2", "Vector3", "Vector4",
+];
 const CLIENT_VARIANTS: &[&str] = &["Hello", "Event", "RequestFile"];
 const SERVER_VARIANTS: &[&str] = &[
     "Welcome",
@@ -139,7 +144,14 @@ fn check_value(value: &Value, depth: usize) -> Result<(), NetError> {
             check_value(key, depth + 1)?;
             check_value(value, depth + 1)
         }),
-        Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::String(_) => Ok(()),
+        Value::Nil
+        | Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::String(_)
+        | Value::Vector2(_)
+        | Value::Vector3(_)
+        | Value::Vector4(_) => Ok(()),
     }
 }
 
@@ -357,6 +369,9 @@ fn count_values(value: &Value) -> usize {
         | Value::Int(_)
         | Value::Float(_)
         | Value::String(_)
+        | Value::Vector2(_)
+        | Value::Vector3(_)
+        | Value::Vector4(_)
         | Value::FuncRef(_) => 1,
     }
 }
@@ -518,6 +533,15 @@ impl Serialize for Encode<'_> {
             ),
             Value::Map(entries) => {
                 serializer.serialize_newtype_variant(VALUE_NAME, TAG_MAP, "Map", &Pairs(entries))
+            }
+            Value::Vector2(v) => {
+                serializer.serialize_newtype_variant(VALUE_NAME, TAG_VECTOR2, "Vector2", v)
+            }
+            Value::Vector3(v) => {
+                serializer.serialize_newtype_variant(VALUE_NAME, TAG_VECTOR3, "Vector3", v)
+            }
+            Value::Vector4(v) => {
+                serializer.serialize_newtype_variant(VALUE_NAME, TAG_VECTOR4, "Vector4", v)
             }
             Value::FuncRef(_) => Err(serde::ser::Error::custom(
                 "function references cannot be sent over the network",
@@ -1173,6 +1197,9 @@ impl<'de> Visitor<'de> for ValueVisitor<'_> {
                     budget: self.budget,
                 })
                 .map(Value::Map),
+            TAG_VECTOR2 => variant.newtype_variant().map(Value::Vector2),
+            TAG_VECTOR3 => variant.newtype_variant().map(Value::Vector3),
+            TAG_VECTOR4 => variant.newtype_variant().map(Value::Vector4),
             other => Err(de::Error::unknown_variant(
                 &other.to_string(),
                 VALUE_VARIANTS,
@@ -1612,6 +1639,66 @@ mod tests {
         assert!(matches!(
             encode_state_snapshot(&[("global", "f", &func)], MAX_FRAME),
             Err(NetError::FunctionNotSendable)
+        ));
+    }
+
+    #[test]
+    fn vectors_round_trip_through_an_event_payload() {
+        let nan = f32::from_bits(0x7FC0_0001);
+        let args = vec![
+            Value::Vector2([1.5, nan]),
+            Value::Vector3([-0.0, f32::INFINITY, 3.0]),
+            Value::Vector4([nan, 2.0, -4.25, f32::NEG_INFINITY]),
+        ];
+        let payload = payload_of(&event_with(args));
+        let Ok(ClientMessage::Event { args, .. }) = decode_client_message(&payload) else {
+            panic!("event with vectors must decode");
+        };
+        let [Value::Vector2(v2), Value::Vector3(v3), Value::Vector4(v4)] = &args.0[..] else {
+            panic!("vectors must decode as vectors, got {:?}", args.0);
+        };
+        assert_eq!(v2.map(f32::to_bits), [1.5_f32.to_bits(), nan.to_bits()]);
+        assert_eq!(
+            v3.map(f32::to_bits),
+            [
+                (-0.0_f32).to_bits(),
+                f32::INFINITY.to_bits(),
+                3.0_f32.to_bits()
+            ]
+        );
+        assert_eq!(
+            v4.map(f32::to_bits),
+            [
+                nan.to_bits(),
+                2.0_f32.to_bits(),
+                (-4.25_f32).to_bits(),
+                f32::NEG_INFINITY.to_bits()
+            ]
+        );
+    }
+
+    #[test]
+    fn truncated_vector_payload_is_rejected() {
+        let payload = payload_of(&event_with(vec![Value::Vector3([1.0, 2.0, 3.0])]));
+        for cut in 1..=12 {
+            let short = &payload[..payload.len() - cut];
+            assert!(
+                matches!(decode_client_message(short), Err(NetError::Protocol(_))),
+                "payload cut by {cut} bytes must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn vectors_cost_one_value_each_in_the_budget() {
+        let args = vec![Value::Vector2([0.0; 2]); MAX_DECODED_VALUES];
+        let payload = payload_of(&event_with(args));
+        assert!(decode_client_message(&payload).is_ok());
+        let args = vec![Value::Vector2([0.0; 2]); MAX_DECODED_VALUES + 1];
+        let payload = payload_of(&event_with(args));
+        assert!(matches!(
+            decode_client_message(&payload),
+            Err(NetError::Protocol(reason)) if reason.contains("values")
         ));
     }
 
