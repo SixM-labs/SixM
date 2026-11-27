@@ -5,9 +5,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use sixm_core::{
-    ClientHost, EntityInfo, EntityKind, EventSource, FuncRef, GLOBAL_BAG, Host, HttpRequest,
-    ResourceName, ResourceState, ScriptError, ScriptRuntime, ServerHost, Value, entity_of_bag,
-    is_finite, player_of_bag,
+    ClientHost, EntityInfo, EntityKind, EntityState, EventSource, FuncRef, GLOBAL_BAG, Host,
+    HttpRequest, ResourceName, ResourceState, ScriptError, ScriptRuntime, ServerHost, Value,
+    entity_of_bag, is_finite, player_of_bag,
 };
 use tracing::warn;
 
@@ -208,6 +208,10 @@ impl Host for ClientRuntime {
         self.entities.borrow().get(&entity).map(|slot| slot.info)
     }
 
+    fn entity_state(&self, entity: u32) -> Option<EntityState> {
+        self.entities.borrow().get(&entity).map(|slot| slot.state)
+    }
+
     fn entities(&self, kind: Option<EntityKind>) -> Vec<u32> {
         self.entities
             .borrow()
@@ -342,6 +346,7 @@ impl ClientHost for ClientRuntime {
             id,
             ClientEntity {
                 info,
+                state: EntityState::default(),
                 epoch: 0,
                 position_dirty: false,
                 rotation_dirty: false,
@@ -396,6 +401,9 @@ impl ClientHost for ClientRuntime {
             return Err(ScriptError::Runtime(format!(
                 "entity {entity} is not owned by this client"
             )));
+        }
+        if slot.state.frozen || slot.state.attachment.is_some() {
+            return Ok(());
         }
         let queued = slot.is_dirty();
         if let Some(position) = position {

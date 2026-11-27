@@ -145,6 +145,10 @@ Differences from FiveM:
   (`files`, `client_scripts` and `shared_scripts`). `SaveResourceFile` writes to
   that resource's local data folder, but never over a declared file.
 
+Guides: [first resource](docs/guides/first-resource.md),
+[migrating from FiveM](docs/guides/from-fivem.md),
+[permissions](docs/guides/permissions.md),
+[deployment](docs/guides/deployment.md).
 Full reference: [docs/](docs/README.md).
 
 ## Players and network

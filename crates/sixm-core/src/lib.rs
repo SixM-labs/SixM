@@ -22,7 +22,10 @@ mod state;
 mod value;
 
 pub use console::{TokenError, tokenize};
-pub use entity::{EntityInfo, EntityKind, MAX_ENTITIES, entity_bag, entity_of_bag, is_finite};
+pub use entity::{
+    DEFAULT_ENTITY_HEALTH, EntityAttachment, EntityInfo, EntityKind, EntityState, MAX_ENTITIES,
+    entity_bag, entity_of_bag, is_finite,
+};
 pub use files::normalize_resource_path;
 pub use hash::joaat;
 pub use runtime::{

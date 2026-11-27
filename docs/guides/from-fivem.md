@@ -1,0 +1,256 @@
+# Migrating from FiveM
+
+SixM is designed so that developers who already know FiveM can write and port
+server logic with minimal changes. The scripting model, manifest structure, and
+Lua API names follow FiveM conventions, while the runtime, security boundaries,
+and transport are built from scratch in Rust.
+
+This guide covers what works the same, what differs intentionally, and what is
+not implemented yet. For exact function signatures, see
+[lua-api.md](../lua-api.md).
+
+## What works the same
+
+### Resource layout and `fxmanifest.lua`
+
+- Resources live in folders under `sixm_resourcesPath` (default `resources/`),
+  optionally grouped inside `[category]` folders. Dot-prefixed folders are
+  ignored.
+- Manifests use `fxmanifest.lua` (with `__resource.lua` fallback).
+- Supported functional directives: `shared_script` / `shared_scripts`,
+  `server_script` / `server_scripts`, `client_script` / `client_scripts`,
+  `file` / `files`, `dependency` / `dependencies`, `export` / `exports`, and
+  `server_export` / `server_exports`.
+- Globs (`*`, `**`), cross-resource `@other/path` script/file references,
+  `LoadResourceFile`, `SaveResourceFile`, `GetCurrentResourceName`,
+  `GetResourcePath`, `GetInvokingResource`, `GetResourceState`,
+  `GetNumResources`, `GetResourceByFindIndex`, `GetResourceMetadata`, and
+  `GetNumResourceMetadata` follow FiveM conventions.
+
+See [manifest.md](../manifest.md) for all manifest rules.
+
+### Events and `source`
+
+- Local and network events use `AddEventHandler`, `RemoveEventHandler`,
+  `RegisterNetEvent` (and `RegisterServerEvent` alias), `TriggerEvent`,
+  `TriggerClientEvent` (`-1` or player ID), `TriggerServerEvent`,
+  `CancelEvent`, and `WasEventCanceled`.
+- Latent transfers use `TriggerLatentClientEvent` and
+  `TriggerLatentServerEvent` with pacing in bytes per second.
+- Standard lifecycle events work as expected:
+  - Server: `onResourceStarting` (cancellable), `onResourceStart`,
+    `onServerResourceStart`, `onResourceStop`, `onServerResourceStop`,
+    `playerConnecting(name, setKickReason, deferrals)` (including
+    `deferrals.defer`, `deferrals.update`, `deferrals.done`), `playerJoining`,
+    `playerDropped(reason)`, `entityCreating` (cancellable), `entityCreated`,
+    and `entityRemoved`.
+  - Client: `onClientResourceStart`, `onResourceStart`, `onClientResourceStop`,
+    and `onResourceStop`.
+
+### Exports
+
+- Register exports via `exports('name', fn)` or manifest `export` /
+  `server_export` (which fall back to a global function of the same name).
+- Call another running resource's exports via `exports[res].name(...)` or
+  `exports[res]:name(...)`.
+- Callbacks can be passed across exports, and `GetInvokingResource()` tracks
+  the caller across both `TriggerEvent` and `exports` calls.
+
+### State bags
+
+- `GlobalState`, `Player(id).state`, `LocalPlayer.state`, and `Entity(id).state`
+  work with plain assignment for replicated writes and
+  `bag:set(key, value, replicated)` for choosing whether to replicate.
+- Assigning `nil` deletes a key.
+- `AddStateBagChangeHandler(keyFilter, bagFilter, fn)` and
+  `RemoveStateBagChangeHandler(cookie)` deliver `(bagName, key, value, reserved, replicated)`
+  with `reserved == 0`.
+- `GetPlayerFromStateBagName` and `GetEntityFromStateBagName` resolve
+  `player:<id>` and `entity:<id>` bag names.
+- Clients cannot write replicated state (`bag:set(k, v, false)` keeps local
+  client state only).
+
+### Routing buckets
+
+- Server-side routing buckets isolate entities, transforms, and entity state
+  bags per bucket (bucket `0` is the default, and player peds follow their
+  player):
+  - `SetPlayerRoutingBucket` / `GetPlayerRoutingBucket`
+  - `SetEntityRoutingBucket` / `GetEntityRoutingBucket`
+  - `SetRoutingBucketPopulationEnabled` / `GetRoutingBucketPopulationEnabled`
+  - `SetRoutingBucketEntityLockdownMode` / `GetRoutingBucketEntityLockdownMode`
+  - `GetPlayersInRoutingBucket` (a SixM extension returning sorted player IDs in
+    that bucket)
+
+### Key-value storage (KVP)
+
+- All per-resource KVP functions exist on both server and client:
+  `GetResourceKvpString`, `GetResourceKvpInt`, `GetResourceKvpFloat`,
+  `SetResourceKvp`, `SetResourceKvpInt`, `SetResourceKvpFloat`,
+  `DeleteResourceKvp`, `StartFindKvp`, `FindKvp`, `EndFindKvp`, the `NoSync`
+  variants, and `FlushResourceKvp`.
+- On the server, KVP files are stored under `sixm_kvpPath`
+  (`cache/kvp/<resource>.kvp`). On the client, they are stored locally under
+  `<cache>/data/<resource>.kvp`.
+
+### HTTP client and HTTP handlers
+
+- **Outgoing requests (server only):**
+  `PerformHttpRequest(url, callback, method, data, headers, options)` follows
+  the FiveM signature (`callback(statusCode, body, headers, errorData)`),
+  supports `http` and `https`, follows up to 5 redirects, and runs on worker
+  threads (`sixm_httpWorkers`) so frames never block.
+- **Incoming HTTP routes (server only):**
+  `SetHttpHandler(function(req, res) ... end)` serves `/<resource>/...` on the
+  TCP game port using `req.method`, `req.path`, `req.query`, `req.headers`,
+  `req.setDataHandler`, and `res.writeHead` / `res.write` / `res.send`.
+- **Built-in JSON endpoints:** `/info.json`, `/players.json`, and
+  `/dynamic.json` are served on the TCP port of `endpoint_add_udp` (unless
+  `sv_httpEnabled` is `false`).
+
+### Threads, timers, promises, and JSON
+
+- `CreateThread`, `CreateThreadNow`, `Wait`, `SetTimeout`, `ClearTimeout`,
+  `GetGameTimer`, and the `Citizen.*` aliases.
+- `promise.new`, `promise.all`, `promise.first`, `Await` / `Citizen.Await`,
+  with `:resolve`, `:reject`, and `:next`.
+- `json.encode` and `json.decode`, `GetHashKey`, `RegisterCommand`,
+  `GetConvar` / `GetConvarInt` / `GetConvarBool`, and `SetConvar` /
+  `SetConvarReplicated` / `SetConvarServerInfo`.
+
+### Client-created entities and ownership
+
+- Clients can create networked entities with `CreateVehicle`, `CreatePed`, and
+  `CreateObject` when `isNetwork` is `true` (using leased ID blocks so the
+  returned entity ID works immediately).
+- The server enforces `sv_entityLockdown` (`inactive`, `relaxed`, `strict`),
+  per-bucket lockdown modes, `sixm_maxClientEntities` (default `64`), and the
+  cancellable `entityCreating` event.
+- `NetworkGetEntityOwner`, `NetworkRequestControlOfEntity`,
+  `SetEntityOrphanMode(entity, 'delete' | 'migrate')`, and SixM's server-side
+  `SetEntityOwner(entity, player)` control entity ownership and migration when
+  an owner leaves or moves out of scope.
+- Distance-based entity scoping is controlled by `sixm_cullRadius` (default
+  `424` metres, `0` disables scoping).
+
+## Key differences
+
+### 1. Rust runtime and Lua 5.4 sandbox
+
+Each resource runs in an isolated **Lua 5.4** state inside `sixm-lua`:
+
+- **Removed globals:** `io`, `package`, `require`, `dofile`, and `loadfile` are
+  unavailable. Use `shared_scripts` / `server_scripts` / `client_scripts` in
+  `fxmanifest.lua` to load multiple Lua files into a resource, and
+  `LoadResourceFile` / `SaveResourceFile` for data files.
+- **Restricted `os` and `debug`:** `os` only provides `time`, `clock`, `date`,
+  and `difftime`. `debug` only provides `debug.traceback` and `debug.getinfo`.
+- **No bytecode loading:** `load` only accepts source text (`"t"` mode).
+- **Strict manifest sandbox:** `fxmanifest.lua` runs in a smaller Lua state
+  with a **16 MiB memory limit**, a **10,000,000 instruction limit**, and no
+  `pcall`, `xpcall`, or `coroutine` so manifests cannot hang the server.
+- **File path rules:** `SaveResourceFile` on the server only writes inside the
+  calling resource's folder; on the client it only writes into
+  `<cache>/data/<resource>/` and refuses to overwrite synced files. On the
+  client, `GetResourcePath` only returns the calling resource's own data
+  folder (`nil` for any other resource).
+
+### 2. `ExecuteCommand` runs with `resource.<name>` permissions
+
+In FiveM, server scripts calling `ExecuteCommand` effectively run with full
+console privileges. In SixM, `ExecuteCommand` runs as the principal
+`resource.<name>` of the calling resource:
+
+- Built-in commands (`start`, `stop`, `restart`, `ensure`, `set`, `exec`, etc.)
+  and restricted script commands require explicit ACE grants for
+  `resource.<name>` (for example, `add_ace resource.admin command.stop allow`).
+- Resources can **never** read or set convars by bare name through
+  `ExecuteCommand` (use `SetConvar` / `SetConvarReplicated` in Lua, or grant
+  `command.set` if needed).
+- A script that runs `ExecuteCommand` on behalf of a player must check
+  `IsPlayerAceAllowed(source, ...)` first, because `ExecuteCommand` executes
+  with the resource's permissions, not the player's.
+
+See [Permissions](permissions.md) for examples and details.
+
+### 3. Shared Lua vectors (reference semantics)
+
+In FiveM, `vector2`, `vector3`, and `vector4` are immutable value types. In
+SixM, vectors are mutable 32-bit float userdata:
+
+```lua
+local a = vector3(1.0, 2.0, 3.0)
+local b = a
+b.x = 10.0
+print(a.x) -- prints 10.0 in SixM (in FiveM, a.x would remain 1.0)
+```
+
+- Assigning a vector variable aliases the same userdata.
+- Arithmetic (`+`, `-`, `*`, `/`, unary `-`) and swizzles (`a.xy`, `a.zyx`)
+  always return a **new** vector, so `local b = a + vector3(0, 0, 0)` or
+  `local b = vector3(a.x, a.y, a.z)` creates an independent copy.
+- `type(v)` returns `"vector2"`, `"vector3"`, or `"vector4"`.
+
+### 4. `source` is preserved across `Wait`
+
+In FiveM, saving `local src = source` before calling `Wait(...)` inside an event
+handler is mandatory because the global `source` can be overwritten while
+suspended. SixM saves and restores `source` around `Wait`, so `source` remains
+valid after yielding. Saving `local src = source` is still good practice if you
+want scripts to stay portable back to FiveM.
+
+### 5. Headless client, identity, and transport
+
+- **Transport & TLS:** Game traffic uses **QUIC over UDP** (default
+  `0.0.0.0:30120`) with TLS 1.3 and mandatory client certificates. There is no
+  ENet-style plaintext UDP fallback, and `endpoint_add_tcp` is an alias that
+  sets the same address for both UDP (QUIC) and TCP (HTTP).
+- **Identifiers:** Every connected player has `license:<sha256>` (derived from
+  the client's certificate in `identity.bin`) and `ip:<address>`. Steam,
+  Discord, XBL, and Cfx.re token identifiers do not exist.
+- **Client `PlayerId()`:** On `sixm-client`, `PlayerId()` always returns `0`
+  (remote players are not assigned local player indices). Use
+  `GetPlayerServerId(PlayerId())` to get the client's server ID, and
+  `GetGamePool('CPed' | 'CVehicle' | 'CObject')` for entities in scope.
+- **Client `PerformHttpRequest`:** Intentionally disabled on the client so
+  scripts cannot make requests from a player's IP address; proxy external HTTP
+  requests through server scripts instead.
+
+### 6. Server-only runtime language
+
+Currently, only **Lua 5.4** is implemented. JavaScript (`v8`/Node) and C#
+(`Mono`) runtimes are not present.
+
+## What is missing (not yet implemented)
+
+Because SixM is a game-independent core without a game adapter yet, the
+following FiveM areas are missing:
+
+- **No game client or game adapter:** `sixm-client` is headless. A GTA VI game
+  adapter is planned once a PC release exists (see
+  [game-adapter.md](../design/game-adapter.md)).
+- **No GTA game natives:** Only core entity management natives exist
+  (`CreateVehicle`, `CreatePed`, `CreateObject`, `DeleteEntity`,
+  `GetEntityCoords` / `SetEntityCoords`, `GetEntityHeading` /
+  `SetEntityHeading`, `GetEntityRotation` / `SetEntityRotation`,
+  `GetEntityModel`, `GetEntityType`, `DoesEntityExist`, `NetworkGetEntityOwner`,
+  `GetAllVehicles` / `GetAllPeds` / `GetAllObjects`, `GetGamePool`, etc.).
+  Gameplay natives (weapons, animations, tasks, vehicle physics/doors/damage,
+  weather/time, world queries, blips, markers, audio) do not exist yet.
+- **No UI / NUI:** There is no embedded browser, `SendNUIMessage`,
+  `RegisterNUICallback`, DUI, or scaleform/HUD API.
+- **No built-in default resources:** There is no bundled `chat`,
+  `spawnmanager`, `sessionmanager`, or `mapmanager`. See `examples/server-data/`
+  for minimal example resources (`greeter`, `hello`, `queue`, `garage`).
+- **No server browser / master list:** `sets` / `SetConvarServerInfo` marks
+  convars as server info (exposed on `/info.json`), but nothing publishes them
+  to a master list yet.
+- **Minor API stubs/ignored parameters:**
+  - `CreateVehicleServerSetter` ignores its `type` argument.
+  - `GetEntityRotation` ignores its `order` argument.
+  - `SetRoutingBucketPopulationEnabled` stores the flag per bucket, but has no
+    effect without a game adapter.
+  - `fx_version`, `game`, and `lua54` in `fxmanifest.lua` are parsed and stored
+    as metadata, but do not alter runtime behaviour.
+  - Dependency strings starting with `/` in `fxmanifest.lua` are stored but
+    ignored in start ordering.

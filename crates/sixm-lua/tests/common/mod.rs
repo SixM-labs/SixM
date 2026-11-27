@@ -11,10 +11,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use sixm_core::{
-    ClientHost, ClientTarget, ConvarKind, EntityInfo, EntityKind, EventContext, EventSource,
-    FuncRef, GLOBAL_BAG, Host, HttpRequest, PlayerInfo, ResourceName, ResourceState, ScriptError,
-    ScriptRuntime, ServerHost, Value, WebReply, entity_bag, entity_of_bag, is_finite,
-    player_of_bag,
+    ClientHost, ClientTarget, ConvarKind, EntityAttachment, EntityInfo, EntityKind, EntityState,
+    EventContext, EventSource, FuncRef, GLOBAL_BAG, Host, HttpRequest, PlayerInfo, ResourceName,
+    ResourceState, ScriptError, ScriptRuntime, ServerHost, Value, WebReply, entity_bag,
+    entity_of_bag, is_finite, player_of_bag,
 };
 use sixm_kvp::KvpStore;
 use sixm_lua::LuaRuntime;
@@ -71,6 +71,8 @@ pub struct TestHost {
     /// Entities by id, in id order. On a server they are created and deleted
     /// through the host; on a client a test fills them in directly.
     pub entities: RefCell<BTreeMap<u32, EntityInfo>>,
+    /// Per-entity replicated state by id.
+    pub entity_states: RefCell<BTreeMap<u32, EntityState>>,
     /// The ped of each player by player id, as a server host reports it.
     pub player_peds: RefCell<HashMap<u32, u32>>,
     /// Routing buckets of players and entities outside bucket 0, by id.
@@ -317,6 +319,19 @@ impl Host for TestHost {
         self.entities.borrow().get(&entity).copied()
     }
 
+    fn entity_state(&self, entity: u32) -> Option<EntityState> {
+        self.entity_states
+            .borrow()
+            .get(&entity)
+            .copied()
+            .or_else(|| {
+                self.entities
+                    .borrow()
+                    .contains_key(&entity)
+                    .then(EntityState::default)
+            })
+    }
+
     fn entities(&self, kind: Option<EntityKind>) -> Vec<u32> {
         self.entities
             .borrow()
@@ -434,6 +449,9 @@ impl ServerHost for TestHost {
         let id = self.last_entity.get() + 1;
         self.last_entity.set(id);
         self.entities.borrow_mut().insert(id, info);
+        self.entity_states
+            .borrow_mut()
+            .insert(id, EntityState::default());
         Ok(id)
     }
 
@@ -460,6 +478,17 @@ impl ServerHost for TestHost {
 
     fn delete_entity(&self, entity: u32) -> bool {
         let existed = self.entities.borrow_mut().remove(&entity).is_some();
+        if existed {
+            self.entity_states.borrow_mut().remove(&entity);
+            for state in self.entity_states.borrow_mut().values_mut() {
+                if state
+                    .attachment
+                    .is_some_and(|attachment| attachment.parent == entity)
+                {
+                    state.attachment = None;
+                }
+            }
+        }
         let bag = entity_bag(entity);
         self.state
             .borrow_mut()
@@ -582,6 +611,84 @@ impl ServerHost for TestHost {
             .cloned()
             .unwrap_or_else(|| "inactive".to_owned())
     }
+
+    fn set_entity_frozen(&self, entity: u32, frozen: bool) -> Result<(), ScriptError> {
+        self.entity_state_slot(entity)?.frozen = frozen;
+        Ok(())
+    }
+
+    fn set_entity_velocity(&self, entity: u32, velocity: [f32; 3]) -> Result<(), ScriptError> {
+        if !is_finite(velocity) {
+            return Err(ScriptError::Runtime(
+                "entity velocity must be finite".to_owned(),
+            ));
+        }
+        self.entity_state_slot(entity)?.velocity = velocity;
+        Ok(())
+    }
+
+    fn set_entity_health(&self, entity: u32, health: i32) -> Result<(), ScriptError> {
+        self.entity_state_slot(entity)?.health = health.max(0);
+        Ok(())
+    }
+
+    fn set_entity_max_health(&self, entity: u32, max_health: i32) -> Result<(), ScriptError> {
+        self.entity_state_slot(entity)?.max_health = max_health.max(0);
+        Ok(())
+    }
+
+    fn set_entity_visible(&self, entity: u32, visible: bool) -> Result<(), ScriptError> {
+        self.entity_state_slot(entity)?.visible = visible;
+        Ok(())
+    }
+
+    fn set_entity_alpha(&self, entity: u32, alpha: u8) -> Result<(), ScriptError> {
+        self.entity_state_slot(entity)?.alpha = alpha;
+        Ok(())
+    }
+
+    fn attach_entity_to_entity(
+        &self,
+        entity: u32,
+        attachment: EntityAttachment,
+    ) -> Result<(), ScriptError> {
+        check_transform(attachment.offset, attachment.rotation)?;
+        if !self.entities.borrow().contains_key(&entity) {
+            return Err(ScriptError::Runtime(format!(
+                "entity {entity} does not exist"
+            )));
+        }
+        if !self.entities.borrow().contains_key(&attachment.parent) {
+            return Err(ScriptError::Runtime(format!(
+                "target entity {} does not exist",
+                attachment.parent
+            )));
+        }
+        if entity == attachment.parent {
+            return Err(ScriptError::Runtime(
+                "cannot attach an entity to itself".to_owned(),
+            ));
+        }
+        let states = self.entity_states.borrow();
+        let mut cursor = Some(attachment.parent);
+        while let Some(ancestor) = cursor {
+            if ancestor == entity {
+                return Err(ScriptError::Runtime("attachment cycle detected".to_owned()));
+            }
+            cursor = states
+                .get(&ancestor)
+                .and_then(|state| state.attachment)
+                .map(|att| att.parent);
+        }
+        drop(states);
+        self.entity_state_slot(entity)?.attachment = Some(attachment);
+        Ok(())
+    }
+
+    fn detach_entity(&self, entity: u32) -> Result<(), ScriptError> {
+        self.entity_state_slot(entity)?.attachment = None;
+        Ok(())
+    }
 }
 
 impl TestHost {
@@ -598,6 +705,9 @@ impl TestHost {
             owner,
         };
         self.entities.borrow_mut().insert(id, info);
+        self.entity_states
+            .borrow_mut()
+            .insert(id, EntityState::default());
         id
     }
 }
@@ -632,6 +742,24 @@ impl TestHost {
         let entities = self.entities.borrow_mut();
         std::cell::RefMut::filter_map(entities, |map| map.get_mut(&entity))
             .map_err(|_| ScriptError::Runtime(format!("entity {entity} does not exist")))
+    }
+
+    /// Mutable borrow of `entity`'s state, creating the default if the entity
+    /// was inserted directly into `self.entities`.
+    fn entity_state_slot(
+        &self,
+        entity: u32,
+    ) -> Result<std::cell::RefMut<'_, EntityState>, ScriptError> {
+        if !self.entities.borrow().contains_key(&entity) {
+            return Err(ScriptError::Runtime(format!(
+                "entity {entity} does not exist"
+            )));
+        }
+        let mut states = self.entity_states.borrow_mut();
+        states.entry(entity).or_default();
+        Ok(std::cell::RefMut::map(states, |map| {
+            map.get_mut(&entity).expect("inserted above")
+        }))
     }
 }
 
@@ -706,6 +834,9 @@ impl ClientHost for TestHost {
             owner: Some(self.local_player),
         };
         self.entities.borrow_mut().insert(id, info);
+        self.entity_states
+            .borrow_mut()
+            .insert(id, EntityState::default());
         self.created_requests.borrow_mut().push(id);
         Ok(id)
     }
@@ -738,6 +869,14 @@ impl ClientHost for TestHost {
                 ScriptError::Runtime(format!("entity {entity} is not owned by this client"))
             })?;
         check_transform(position.unwrap_or([0.0; 3]), rotation.unwrap_or([0.0; 3]))?;
+        if self
+            .entity_states
+            .borrow()
+            .get(&entity)
+            .is_some_and(|state| state.frozen || state.attachment.is_some())
+        {
+            return Ok(());
+        }
         if let Some(position) = position {
             info.position = position;
         }

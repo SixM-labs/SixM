@@ -14,12 +14,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use sixm_core::{
-    EntityInfo, EntityKind, EventContext, EventSource, FuncRef, Host, ResourceName, ResourceState,
-    ScriptRuntime, Value,
+    EntityAttachment, EntityInfo, EntityKind, EntityState, EventContext, EventSource, FuncRef,
+    Host, ResourceName, ResourceState, ScriptRuntime, Value,
 };
 use sixm_kvp::KvpStore;
 use sixm_lua::LuaRuntime;
-use sixm_net::EntityTransform;
+use sixm_net::{EntityStateUpdate, EntityTransform};
 use sixm_resources::ClientFileKind;
 use tracing::{error, info, warn};
 
@@ -42,6 +42,7 @@ pub enum Input {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ClientEntity {
     pub(crate) info: EntityInfo,
+    pub(crate) state: EntityState,
     /// The latest epoch the server sent for the entity. Owner updates carry it.
     pub(crate) epoch: u32,
     /// The position was moved since the last frame. Only an owned entity is
@@ -248,8 +249,8 @@ impl ClientRuntime {
 
     /// Records a created entity, and the local player's ped when it is one. An
     /// entity this client created and was waiting for is confirmed: it keeps
-    /// the local transform, which is the newer one, and takes the epoch.
-    fn create_entity(&self, id: u32, info: EntityInfo, epoch: u32) {
+    /// the local transform, which is the newer one, and takes the epoch and state.
+    fn create_entity(&self, id: u32, info: EntityInfo, state: EntityState, epoch: u32) {
         if info.kind == EntityKind::Ped && info.owner == Some(self.local_player) {
             self.local_ped.set(Some(id));
         }
@@ -258,12 +259,14 @@ impl ClientRuntime {
             Some(slot) if slot.pending => {
                 slot.pending = false;
                 slot.epoch = epoch;
+                slot.state = state;
             }
             _ => {
                 entities.insert(
                     id,
                     ClientEntity {
                         info,
+                        state,
                         epoch,
                         position_dirty: false,
                         rotation_dirty: false,
@@ -355,6 +358,46 @@ impl ClientRuntime {
                 slot.rotation_dirty = false;
             }
             slot.epoch = epoch;
+        }
+    }
+
+    /// Applies delta entity state updates received from the server. Unknown
+    /// entities are ignored.
+    fn apply_states(&self, updates: &[EntityStateUpdate]) {
+        let mut entities = self.entities.borrow_mut();
+        for update in updates {
+            let Some(slot) = entities.get_mut(&update.id) else {
+                continue;
+            };
+            if let Some(frozen) = update.frozen {
+                slot.state.frozen = frozen;
+                if frozen {
+                    slot.position_dirty = false;
+                    slot.rotation_dirty = false;
+                }
+            }
+            if let Some(velocity) = update.velocity {
+                slot.state.velocity = velocity;
+            }
+            if let Some(health) = update.health {
+                slot.state.health = health;
+            }
+            if let Some(max_health) = update.max_health {
+                slot.state.max_health = max_health;
+            }
+            if let Some(visible) = update.visible {
+                slot.state.visible = visible;
+            }
+            if let Some(alpha) = update.alpha {
+                slot.state.alpha = alpha;
+            }
+            if let Some(attachment) = update.attachment {
+                slot.state.attachment = attachment.map(EntityAttachment::from);
+                if slot.state.attachment.is_some() {
+                    slot.position_dirty = false;
+                    slot.rotation_dirty = false;
+                }
+            }
         }
     }
 
@@ -463,10 +506,16 @@ impl ClientRuntime {
                 self.deliver_state(&bag, &key, &value, true);
             }
             ClientNotice::StateBagRemoved { bag } => self.state.borrow_mut().remove_bag(&bag),
-            ClientNotice::EntityCreated { id, info, epoch } => {
-                self.create_entity(id, info, epoch);
+            ClientNotice::EntityCreated {
+                id,
+                info,
+                state,
+                epoch,
+            } => {
+                self.create_entity(id, info, state, epoch);
             }
             ClientNotice::EntityTransforms { updates } => self.apply_transforms(&updates),
+            ClientNotice::EntityStates { updates } => self.apply_states(&updates),
             ClientNotice::EntityDeleted { id } => self.delete_entity(id),
             ClientNotice::EntityIdLease { first, count } => self.lease_ids(first, count),
             ClientNotice::EntityCreateRefused { id, reason } => self.refuse_entity(id, &reason),

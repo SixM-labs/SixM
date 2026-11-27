@@ -3,7 +3,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::entity::{EntityInfo, EntityKind};
+use crate::entity::{EntityAttachment, EntityInfo, EntityKind, EntityState};
 use crate::value::{FuncRef, ResourceName, Value};
 
 /// Where an event came from. Exposed to scripts as `source`.
@@ -329,6 +329,10 @@ pub trait Host {
     /// server sent.
     fn entity(&self, entity: u32) -> Option<EntityInfo>;
 
+    /// The replicated state of entity `entity`, or `None` when it does not
+    /// exist.
+    fn entity_state(&self, entity: u32) -> Option<EntityState>;
+
     /// Ids of every existing entity of `kind`, or of every kind when `kind` is
     /// `None`, in ascending order.
     fn entities(&self, kind: Option<EntityKind>) -> Vec<u32>;
@@ -496,6 +500,40 @@ pub trait ServerHost {
     /// default, or `migrate`, which hands it to a player that holds it.
     /// Fails for any other mode.
     fn set_entity_orphan_mode(&self, entity: u32, mode: &str) -> Result<(), ScriptError>;
+
+    /// Freezes or unfreezes an entity's position. While frozen, owner transform
+    /// updates for the entity are refused. Fails for an unknown entity.
+    fn set_entity_frozen(&self, entity: u32, frozen: bool) -> Result<(), ScriptError>;
+
+    /// Sets an entity's linear velocity in metres per second. Fails for an
+    /// unknown entity or non-finite components.
+    fn set_entity_velocity(&self, entity: u32, velocity: [f32; 3]) -> Result<(), ScriptError>;
+
+    /// Sets an entity's health (clamped to `0..=i32::MAX`). Fails for an
+    /// unknown entity.
+    fn set_entity_health(&self, entity: u32, health: i32) -> Result<(), ScriptError>;
+
+    /// Sets an entity's maximum health (clamped to `0..=i32::MAX`). Fails for
+    /// an unknown entity.
+    fn set_entity_max_health(&self, entity: u32, max_health: i32) -> Result<(), ScriptError>;
+
+    /// Sets whether an entity is visible. Fails for an unknown entity.
+    fn set_entity_visible(&self, entity: u32, visible: bool) -> Result<(), ScriptError>;
+
+    /// Sets an entity's opacity (`0..=255`). Fails for an unknown entity.
+    fn set_entity_alpha(&self, entity: u32, alpha: u8) -> Result<(), ScriptError>;
+
+    /// Attaches `entity` to `attachment.parent`. Fails for unknown entities,
+    /// non-finite offsets or rotations, self-attachment, or attachment cycles.
+    fn attach_entity_to_entity(
+        &self,
+        entity: u32,
+        attachment: EntityAttachment,
+    ) -> Result<(), ScriptError>;
+
+    /// Detaches `entity` from its parent entity if attached. Fails for an
+    /// unknown entity.
+    fn detach_entity(&self, entity: u32) -> Result<(), ScriptError>;
 }
 
 /// Services only a client provides: the connection to the server.

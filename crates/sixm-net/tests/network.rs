@@ -20,10 +20,11 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, Serve
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use sixm_core::{FuncRef, Value};
 use sixm_net::{
-    ClientEvent, ConnectionId, EntityEntry, EntityTransform, FILE_KIND_CLIENT, FILE_KIND_FILE,
-    FileEntry, FileHash, Fingerprint, Identity, MAX_EXPORT_NAME_LEN, MAX_FILE_SIZE, MAX_METADATA,
-    MAX_METADATA_VALUE_LEN, NetClient, NetError, NetEvent, NetServer, PROTOCOL_VERSION,
-    PublishedFile, PublishedResource, ResourceEntry, ServerConfig, Traffic,
+    ClientEvent, ConnectionId, EntityEntry, EntityStateEntry, EntityStateUpdate, EntityTransform,
+    FILE_KIND_CLIENT, FILE_KIND_FILE, FileEntry, FileHash, Fingerprint, Identity,
+    MAX_EXPORT_NAME_LEN, MAX_FILE_SIZE, MAX_METADATA, MAX_METADATA_VALUE_LEN, NetClient, NetError,
+    NetEvent, NetServer, PROTOCOL_VERSION, PublishedFile, PublishedResource, ResourceEntry,
+    ServerConfig, Traffic,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -1278,6 +1279,7 @@ fn vehicle_entry(id: u32) -> EntityEntry {
         rotation: [0.0, 0.0, 90.0],
         owner: 0,
         epoch: 0,
+        state: EntityStateEntry::default(),
     }
 }
 
@@ -1287,6 +1289,16 @@ fn entity_creation_transforms_and_deletion_arrive_in_order() {
     let client = join(&server, "ann", 1);
     let entry = vehicle_entry(1);
     let moved = [(1, Some([4.0, 5.0, 6.0]), Some([0.0, 0.0, 45.0]), 3)];
+    let state_updates = [EntityStateUpdate {
+        id: 1,
+        frozen: Some(true),
+        velocity: None,
+        health: Some(120),
+        max_health: None,
+        visible: None,
+        alpha: Some(100),
+        attachment: None,
+    }];
 
     server
         .net
@@ -1296,6 +1308,10 @@ fn entity_creation_transforms_and_deletion_arrive_in_order() {
         .net
         .broadcast_entity_transforms(&moved)
         .expect("transforms are sent");
+    server
+        .net
+        .broadcast_entity_states(&state_updates)
+        .expect("states are sent");
     server
         .net
         .broadcast_entity_deleted(1)
@@ -1309,6 +1325,12 @@ fn entity_creation_transforms_and_deletion_arrive_in_order() {
         client_event(&client),
         ClientEvent::EntityTransforms {
             updates: moved.to_vec()
+        }
+    );
+    assert_eq!(
+        client_event(&client),
+        ClientEvent::EntityStates {
+            updates: state_updates.to_vec()
         }
     );
     assert_eq!(client_event(&client), ClientEvent::EntityDeleted { id: 1 });
@@ -1437,5 +1459,51 @@ fn raw_client_without_a_certificate_cannot_get_a_welcome() {
     assert!(
         server.events.try_recv().is_err(),
         "the server reports no connection without a certificate"
+    );
+}
+
+#[test]
+fn pre_encoded_state_frame_reaches_multiple_players() {
+    let server = start();
+    let alice = join(&server, "alice", 1);
+    let bob = join(&server, "bob", 2);
+
+    let frame = server
+        .net
+        .encode_state("entity:7", "color", &Value::from("red"))
+        .expect("valid state encodes");
+    let same = Arc::clone(&frame);
+    assert!(Arc::ptr_eq(&frame, &same));
+
+    server.net.send_encoded(1, frame).expect("send to alice");
+    server.net.send_encoded(2, same).expect("send to bob");
+
+    let expected = ClientEvent::StateBag {
+        bag: "entity:7".to_owned(),
+        key: "color".to_owned(),
+        value: Value::from("red"),
+    };
+    assert_eq!(client_event(&alice), expected);
+    assert_eq!(client_event(&bob), expected);
+
+    let broadcast = server
+        .net
+        .encode_state("global", "weather", &Value::from("sunny"))
+        .expect("valid broadcast state encodes");
+    server
+        .net
+        .broadcast_encoded(broadcast)
+        .expect("broadcast succeeds");
+    let expected_broadcast = ClientEvent::StateBag {
+        bag: "global".to_owned(),
+        key: "weather".to_owned(),
+        value: Value::from("sunny"),
+    };
+    assert_eq!(client_event(&alice), expected_broadcast);
+    assert_eq!(client_event(&bob), expected_broadcast);
+
+    assert!(
+        server.net.encode_state("", "k", &Value::Int(1)).is_err(),
+        "empty bag name is rejected"
     );
 }

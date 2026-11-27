@@ -9,6 +9,17 @@ may change the protocol and the API.
 
 ### Added
 
+- Per-entity replicated state (`PROTOCOL_VERSION` 13): `FreezeEntityPosition` /
+  `IsEntityPositionFrozen`, `SetEntityVelocity` / `GetEntityVelocity`,
+  `SetEntityHealth` / `GetEntityHealth` / `SetEntityMaxHealth` /
+  `GetEntityMaxHealth` (default `200`), `SetEntityVisible` / `IsEntityVisible`,
+  `SetEntityAlpha` / `GetEntityAlpha` / `ResetEntityAlpha` (clamped `0..=255`),
+  and `AttachEntityToEntity` / `DetachEntity` / `GetEntityAttachedTo` /
+  `IsEntityAttached`. Snapshots include full entity state, and per-frame delta
+  updates (`EntityStates`) replicate only changed fields within scope and
+  routing buckets. Frozen and attached entities refuse independent owner moves,
+  attached children follow parent movement, and deleting a parent
+  automatically detaches its children.
 - HTTP on the server's TCP port (the game address): the built-in `/info.json`,
   `/players.json` and `/dynamic.json`, and `SetHttpHandler` for resources under
   `/<resource>/...`. Request bodies, connections, timeouts and the request rate

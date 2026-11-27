@@ -8,7 +8,7 @@
 
 use sixm_core::Value;
 
-use crate::entities::EntityEntry;
+use crate::entities::{EntityAttachmentEntry, EntityEntry, EntityStateEntry, EntityStateUpdate};
 use crate::files::{FILE_KIND_FILE, FileEntry, ResourceEntry};
 use crate::protocol::{
     ClientMessage, MAX_COMMAND_LEN, MAX_DECODED_VALUES, MAX_FRAME, MAX_TRANSFORMS_PER_MESSAGE,
@@ -16,8 +16,8 @@ use crate::protocol::{
 };
 use crate::wire::{
     Args, FRAME_HEADER_LEN, StateValue, decode_client_message, decode_latent_body,
-    decode_server_message, encode_client_transforms, encode_entity_transforms, encode_frame,
-    encode_latent_body,
+    decode_server_message, encode_client_transforms, encode_entity_states,
+    encode_entity_transforms, encode_frame, encode_latent_body,
 };
 
 /// Inputs per run. Each input goes through every decoder.
@@ -79,6 +79,20 @@ fn sample_entity() -> EntityEntry {
         rotation: [0.0, 90.0, 0.0],
         owner: 1,
         epoch: 3,
+        state: EntityStateEntry {
+            frozen: true,
+            velocity: [0.5, 0.0, -1.0],
+            health: 180,
+            max_health: 200,
+            visible: true,
+            alpha: 200,
+            attachment: Some(EntityAttachmentEntry {
+                parent: 2,
+                bone_index: 1,
+                offset: [0.0, 1.0, 0.0],
+                rotation: [0.0, 0.0, 45.0],
+            }),
+        },
     }
 }
 
@@ -114,7 +128,7 @@ fn client_seeds() -> Vec<Vec<u8>> {
         (3, Some([1.0, 2.0, 3.0]), Some([0.0, 90.0, 0.0]), 2),
         (4, None, Some([0.0; 3]), 0),
     ];
-    let seeds: [Vec<u8>; 5] = [
+    let seeds: [Vec<u8>; 7] = [
         payload_of(&ClientMessage::Hello {
             protocol: PROTOCOL_VERSION,
             name: "player".to_owned(),
@@ -128,8 +142,81 @@ fn client_seeds() -> Vec<Vec<u8>> {
             line: "status".to_owned(),
         }),
         frame_payload(&encode_client_transforms(&transforms, MAX_FRAME).expect("seed encodes")),
+        payload_of(&ClientMessage::CreateEntity {
+            id: 9,
+            kind: 2,
+            model: 1_234,
+            position: [1.0, 2.0, 3.0],
+            rotation: [0.0, 0.0, 90.0],
+        }),
+        payload_of(&ClientMessage::RequestEntityControl { id: 7 }),
     ];
     Vec::from(seeds)
+}
+
+/// Valid payloads of entity-related server messages.
+fn entity_server_seeds() -> Vec<Vec<u8>> {
+    vec![
+        payload_of(&ServerMessage::EntityCreated {
+            entity: sample_entity(),
+        }),
+        frame_payload(
+            &encode_entity_transforms(&[(7, Some([1.0; 3]), Some([2.0; 3]), 3)], MAX_FRAME)
+                .expect("seed encodes"),
+        ),
+        payload_of(&ServerMessage::EntityDeleted { id: 7 }),
+        payload_of(&ServerMessage::EntitySnapshot {
+            entities: vec![sample_entity()],
+        }),
+        payload_of(&ServerMessage::EntityIdLease {
+            first: 100,
+            count: 32,
+        }),
+        payload_of(&ServerMessage::EntityCreateRefused {
+            id: 100,
+            reason: "locked".to_owned(),
+        }),
+        payload_of(&ServerMessage::EntityOwner {
+            id: 7,
+            owner: 1,
+            epoch: 3,
+            position: [1.0, 2.0, 3.0],
+            rotation: [0.0, 90.0, 0.0],
+        }),
+        frame_payload(
+            &encode_entity_states(
+                &[
+                    EntityStateUpdate {
+                        id: 7,
+                        frozen: Some(true),
+                        velocity: Some([1.0, 0.0, 0.0]),
+                        health: Some(150),
+                        max_health: Some(200),
+                        visible: Some(false),
+                        alpha: Some(128),
+                        attachment: Some(Some(EntityAttachmentEntry {
+                            parent: 2,
+                            bone_index: 0,
+                            offset: [0.0, 1.0, 0.0],
+                            rotation: [0.0; 3],
+                        })),
+                    },
+                    EntityStateUpdate {
+                        id: 8,
+                        frozen: None,
+                        velocity: None,
+                        health: None,
+                        max_health: None,
+                        visible: None,
+                        alpha: None,
+                        attachment: Some(None),
+                    },
+                ],
+                MAX_FRAME,
+            )
+            .expect("seed encodes"),
+        ),
+    ]
 }
 
 /// Valid payloads of every server message, used as mutation seeds.
@@ -138,7 +225,7 @@ fn server_seeds() -> Vec<Vec<u8>> {
         ("sv_name".to_owned(), Some("SixM".to_owned())),
         ("removed".to_owned(), None),
     ];
-    vec![
+    let mut seeds = vec![
         payload_of(&ServerMessage::Welcome {
             player: 1,
             server_name: "SixM".to_owned(),
@@ -178,22 +265,13 @@ fn server_seeds() -> Vec<Vec<u8>> {
             name: "core".to_owned(),
         }),
         payload_of(&ServerMessage::FileUnavailable { hash: [1; 32] }),
-        payload_of(&ServerMessage::EntityCreated {
-            entity: sample_entity(),
-        }),
-        frame_payload(
-            &encode_entity_transforms(&[(7, Some([1.0; 3]), Some([2.0; 3]), 3)], MAX_FRAME)
-                .expect("seed encodes"),
-        ),
-        payload_of(&ServerMessage::EntityDeleted { id: 7 }),
-        payload_of(&ServerMessage::EntitySnapshot {
-            entities: vec![sample_entity()],
-        }),
         payload_of(&ServerMessage::Convars { entries: convars }),
         payload_of(&ServerMessage::Deferral {
             message: "waiting".to_owned(),
         }),
-    ]
+    ];
+    seeds.extend(entity_server_seeds());
+    seeds
 }
 
 /// Valid body of a latent event.
@@ -301,6 +379,9 @@ fn check_input(data: &[u8]) -> usize {
                 assert!(entries.len() <= MAX_DECODED_VALUES);
             }
             ServerMessage::EntityTransforms { updates } => {
+                assert!(updates.len() <= MAX_DECODED_VALUES);
+            }
+            ServerMessage::EntityStates { updates } => {
                 assert!(updates.len() <= MAX_DECODED_VALUES);
             }
             _ => {}

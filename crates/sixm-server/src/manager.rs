@@ -8,15 +8,15 @@ use std::rc::{Rc, Weak};
 use std::time::Instant;
 
 use sixm_core::{
-    ClientHost, ClientTarget, ConvarKind, EntityInfo, EntityKind, EventContext, EventSource,
-    FuncRef, Host, HttpRequest, PlayerInfo, ResourceName, ResourceState, ScriptError,
-    ScriptRuntime, ServerHost, Value, WebReply,
+    ClientHost, ClientTarget, ConvarKind, EntityAttachment, EntityInfo, EntityKind, EntityState,
+    EventContext, EventSource, FuncRef, Host, HttpRequest, PlayerInfo, ResourceName, ResourceState,
+    ScriptError, ScriptRuntime, ServerHost, Value, WebReply,
 };
 use sixm_kvp::KvpStore;
 use sixm_lua::LuaRuntime;
 use sixm_net::{
-    MAX_CONVAR_NAME_LEN, MAX_CONVAR_VALUE_LEN, MAX_EXPORT_NAME_LEN, MAX_EXPORTS, MAX_METADATA,
-    MAX_METADATA_KEY_LEN, MAX_METADATA_VALUE_LEN, PublishedResource, Traffic,
+    EntityStateUpdate, MAX_CONVAR_NAME_LEN, MAX_CONVAR_VALUE_LEN, MAX_EXPORT_NAME_LEN, MAX_EXPORTS,
+    MAX_METADATA, MAX_METADATA_KEY_LEN, MAX_METADATA_VALUE_LEN, PublishedResource, Traffic,
 };
 use sixm_resources::{Catalog, DependencyError, ResourceError, ScanIssue};
 use tracing::{debug, error, info, warn};
@@ -107,6 +107,8 @@ pub struct ResourceManager {
     pub(crate) bucket_settings: RefCell<BucketSettings>,
     /// Reused between frames to hold the transforms sent to clients.
     pub(crate) entity_updates: RefCell<Vec<EntityUpdate>>,
+    /// Reused between frames to hold the delta entity state updates sent to clients.
+    pub(crate) entity_state_updates: RefCell<Vec<EntityStateUpdate>>,
     /// Access control entries and principal links, changed by the `add_ace` family.
     pub(crate) access: RefCell<AccessStore>,
     /// Functions the server offers to scripts, such as `setKickReason`.
@@ -153,6 +155,7 @@ impl ResourceManager {
             scopes: RefCell::default(),
             bucket_settings: RefCell::default(),
             entity_updates: RefCell::default(),
+            entity_state_updates: RefCell::default(),
             access: RefCell::default(),
             host_functions: RefCell::default(),
             frames: RefCell::default(),
@@ -999,6 +1002,10 @@ impl Host for ResourceManager {
         self.entities.borrow().get(entity)
     }
 
+    fn entity_state(&self, entity: u32) -> Option<EntityState> {
+        self.entities.borrow().state(entity)
+    }
+
     fn entities(&self, kind: Option<EntityKind>) -> Vec<u32> {
         self.entities.borrow().ids(kind)
     }
@@ -1140,6 +1147,44 @@ impl ServerHost for ResourceManager {
 
     fn set_entity_orphan_mode(&self, entity: u32, mode: &str) -> Result<(), ScriptError> {
         self.script_set_orphan_mode(entity, mode)
+    }
+
+    fn set_entity_frozen(&self, entity: u32, frozen: bool) -> Result<(), ScriptError> {
+        self.entities.borrow_mut().set_frozen(entity, frozen)
+    }
+
+    fn set_entity_velocity(&self, entity: u32, velocity: [f32; 3]) -> Result<(), ScriptError> {
+        self.entities.borrow_mut().set_velocity(entity, velocity)
+    }
+
+    fn set_entity_health(&self, entity: u32, health: i32) -> Result<(), ScriptError> {
+        self.entities.borrow_mut().set_health(entity, health)
+    }
+
+    fn set_entity_max_health(&self, entity: u32, max_health: i32) -> Result<(), ScriptError> {
+        self.entities
+            .borrow_mut()
+            .set_max_health(entity, max_health)
+    }
+
+    fn set_entity_visible(&self, entity: u32, visible: bool) -> Result<(), ScriptError> {
+        self.entities.borrow_mut().set_visible(entity, visible)
+    }
+
+    fn set_entity_alpha(&self, entity: u32, alpha: u8) -> Result<(), ScriptError> {
+        self.entities.borrow_mut().set_alpha(entity, alpha)
+    }
+
+    fn attach_entity_to_entity(
+        &self,
+        entity: u32,
+        attachment: EntityAttachment,
+    ) -> Result<(), ScriptError> {
+        self.entities.borrow_mut().attach(entity, attachment)
+    }
+
+    fn detach_entity(&self, entity: u32) -> Result<(), ScriptError> {
+        self.entities.borrow_mut().detach(entity)
     }
 
     fn routing_bucket_entity_lockdown_mode(&self, bucket: u32) -> String {
