@@ -16,8 +16,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::{Fixture, manifest};
-use sixm_client::{Client, ClientRuntime};
-use sixm_core::{Host, Value};
+use sixm_client::{Client, ClientRuntime, Input as ClientInput};
+use sixm_core::{EntityKind, Host, Value};
 use sixm_net::Identity;
 use sixm_server::Input;
 
@@ -25,8 +25,10 @@ use sixm_server::Input;
 const TIMEOUT: Duration = Duration::from_secs(20);
 /// How long each wait step blocks before checking again.
 const STEP: Duration = Duration::from_millis(5);
-/// The resource the tests start.
+/// The resource the vehicle tests start.
 const RESOURCE: &str = "entities_demo";
+/// Time between two console lines a test types into a client.
+const ASK_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Server side: creates the vehicle on `spawn`, moves it twice in one handler on
 /// `entities:move`, deletes it on `entities:remove`, and records the events.
@@ -115,11 +117,19 @@ struct Harness {
     fx: Fixture,
     input: Receiver<Input>,
     addr: SocketAddr,
+    /// The resource the server runs, which holds the report log.
+    resource: &'static str,
 }
 
 impl Harness {
-    /// A server with the entity resource started and its network running.
+    /// A server with the vehicle resource started and its network running.
     fn new() -> Self {
+        Self::start(RESOURCE, SERVER_SCRIPT, CLIENT_SCRIPT, &["spawn", "report"])
+    }
+
+    /// A server with `resource` started, whose server and client scripts are
+    /// `server` and `client`, and which exports `exports` from the server.
+    fn start(resource: &'static str, server: &str, client: &str, exports: &[&str]) -> Self {
         let fx = Fixture::new();
         fx.server.execute("endpoint_add_udp 127.0.0.1:0");
         let (sender, input) = mpsc::channel();
@@ -127,15 +137,19 @@ impl Harness {
             .server
             .start_network(sender)
             .expect("the network starts on loopback");
-        let text = manifest(&["server.lua"], &["spawn", "report"], &[])
-            + "client_scripts { 'client.lua' }\n";
+        let text = manifest(&["server.lua"], exports, &[]) + "client_scripts { 'client.lua' }\n";
         fx.add_resource(
-            RESOURCE,
+            resource,
             &text,
-            &[("server.lua", SERVER_SCRIPT), ("client.lua", CLIENT_SCRIPT)],
+            &[("server.lua", server), ("client.lua", client)],
         );
-        fx.server.execute(&format!("start {RESOURCE}"));
-        Self { fx, input, addr }
+        fx.server.execute(&format!("start {resource}"));
+        Self {
+            fx,
+            input,
+            addr,
+            resource,
+        }
     }
 
     /// Handles every queued server input.
@@ -147,15 +161,32 @@ impl Harness {
 
     /// Creates the vehicle through the resource and returns its id.
     fn spawn(&self) -> u32 {
-        let values = self
-            .fx
-            .manager()
-            .call_export(RESOURCE, "spawn", &[], None)
-            .expect("spawn is exported");
-        match values.first() {
-            Some(Value::Int(id)) => u32::try_from(*id).expect("ids fit in u32"),
-            other => panic!("spawn returned {other:?}, not an id"),
+        self.number("spawn", &[])
+    }
+
+    /// Calls export `name` with `args` and returns its first result, which must
+    /// be a whole number.
+    fn number(&self, name: &str, args: &[Value]) -> u32 {
+        match self.call(name, args) {
+            Value::Int(id) => u32::try_from(id).expect("a number that fits in u32"),
+            other => panic!("export `{name}` returned {other:?}, not a number"),
         }
+    }
+
+    /// Calls export `name` with `args` and returns its first result.
+    fn call(&self, name: &str, args: &[Value]) -> Value {
+        self.fx
+            .manager()
+            .call_export(self.resource, name, args, None)
+            .unwrap_or_else(|err| panic!("export `{name}`: {err}"))
+            .into_iter()
+            .next()
+            .unwrap_or(Value::Nil)
+    }
+
+    /// The report log of the server resource.
+    fn log(&self) -> String {
+        self.fx.text(self.resource, "report")
     }
 
     /// Connects a client that keeps its files in `cache` and its data in
@@ -201,7 +232,7 @@ impl Harness {
             self.fx.server.tick(Instant::now());
             runtime.pump(STEP);
             runtime.tick(Instant::now());
-            let log = self.fx.text(RESOURCE, "report");
+            let log = self.log();
             if done(&log) {
                 return log;
             }
@@ -209,6 +240,70 @@ impl Harness {
                 Instant::now() < deadline,
                 "timed out waiting for {what}; the server has:\n{log}"
             );
+        }
+    }
+
+    /// Like [`wait_for_report`](Self::wait_for_report), but types the console
+    /// line `line` into `asked` every [`ASK_INTERVAL`], so that it reports again
+    /// with what it sees now. Every client in `runtimes` is run, `asked` among them.
+    fn ask_until(
+        &self,
+        asked: &ClientRuntime,
+        runtimes: &[&ClientRuntime],
+        line: &str,
+        what: &str,
+        done: impl Fn(&str) -> bool,
+    ) -> String {
+        let deadline = Instant::now() + TIMEOUT;
+        let mut last: Option<Instant> = None;
+        loop {
+            self.pump_server();
+            self.fx.server.tick(Instant::now());
+            for runtime in runtimes {
+                runtime.pump(Duration::ZERO);
+                runtime.tick(Instant::now());
+            }
+            if last.is_none_or(|at| at.elapsed() >= ASK_INTERVAL) {
+                asked.handle(ClientInput::Line(line.to_owned()));
+                last = Some(Instant::now());
+            }
+            thread::sleep(STEP);
+            let log = self.log();
+            if done(&log) {
+                return log;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {what}; the server has:\n{log}"
+            );
+        }
+    }
+
+    /// Runs both loops for `frames` frames, so that anything sent has arrived.
+    fn run_frames(&self, runtimes: &[&ClientRuntime], frames: usize) {
+        for _ in 0..frames {
+            self.pump_server();
+            self.fx.server.tick(Instant::now());
+            for runtime in runtimes {
+                runtime.pump(Duration::ZERO);
+                runtime.tick(Instant::now());
+            }
+            thread::sleep(STEP);
+        }
+    }
+
+    /// Runs both loops until `done` holds, without any report to wait for.
+    fn settle_until(&self, runtimes: &[&ClientRuntime], what: &str, done: impl Fn() -> bool) {
+        let deadline = Instant::now() + TIMEOUT;
+        while !done() {
+            self.pump_server();
+            self.fx.server.tick(Instant::now());
+            for runtime in runtimes {
+                runtime.pump(Duration::ZERO);
+                runtime.tick(Instant::now());
+            }
+            thread::sleep(STEP);
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
         }
     }
 }
@@ -253,4 +348,273 @@ fn a_client_that_joins_later_sees_the_entity_in_its_snapshot() {
     assert!(has_line(&log, "1: exists true"), "{log}");
     assert!(has_line(&log, "1: coords 1.0 2.0 3.0"), "{log}");
     assert!(has_line(&log, "1: model true"), "{log}");
+}
+
+/// The resource of the ped tests.
+const PEDS_RESOURCE: &str = "peds_demo";
+
+/// Server side of the ped tests: reads and moves the peds of the players, and
+/// reports what it sees. Each report line starts with the player's id.
+const PEDS_SERVER: &str = r"
+local lines = {}
+
+local function record(line)
+    lines[#lines + 1] = line
+end
+
+RegisterNetEvent('peds:report', function(text)
+    record(('%d: %s'):format(source, text))
+end)
+
+function report()
+    return table.concat(lines, '\n')
+end
+
+function ped_of(player)
+    return GetPlayerPed(player)
+end
+
+function coords_of(player)
+    local c = GetEntityCoords(GetPlayerPed(player))
+    return ('%.1f %.1f %.1f'):format(c.x, c.y, c.z)
+end
+
+function teleport()
+    SetEntityCoords(GetPlayerPed(1), 100.0, 0.0, 0.0)
+end
+
+function vehicle()
+    return CreateVehicle('adder', 0.0, 0.0, 0.0, 0.0, true, false)
+end
+
+function owner_of(entity)
+    return NetworkGetEntityOwner(entity)
+end
+
+function exists(entity)
+    return DoesEntityExist(entity)
+end
+
+function model_is_player(entity)
+    return GetEntityModel(entity) == GetHashKey('player')
+end
+";
+
+/// Client side of the ped tests. Commands run from the test, and their reports
+/// go back to the server.
+const PEDS_CLIENT: &str = r"
+local function report(text)
+    TriggerServerEvent('peds:report', text)
+end
+
+-- Every ped of the pool except the local player's own.
+local function others()
+    local own = PlayerPedId()
+    local found = {}
+    for _, ped in ipairs(GetGamePool('CPed')) do
+        if ped ~= own then
+            found[#found + 1] = ped
+        end
+    end
+    return found
+end
+
+RegisterCommand('moveme', function()
+    SetEntityCoords(PlayerPedId(), 5.0, 6.0, 7.0)
+end, false)
+
+-- Tries to move every other ped, which must do nothing.
+RegisterCommand('steal', function()
+    for _, ped in ipairs(others()) do
+        SetEntityCoords(ped, 0.0, 0.0, 0.0)
+    end
+end, false)
+
+RegisterCommand('look', function()
+    local own = PlayerPedId()
+    local c = GetEntityCoords(own)
+    report(('own %d %.1f %.1f %.1f'):format(own, c.x, c.y, c.z))
+    for _, ped in ipairs(others()) do
+        local o = GetEntityCoords(ped)
+        report(('other %d %.1f %.1f %.1f'):format(ped, o.x, o.y, o.z))
+    end
+end, false)
+
+RegisterCommand('watch', function()
+    CreateThread(function()
+        local own = PlayerPedId()
+        while GetEntityCoords(own).x ~= 100.0 do
+            Wait(0)
+        end
+        local c = GetEntityCoords(own)
+        report(('teleported %.1f %.1f %.1f'):format(c.x, c.y, c.z))
+    end)
+end, false)
+";
+
+/// The report line a player's client sent, which starts with the player's id.
+fn reported(player: u32, text: &str) -> String {
+    format!("{player}: {text}")
+}
+
+#[test]
+fn players_move_their_own_peds_and_everyone_sees_them() {
+    let h = Harness::start(
+        PEDS_RESOURCE,
+        PEDS_SERVER,
+        PEDS_CLIENT,
+        &[
+            "report",
+            "ped_of",
+            "coords_of",
+            "teleport",
+            "vehicle",
+            "owner_of",
+            "exists",
+            "model_is_player",
+        ],
+    );
+    let dir_a = tempfile::tempdir().expect("temp dir");
+    let dir_b = tempfile::tempdir().expect("temp dir");
+    let a = h.connect(&dir_a.path().join("cache"), &dir_a.path().join("data"));
+    let b = h.connect(&dir_b.path().join("cache"), &dir_b.path().join("data"));
+
+    // Player 1 is `a`, and its ped exists on the server from the moment it joins.
+    let ped_a = h.number("ped_of", &[Value::Int(1)]);
+    let ped_b = h.number("ped_of", &[Value::Int(2)]);
+    assert_ne!(ped_a, 0);
+    assert_ne!(ped_b, 0);
+    // The default ped model is `player`, from `sixm_playerModel`.
+    assert_eq!(
+        h.call("model_is_player", &[Value::Int(i64::from(ped_a))]),
+        Value::Bool(true)
+    );
+    assert_eq!(h.number("owner_of", &[Value::Int(i64::from(ped_a))]), 1);
+    assert_eq!(h.number("owner_of", &[Value::Int(i64::from(ped_b))]), 2);
+    let vehicle = h.number("vehicle", &[]);
+    assert_eq!(
+        h.call("owner_of", &[Value::Int(i64::from(vehicle))]),
+        Value::Int(-1),
+        "a script-created entity has no owner"
+    );
+
+    // Each client knows its own ped and sees the other one at the origin.
+    h.ask_until(&a, &[&a, &b], "look", "a to see its own ped", |log| {
+        has_line(log, &reported(1, &format!("own {ped_a} 0.0 0.0 0.0")))
+    });
+    h.ask_until(&b, &[&a, &b], "look", "b to see a's ped", |log| {
+        has_line(log, &reported(2, &format!("other {ped_a} 0.0 0.0 0.0")))
+    });
+
+    // `a` moves its ped, and `b` sees the new position.
+    a.handle(ClientInput::Line("moveme".to_owned()));
+    h.ask_until(&b, &[&a, &b], "look", "b to see a's ped move", |log| {
+        has_line(log, &reported(2, &format!("other {ped_a} 5.0 6.0 7.0")))
+    });
+    assert_eq!(
+        h.call("coords_of", &[Value::Int(1)]),
+        Value::from("5.0 6.0 7.0")
+    );
+
+    // `b` cannot move the ped of `a`, on its client or on the server.
+    b.handle(ClientInput::Line("steal".to_owned()));
+    h.run_frames(&[&a, &b], 40);
+    assert_eq!(
+        h.call("coords_of", &[Value::Int(1)]),
+        Value::from("5.0 6.0 7.0")
+    );
+    assert_eq!(
+        b.entity(ped_a).map(|info| info.position),
+        Some([5.0, 6.0, 7.0])
+    );
+
+    // The server moves `a`'s ped, and `a` takes the teleport although it owns the ped.
+    h.call("teleport", &[]);
+    a.handle(ClientInput::Line("watch".to_owned()));
+    h.wait_for_report(&a, "a to see its ped teleported", |log| {
+        has_line(log, &reported(1, "teleported 100.0 0.0 0.0"))
+    });
+    assert_eq!(
+        a.entity(ped_a).map(|info| info.position),
+        Some([100.0, 0.0, 0.0])
+    );
+    h.ask_until(&b, &[&a, &b], "look", "b to see the teleport", |log| {
+        has_line(log, &reported(2, &format!("other {ped_a} 100.0 0.0 0.0")))
+    });
+
+    // When `a` leaves, its ped is deleted everywhere.
+    drop(a);
+    h.settle_until(&[&b], "a's ped to be deleted", || {
+        h.call("exists", &[Value::Int(i64::from(ped_a))]) == Value::Bool(false)
+            && b.entities(Some(EntityKind::Ped)) == [ped_b]
+    });
+    assert_eq!(h.call("ped_of", &[Value::Int(1)]), Value::Int(0));
+}
+
+#[test]
+fn a_move_sent_before_a_teleport_does_not_undo_the_teleport() {
+    let h = Harness::start(
+        PEDS_RESOURCE,
+        PEDS_SERVER,
+        PEDS_CLIENT,
+        &[
+            "report",
+            "ped_of",
+            "coords_of",
+            "teleport",
+            "owner_of",
+            "exists",
+        ],
+    );
+    let dir_a = tempfile::tempdir().expect("temp dir");
+    let dir_b = tempfile::tempdir().expect("temp dir");
+    let a = h.connect(&dir_a.path().join("cache"), &dir_a.path().join("data"));
+    let b = h.connect(&dir_b.path().join("cache"), &dir_b.path().join("data"));
+    let ped_a = h.number("ped_of", &[Value::Int(1)]);
+    h.ask_until(&a, &[&a, &b], "look", "a to see its own ped", |log| {
+        has_line(log, &reported(1, &format!("own {ped_a} 0.0 0.0 0.0")))
+    });
+
+    // `a` moves its ped, but its update is still on its side when the server
+    // teleports the ped, so the update was computed before the teleport.
+    a.handle(ClientInput::Line("moveme".to_owned()));
+    h.call("teleport", &[]);
+    h.fx.server.tick(Instant::now());
+    a.tick(Instant::now());
+
+    // The stale update reaches the server after the teleport and is refused,
+    // and `a` then takes the teleport from the server.
+    h.run_frames(&[&a, &b], 60);
+    assert_eq!(
+        a.entity(ped_a).map(|info| info.position),
+        Some([100.0, 0.0, 0.0]),
+        "a takes the teleport"
+    );
+    assert_eq!(
+        h.call("coords_of", &[Value::Int(1)]),
+        Value::from("100.0 0.0 0.0")
+    );
+
+    // `a` has stopped moving. Everyone keeps the teleport position.
+    h.ask_until(&a, &[&a, &b], "look", "a to report the teleport", |log| {
+        has_line(log, &reported(1, &format!("own {ped_a} 100.0 0.0 0.0")))
+    });
+    h.ask_until(&b, &[&a, &b], "look", "b to report the teleport", |log| {
+        has_line(log, &reported(2, &format!("other {ped_a} 100.0 0.0 0.0")))
+    });
+    h.run_frames(&[&a, &b], 60);
+    assert_eq!(
+        b.entity(ped_a).map(|info| info.position),
+        Some([100.0, 0.0, 0.0]),
+        "b keeps the teleport position"
+    );
+    assert_eq!(
+        h.call("coords_of", &[Value::Int(1)]),
+        Value::from("100.0 0.0 0.0")
+    );
+    assert_eq!(h.number("owner_of", &[Value::Int(i64::from(ped_a))]), 1);
+    assert_eq!(
+        h.call("exists", &[Value::Int(i64::from(ped_a))]),
+        Value::Bool(true)
+    );
 }

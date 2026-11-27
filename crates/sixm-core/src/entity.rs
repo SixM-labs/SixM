@@ -49,6 +49,9 @@ pub struct EntityInfo {
     /// Rotation in degrees: pitch around x, roll around y, yaw around z. The
     /// heading is the yaw.
     pub rotation: [f32; 3],
+    /// The player whose client moves the entity, or `None` when only the
+    /// server does. A player's own ped is owned by that player.
+    pub owner: Option<u32>,
 }
 
 /// Name of the state bag of entity `entity`.

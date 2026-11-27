@@ -101,6 +101,12 @@ pub enum NetEvent {
     /// A player sent a console line to run with its permissions. The network
     /// does not check the line; the server does.
     Command { player: u32, line: String },
+    /// A player sent new transforms of entities, as `(id, position, rotation, epoch)`.
+    /// The network does not check them; the server checks ownership and values.
+    EntityTransforms {
+        player: u32,
+        updates: Vec<(u32, [f32; 3], [f32; 3], u32)>,
+    },
     /// An accepted player disconnected, was kicked, or broke the protocol.
     Disconnected { player: u32, reason: String },
     /// A connection left before it was accepted or rejected.
@@ -353,11 +359,11 @@ impl NetServer {
     }
 
     /// Sends new transforms to every accepted player, as `(id, position,
-    /// rotation)`. The updates are split into as few frames as fit. Nothing is
-    /// sent for an empty list.
+    /// rotation, epoch)`. The updates are split into as few frames as fit.
+    /// Nothing is sent for an empty list.
     pub fn broadcast_entity_transforms(
         &self,
-        updates: &[(u32, [f32; 3], [f32; 3])],
+        updates: &[(u32, [f32; 3], [f32; 3], u32)],
     ) -> Result<(), NetError> {
         for frame in encode_entity_transforms(updates, self.max_frame)? {
             self.post(Command::Broadcast { frame })?;

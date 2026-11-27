@@ -307,7 +307,7 @@ fn players(manager: &ResourceManager) {
 fn entities(manager: &ResourceManager) {
     let entities = manager.entity_list();
     info!("{} entities", entities.len());
-    for (id, entity) in entities {
+    for (id, entity, _) in entities {
         let [x, y, z] = entity.position;
         info!(
             "{id:>6}  {:?}  model 0x{:08x}  position {x:.2} {y:.2} {z:.2}  heading {:.2}",

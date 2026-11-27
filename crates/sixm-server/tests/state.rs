@@ -240,8 +240,9 @@ fn joining_client_with_thousands_of_replicated_keys_is_not_kicked() {
     h.wait_for("the whole snapshot", || {
         while let Some(event) = alice.recv_timeout(Duration::ZERO) {
             match event {
-                // The resource list comes first on join; it is not under test here.
-                ClientEvent::Resources { .. } => {}
+                // The resource list comes first on join, and the player's own ped
+                // is in the entity snapshot. Neither is under test here.
+                ClientEvent::Resources { .. } | ClientEvent::EntitySnapshot { .. } => {}
                 ClientEvent::StateBag { bag, key, value } => {
                     assert_eq!(bag, "global");
                     received.insert(key, value);
@@ -344,8 +345,9 @@ fn dropping_a_player_removes_its_bag_and_later_writes_fail() {
     h.expect_state(&bob, "player:1", "ready");
 
     alice.disconnect();
+    // The player's ped is removed with its own state bag, which comes first.
     let removed = h.wait_for("the removal of player:1", || match bob.recv_timeout(STEP) {
-        Some(ClientEvent::StateBagRemoved { bag }) => Some(bag),
+        Some(ClientEvent::StateBagRemoved { bag }) if bag == "player:1" => Some(bag),
         _ => None,
     });
     assert_eq!(removed, "player:1");

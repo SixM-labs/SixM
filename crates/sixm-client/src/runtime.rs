@@ -14,12 +14,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use sixm_core::{
-    EntityInfo, EventContext, EventSource, FuncRef, Host, ResourceName, ResourceState,
+    EntityInfo, EntityKind, EventContext, EventSource, FuncRef, Host, ResourceName, ResourceState,
     ScriptRuntime, Value,
 };
 use sixm_lua::LuaRuntime;
 use sixm_resources::ClientFileKind;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::client::{Client, ClientNotice, SyncedResource};
 use crate::convars::Convars;
@@ -32,6 +32,22 @@ pub enum Input {
     Line(String),
     /// Stop the client. The text is shown in the log.
     Quit(String),
+}
+
+/// An entity transform as the client sends it: the entity id, position and rotation.
+type OwnedTransform = (u32, [f32; 3], [f32; 3], u32);
+
+/// An entity as this client keeps it: the server's last state, the teleport
+/// epoch of that state, and whether this client has moved it since the last
+/// frame and must tell the server.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ClientEntity {
+    pub(crate) info: EntityInfo,
+    /// The latest epoch the server sent for the entity. Owner updates carry it.
+    pub(crate) epoch: u32,
+    /// Queued for the server at the end of the frame. Only an owned entity is
+    /// ever queued.
+    pub(crate) dirty: bool,
 }
 
 /// A console command registered by a script with `RegisterCommand`.
@@ -76,7 +92,14 @@ pub struct ClientRuntime {
     /// Replicated state and local writes.
     pub(crate) state: RefCell<StateMirror>,
     /// The entities the server has created and not yet deleted, by id.
-    pub(crate) entities: RefCell<BTreeMap<u32, EntityInfo>>,
+    pub(crate) entities: RefCell<BTreeMap<u32, ClientEntity>>,
+    /// The local player's ped, once the server has created it.
+    pub(crate) local_ped: Cell<Option<u32>>,
+    /// Owned entities this client moved since the last frame, each listed
+    /// once per move. Reused between frames.
+    pub(crate) owned_moves: RefCell<Vec<u32>>,
+    /// The transforms sent at the end of a frame. Reused between frames.
+    owned_updates: RefCell<Vec<OwnedTransform>>,
     /// The synced files of each running resource: file name (as the manifest
     /// names it) to its path in the cache.
     pub(crate) files: RefCell<HashMap<String, HashMap<String, PathBuf>>>,
@@ -107,6 +130,9 @@ impl ClientRuntime {
             queued: RefCell::default(),
             state: RefCell::default(),
             entities: RefCell::default(),
+            local_ped: Cell::default(),
+            owned_moves: RefCell::default(),
+            owned_updates: RefCell::default(),
             files: RefCell::default(),
             metadata: RefCell::default(),
             transitions: RefCell::default(),
@@ -142,12 +168,87 @@ impl ClientRuntime {
         }
     }
 
-    /// Runs one frame at `now`: resumes every resource, then runs the queued commands.
+    /// Runs one frame at `now`: resumes every resource, runs the queued
+    /// commands, then sends the transforms of the owned entities moved in the
+    /// frame, as one batch.
     pub fn tick(&self, now: Instant) {
         for runtime in self.snapshot().iter() {
             runtime.tick(now);
         }
         self.drain_commands();
+        self.send_owned_moves();
+    }
+
+    /// Sends the latest transform of each owned entity moved since the last
+    /// frame. Nothing is sent when nothing moved. The buffers are reused, so a
+    /// frame allocates only when the connection queues the message.
+    fn send_owned_moves(&self) {
+        if self.owned_moves.borrow().is_empty() {
+            return;
+        }
+        let mut updates = std::mem::take(&mut *self.owned_updates.borrow_mut());
+        {
+            let mut moved = self.owned_moves.borrow_mut();
+            let mut entities = self.entities.borrow_mut();
+            for id in moved.drain(..) {
+                // A move listed twice is sent once, because the first one clears the flag.
+                if let Some(slot) = entities.get_mut(&id).filter(|slot| slot.dirty) {
+                    slot.dirty = false;
+                    updates.push((id, slot.info.position, slot.info.rotation, slot.epoch));
+                }
+            }
+        }
+        if !updates.is_empty() {
+            if let Err(err) = self.client.borrow().send_entity_transforms(&updates) {
+                warn!("cannot send the entity transforms: {err}");
+            }
+        }
+        updates.clear();
+        *self.owned_updates.borrow_mut() = updates;
+    }
+
+    /// Records a created entity, and the local player's ped when it is one.
+    fn create_entity(&self, id: u32, info: EntityInfo, epoch: u32) {
+        if info.kind == EntityKind::Ped && info.owner == Some(self.local_player) {
+            self.local_ped.set(Some(id));
+        }
+        self.entities.borrow_mut().insert(
+            id,
+            ClientEntity {
+                info,
+                epoch,
+                dirty: false,
+            },
+        );
+    }
+
+    /// Forgets a deleted entity, and the local ped when it was that one.
+    fn delete_entity(&self, id: u32) {
+        if self.local_ped.get() == Some(id) {
+            self.local_ped.set(None);
+        }
+        self.entities.borrow_mut().remove(&id);
+    }
+
+    /// Applies the transforms the server sent. An update with the epoch the
+    /// client already knows for an entity it owns is its own move echoed back,
+    /// and is skipped. Any other update is a server move, which replaces the
+    /// transform, takes the new epoch and drops a local move not yet sent.
+    /// Unknown entities are ignored.
+    fn apply_transforms(&self, updates: &[(u32, [f32; 3], [f32; 3], u32)]) {
+        let mut entities = self.entities.borrow_mut();
+        for &(id, position, rotation, epoch) in updates {
+            let Some(slot) = entities.get_mut(&id) else {
+                continue;
+            };
+            if slot.info.owner == Some(self.local_player) && slot.epoch == epoch {
+                continue;
+            }
+            slot.info.position = position;
+            slot.info.rotation = rotation;
+            slot.epoch = epoch;
+            slot.dirty = false;
+        }
     }
 
     /// Processes one input: a console line or a quit request. The commands
@@ -254,21 +355,11 @@ impl ClientRuntime {
                 self.deliver_state(&bag, &key, &value, true);
             }
             ClientNotice::StateBagRemoved { bag } => self.state.borrow_mut().remove_bag(&bag),
-            ClientNotice::EntityCreated { id, info } => {
-                self.entities.borrow_mut().insert(id, info);
+            ClientNotice::EntityCreated { id, info, epoch } => {
+                self.create_entity(id, info, epoch);
             }
-            ClientNotice::EntityTransforms { updates } => {
-                let mut entities = self.entities.borrow_mut();
-                for (id, position, rotation) in updates {
-                    if let Some(info) = entities.get_mut(&id) {
-                        info.position = position;
-                        info.rotation = rotation;
-                    }
-                }
-            }
-            ClientNotice::EntityDeleted { id } => {
-                self.entities.borrow_mut().remove(&id);
-            }
+            ClientNotice::EntityTransforms { updates } => self.apply_transforms(&updates),
+            ClientNotice::EntityDeleted { id } => self.delete_entity(id),
             ClientNotice::Convars { entries } => {
                 self.convars.borrow_mut().apply_replicated(entries);
             }

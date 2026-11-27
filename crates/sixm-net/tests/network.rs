@@ -1030,6 +1030,8 @@ fn vehicle_entry(id: u32) -> EntityEntry {
         model: 0xB779_A091,
         position: [1.0, 2.0, 3.0],
         rotation: [0.0, 0.0, 90.0],
+        owner: 0,
+        epoch: 0,
     }
 }
 
@@ -1038,7 +1040,7 @@ fn entity_creation_transforms_and_deletion_arrive_in_order() {
     let server = start();
     let client = join(&server, "ann", 1);
     let entry = vehicle_entry(1);
-    let moved = [(1, [4.0, 5.0, 6.0], [0.0, 0.0, 45.0])];
+    let moved = [(1, [4.0, 5.0, 6.0], [0.0, 0.0, 45.0], 3)];
 
     server
         .net
@@ -1064,6 +1066,33 @@ fn entity_creation_transforms_and_deletion_arrive_in_order() {
         }
     );
     assert_eq!(client_event(&client), ClientEvent::EntityDeleted { id: 1 });
+}
+
+#[test]
+fn owned_entity_transforms_reach_the_server_in_one_event() {
+    let server = start();
+    let client = join(&server, "ann", 4);
+    let updates: Vec<(u32, [f32; 3], [f32; 3], u32)> = (1..=1500_u32)
+        .map(|id| (id, [1.0, 2.0, 3.0], [0.0, 0.0, 90.0], 0))
+        .collect();
+
+    client
+        .send_entity_transforms(&updates)
+        .expect("transforms are queued");
+
+    // 1500 updates need two messages, and each one counts as one event.
+    let mut received = Vec::new();
+    for _ in 0..2 {
+        match next_event(&server) {
+            NetEvent::EntityTransforms { player, updates } => {
+                assert_eq!(player, 4);
+                assert!(updates.len() <= 1024);
+                received.extend(updates);
+            }
+            other => panic!("unexpected event {other:?}"),
+        }
+    }
+    assert_eq!(received, updates);
 }
 
 #[test]

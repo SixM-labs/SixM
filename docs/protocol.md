@@ -30,8 +30,8 @@ given `PROTOCOL_VERSION`.
 ## Streams
 
 - The client opens one bidirectional stream. It sends `Hello` first.
-- The client sends its later messages (`Event`, `RequestFile`, `Command`) on
-  that stream.
+- The client sends its later messages (`Event`, `RequestFile`, `Command`,
+  `EntityTransforms`) on that stream.
   The server sends its messages on the send side of the same stream.
 - The server opens a **unidirectional** stream for each file transfer. See
   below.
@@ -106,10 +106,19 @@ Client to server (`ClientMessage`):
 | 1 | `Event` | `name: string`, `args: values` |
 | 2 | `RequestFile` | `hash: 32 bytes` |
 | 3 | `Command` | `line: string`, at most 4096 bytes |
+| 4 | `EntityTransforms` | list of `(id: u32, position: 3 floats, rotation: 3 floats, epoch: u32)`, at most 1024 |
 
 `Command` carries a console line typed on the client that the client does not
 know. The server runs it with the player's permissions, and it shares the
 event rate limit. A line longer than 4096 bytes is a protocol error.
+
+`EntityTransforms` carries the transforms of entities the client owns, such as
+its own ped. `epoch` is the latest epoch the client knows for the entity (see
+[Teleport epochs](#teleport-epochs)). The server applies an update only when the
+entity exists, the player owns it, every value is finite and `epoch` is the
+entity's current epoch. Any other update is ignored. A message counts as one
+event for the rate limit, whatever its size, and a message with more than 1024
+updates is a protocol error.
 
 Server to client (`ServerMessage`):
 
@@ -127,7 +136,7 @@ Server to client (`ServerMessage`):
 | 9 | `ResourceStopped` | `name: string` |
 | 10 | `FileUnavailable` | `hash: 32 bytes` |
 | 11 | `EntityCreated` | one entity entry (see below) |
-| 12 | `EntityTransforms` | list of `(id: u32, position: 3 floats, rotation: 3 floats)` |
+| 12 | `EntityTransforms` | list of `(id: u32, position: 3 floats, rotation: 3 floats, epoch: u32)` |
 | 13 | `EntityDeleted` | `id: u32` |
 | 14 | `EntitySnapshot` | list of entity entries |
 | 15 | `Convars` | list of `(name: string, value: string or nil)` (see below) |
@@ -169,7 +178,26 @@ After the handshake, the server sends `ResourceStarted`, `ResourceStopped`,
 state and entity messages as they happen. `EntityCreated` and `EntityDeleted`
 are sent at once. Moves are collected, and once per server frame every entity
 that moved is sent once, with its latest transform, in `EntityTransforms`
-frames.
+frames. Each entity appears at most once per frame, with its latest transform
+and its current epoch.
+
+#### Teleport epochs
+
+Every entity has an epoch, which starts at 0 and wraps around at `u32::MAX`.
+The server increments it on each move it makes itself (`SetEntityCoords`,
+`SetEntityRotation` and related natives on the server). An owner's move never
+changes it.
+
+- The server accepts an owner's update only when its epoch equals the entity's
+  current epoch. An update computed before a server move therefore never
+  lands, whenever it arrives, and the server move stands.
+- A client that owns an entity applies a received update only when its epoch
+  differs from the one it knows. That is a server move: the client takes the
+  transform, records the epoch and drops any local move it has not sent yet.
+  An update with the epoch it already knows is its own move echoed back, and
+  is skipped.
+- A client that does not own an entity applies every update and records the
+  epoch.
 
 ### Resource entries
 
@@ -184,10 +212,12 @@ part of the entry.
 ### Entity entries
 
 An entity entry is `(id: u32, kind: u8, model: u32, position: 3 floats,
-rotation: 3 floats)`. The id is also the entity's network id. `kind` is 1 for a
-ped, 2 for a vehicle and 3 for an object, and any other value is rejected. The
-model is the `GetHashKey` hash, and the rotation is pitch, roll and yaw in
-degrees.
+rotation: 3 floats, owner: u32, epoch: u32)`. The id is also the entity's
+network id. `kind` is 1 for a ped, 2 for a vehicle and 3 for an object, and any
+other value is rejected. The model is the `GetHashKey` hash, and the rotation is
+pitch, roll and yaw in degrees. `owner` is the id of the player whose client
+moves the entity, or `0` when only the server does. `epoch` is the entity's
+[teleport epoch](#teleport-epochs).
 
 ## File transfer
 
@@ -222,7 +252,7 @@ Clients keep each file in a cache under its hash. See [client.md](client.md).
 
 ## Versioning
 
-- `PROTOCOL_VERSION` is `8`. It is sent in `Hello`. A server refuses any other
+- `PROTOCOL_VERSION` is `9`. It is sent in `Hello`. A server refuses any other
   value.
 - The ALPN string is `sixm/1`. It does not change with the protocol version.
 - Enum order, field order and limits can change between protocol versions.

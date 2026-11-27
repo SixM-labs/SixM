@@ -22,6 +22,8 @@ const MAX_CLIENTS: &str = "sv_maxclients";
 const SERVER_NAME: &str = "sv_hostname";
 /// Convar naming how many seconds a deferred connection may wait for `done`.
 const DEFERRAL_TIMEOUT: &str = "sixm_deferralTimeout";
+/// Convar naming the model of the ped created for each player.
+const PLAYER_MODEL: &str = "sixm_playerModel";
 
 /// Certificate file when `sixm_identityFile` is not set.
 const DEFAULT_IDENTITY_FILE: &str = "cache/server-identity.bin";
@@ -36,6 +38,8 @@ const MAX_CLIENTS_LIMIT: i64 = 1024;
 const DEFAULT_SERVER_NAME: &str = "SixM Server";
 /// Deferral timeout in seconds when `sixm_deferralTimeout` is not set.
 const DEFAULT_DEFERRAL_TIMEOUT: i64 = 120;
+/// Model name of a player's ped when `sixm_playerModel` is not set.
+const DEFAULT_PLAYER_MODEL: &str = "player";
 /// Smallest and largest deferral timeout in seconds the server honours.
 const MIN_DEFERRAL_TIMEOUT: i64 = 1;
 const MAX_DEFERRAL_TIMEOUT: i64 = 3600;
@@ -74,6 +78,7 @@ impl Convars {
             &DEFAULT_DEFERRAL_TIMEOUT.to_string(),
             ConvarKind::Plain,
         );
+        convars.set(PLAYER_MODEL, DEFAULT_PLAYER_MODEL, ConvarKind::Plain);
         convars
     }
 
@@ -164,6 +169,11 @@ impl Convars {
                 .clamp(MIN_DEFERRAL_TIMEOUT, MAX_DEFERRAL_TIMEOUT)
                 .unsigned_abs(),
         )
+    }
+
+    /// The model name of each player's ped, from `sixm_playerModel`.
+    pub(crate) fn player_model(&self) -> &str {
+        self.get(PLAYER_MODEL).unwrap_or(DEFAULT_PLAYER_MODEL)
     }
 
     /// The most players accepted at once. Clamped to `1..=1024`; a value that

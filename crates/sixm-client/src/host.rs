@@ -6,7 +6,8 @@ use std::path::PathBuf;
 
 use sixm_core::{
     ClientHost, EntityInfo, EntityKind, EventSource, FuncRef, GLOBAL_BAG, Host, ResourceName,
-    ResourceState, ScriptError, ScriptRuntime, ServerHost, Value, entity_of_bag, player_of_bag,
+    ResourceState, ScriptError, ScriptRuntime, ServerHost, Value, entity_of_bag, is_finite,
+    player_of_bag,
 };
 use tracing::warn;
 
@@ -162,14 +163,14 @@ impl Host for ClientRuntime {
     }
 
     fn entity(&self, entity: u32) -> Option<EntityInfo> {
-        self.entities.borrow().get(&entity).copied()
+        self.entities.borrow().get(&entity).map(|slot| slot.info)
     }
 
     fn entities(&self, kind: Option<EntityKind>) -> Vec<u32> {
         self.entities
             .borrow()
             .iter()
-            .filter(|(_, info)| kind.is_none_or(|wanted| info.kind == wanted))
+            .filter(|(_, slot)| kind.is_none_or(|wanted| slot.info.kind == wanted))
             .map(|(id, _)| *id)
             .collect()
     }
@@ -232,5 +233,42 @@ impl ClientHost for ClientRuntime {
 
     fn local_player(&self) -> u32 {
         self.local_player
+    }
+
+    fn local_ped(&self) -> Option<u32> {
+        self.local_ped.get()
+    }
+
+    fn move_owned_entity(
+        &self,
+        entity: u32,
+        position: Option<[f32; 3]>,
+        rotation: Option<[f32; 3]>,
+    ) -> Result<(), ScriptError> {
+        if !position.is_none_or(is_finite) || !rotation.is_none_or(is_finite) {
+            return Err(ScriptError::Runtime(
+                "entity transforms must be finite".to_owned(),
+            ));
+        }
+        let mut entities = self.entities.borrow_mut();
+        let slot = entities
+            .get_mut(&entity)
+            .ok_or_else(|| ScriptError::Runtime(format!("entity {entity} does not exist")))?;
+        if slot.info.owner != Some(self.local_player) {
+            return Err(ScriptError::Runtime(format!(
+                "entity {entity} is not owned by this client"
+            )));
+        }
+        if let Some(position) = position {
+            slot.info.position = position;
+        }
+        if let Some(rotation) = rotation {
+            slot.info.rotation = rotation;
+        }
+        if !slot.dirty {
+            slot.dirty = true;
+            self.owned_moves.borrow_mut().push(entity);
+        }
+        Ok(())
     }
 }

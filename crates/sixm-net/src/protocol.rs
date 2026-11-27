@@ -9,7 +9,7 @@ use crate::files::{FileHash, ResourceEntry};
 use crate::wire::{Args, StateValue};
 
 /// Version of the wire protocol. A client must send it in its `Hello`.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Application protocol identifier negotiated during the TLS handshake.
 pub(crate) const ALPN: &[u8] = b"sixm/1";
@@ -68,6 +68,10 @@ pub(crate) const MAX_CONCURRENT_TRANSFERS: usize = 8;
 /// Reason sent to players that queued more file requests than allowed.
 pub(crate) const TOO_MANY_REQUESTS: &str = "too many file requests";
 
+/// Most entity transforms one client message may carry. A client sends more
+/// in several messages.
+pub(crate) const MAX_TRANSFORMS_PER_MESSAGE: usize = 1024;
+
 /// Reason sent to every player and pending connection at shutdown.
 pub(crate) const SHUTTING_DOWN: &str = "server shutting down";
 
@@ -93,6 +97,14 @@ pub(crate) enum ClientMessage {
     Command {
         line: String,
     },
+    /// New transforms of entities this client owns, as `(id, position,
+    /// rotation, epoch)`, where `epoch` is the latest epoch the client knows
+    /// for the entity. The server applies an update only when the player owns
+    /// the entity, every value is finite and the epoch is the entity's current
+    /// one. A message carries at most [`MAX_TRANSFORMS_PER_MESSAGE`] updates.
+    EntityTransforms {
+        updates: Vec<(u32, [f32; 3], [f32; 3], u32)>,
+    },
 }
 
 impl ClientMessage {
@@ -104,6 +116,8 @@ impl ClientMessage {
     pub(crate) const REQUEST_FILE_TAG: u32 = 2;
     /// Variant index of [`ClientMessage::Command`] on the wire.
     pub(crate) const COMMAND_TAG: u32 = 3;
+    /// Variant index of [`ClientMessage::EntityTransforms`] on the wire.
+    pub(crate) const ENTITY_TRANSFORMS_TAG: u32 = 4;
 }
 
 /// Messages the server sends on the stream. Decoding is done by the wire
@@ -164,10 +178,11 @@ pub(crate) enum ServerMessage {
     EntityCreated {
         entity: EntityEntry,
     },
-    /// New positions and rotations, as `(id, position, rotation)`. Clients
+    /// New positions and rotations, as `(id, position, rotation, epoch)`. The
+    /// epoch changes each time the server moves the entity itself. Clients
     /// ignore an id they do not know. One frame may carry many updates.
     EntityTransforms {
-        updates: Vec<(u32, [f32; 3], [f32; 3])>,
+        updates: Vec<(u32, [f32; 3], [f32; 3], u32)>,
     },
     /// An entity was deleted. Clients remove it, and its state bag follows as a
     /// removal.

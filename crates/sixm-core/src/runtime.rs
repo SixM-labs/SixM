@@ -309,8 +309,9 @@ pub trait ServerHost {
     fn delete_entity(&self, entity: u32) -> bool;
 
     /// Moves an entity. Clients receive the latest position and rotation once
-    /// per server frame, however often it moved. Fails for an unknown entity or
-    /// a position that is not finite.
+    /// per server frame, however often it moved. A move by the server also
+    /// reaches the owning client, which then takes the new position as its own.
+    /// Fails for an unknown entity or a position that is not finite.
     fn set_entity_position(&self, entity: u32, position: [f32; 3]) -> Result<(), ScriptError>;
 
     /// Rotates an entity, sent to clients like
@@ -323,6 +324,10 @@ pub trait ServerHost {
     /// clients receive the value. Fails for a replicated convar whose name or
     /// value is too long to send, and then nothing changes.
     fn set_convar(&self, name: &str, value: &str, kind: ConvarKind) -> Result<(), ScriptError>;
+
+    /// The ped of a connected player. It is created, owned by the player, just
+    /// before `playerJoining`, and deleted after `playerDropped`.
+    fn player_ped(&self, player: u32) -> Option<u32>;
 }
 
 /// Services only a client provides: the connection to the server.
@@ -332,6 +337,20 @@ pub trait ClientHost {
 
     /// This client's server id.
     fn local_player(&self) -> u32;
+
+    /// The local player's ped, once the server has sent it.
+    fn local_ped(&self) -> Option<u32>;
+
+    /// Moves or rotates an entity this client owns. The server receives the
+    /// latest transform once per client frame and passes it on to the other
+    /// clients. Fails for an entity this client does not own, or for a value
+    /// that is not finite. `None` keeps that part of the transform.
+    fn move_owned_entity(
+        &self,
+        entity: u32,
+        position: Option<[f32; 3]>,
+        rotation: Option<[f32; 3]>,
+    ) -> Result<(), ScriptError>;
 }
 
 /// One running resource inside one scripting language.

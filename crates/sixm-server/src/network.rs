@@ -71,6 +71,9 @@ pub(crate) struct Player {
     /// The `update` and `done` functions of the `playerConnecting` table. They
     /// are removed when the player is admitted or refused.
     functions: Vec<FuncRef>,
+    /// The player's own ped, created when it is admitted and deleted when it
+    /// leaves.
+    ped: Option<u32>,
 }
 
 impl Player {
@@ -97,6 +100,7 @@ impl Player {
             admitted: false,
             deferral: None,
             functions: Vec::new(),
+            ped: None,
         }
     }
 }
@@ -273,6 +277,9 @@ impl ResourceManager {
             } => self.connecting(connection, &name, endpoint, fingerprint),
             NetEvent::Event { player, name, args } => self.player_event(player, &name, &args),
             NetEvent::Command { player, line } => self.player_command(player, &line),
+            NetEvent::EntityTransforms { player, updates } => {
+                self.player_transforms(player, &updates);
+            }
             NetEvent::Disconnected { player, reason } => self.player_dropped(player, &reason),
             NetEvent::Abandoned { connection } => self.abandoned(connection),
         }
@@ -495,8 +502,8 @@ impl ResourceManager {
         }
     }
 
-    /// Admits the pending player `id`: accepts its connection, sends it the
-    /// resources, entities and state, then runs `playerJoining`.
+    /// Admits the pending player `id`: creates its ped, accepts its connection,
+    /// sends it the resources, entities and state, then runs `playerJoining`.
     fn admit(&self, id: u32) {
         let admitted = {
             let mut players = self.network.players.borrow_mut();
@@ -515,6 +522,12 @@ impl ResourceManager {
             return;
         };
         self.release_functions(&functions);
+        // The ped is created before the connection is accepted, so the
+        // creation is not sent to the player and only the join snapshot brings it.
+        let ped = self.spawn_player_ped(id);
+        if let Some(player) = self.network.players.borrow_mut().get_mut(id) {
+            player.ped = ped;
+        }
         self.with_server(|server| server.accept(connection, id));
         // The resource list goes last: a client waits for its end before it
         // starts any script, so the convars, entities and state sent before it
@@ -646,16 +659,17 @@ impl ResourceManager {
         )
     }
 
-    /// Runs `playerDropped` and removes the player. The player is still listed
-    /// while the handlers run, so they can look up who left.
+    /// Runs `playerDropped`, deletes the player's ped and removes the player.
+    /// The player is still listed while the handlers run, so they can look up
+    /// who left.
     fn player_dropped(&self, player: u32, reason: &str) {
-        let name = self
+        let found = self
             .network
             .players
             .borrow()
             .get(player)
-            .map(|found| found.name.clone());
-        let Some(name) = name else {
+            .map(|found| (found.name.clone(), found.ped));
+        let Some((name, ped)) = found else {
             debug!(player, "disconnect of an unknown player ignored");
             return;
         };
@@ -664,9 +678,22 @@ impl ResourceManager {
             EventSource::Player(player),
             &[Value::from(reason)],
         );
+        if let Some(ped) = ped {
+            self.remove_entity(ped);
+        }
         self.network.players.borrow_mut().remove(player);
         self.leave_state(player);
         info!("{name} ({player}) left: {reason}");
+    }
+
+    /// The ped of the admitted player `player`, if it has one.
+    pub(crate) fn ped_of_player(&self, player: u32) -> Option<u32> {
+        self.network
+            .players
+            .borrow()
+            .get(player)
+            .filter(|found| found.admitted)
+            .and_then(|found| found.ped)
     }
 
     /// Runs `f` with the socket if the network is running.
