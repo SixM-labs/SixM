@@ -169,6 +169,7 @@ interface SixMChatNetworkEvents extends SixMChatClientEvents, SixMChatServerNetw
 /** Events exposed by the stock resources while they are running. */
 interface SixMStockEvents extends SixMChatNetworkEvents {
     chatMessage: [playerId: number, author: string, text: string];
+    playerSpawned: [spawnInfo: SpawnInfo];
 }
 
 /**
@@ -345,9 +346,36 @@ interface ExportsProxy {
     (name: string, fn: (...args: any[]) => any): void;
     /** Accesses synchronous exports exposed by `resource`. */
     [resource: string]: Record<string, (...args: any[]) => any>;
+    /** Client exports provided by the stock [system]/spawnmanager resource. */
+    spawnmanager: SpawnManagerExports;
 }
 
 declare var exports: ExportsProxy;
+
+interface SpawnPoint {
+    x: number;
+    y: number;
+    z: number;
+    heading: number;
+    model?: string | number;
+    skipFade?: boolean;
+}
+
+interface SpawnInfo extends SpawnPoint {
+    model: number;
+    skipFade: boolean;
+    idx?: number;
+}
+
+type SpawnManagerExports = {
+    addSpawnPoint(spawn: SpawnPoint): number;
+    removeSpawnPoint(id: number): boolean;
+    loadSpawns(json: string): boolean;
+    spawnPlayer(spawn?: number | SpawnPoint, callback?: (info: SpawnInfo) => void): boolean;
+    setAutoSpawn(enabled: boolean): void;
+    setAutoSpawnCallback(callback: () => void): void;
+    forceRespawn(): void;
+};
 
 // =============================================================================
 // State bags

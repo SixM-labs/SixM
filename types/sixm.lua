@@ -260,6 +260,7 @@ source = ""
 ---@field params? SixMChatParameter[]
 
 --- Registers a local event handler for `name`.
+---@overload fun(name: 'playerSpawned', fn: fun(spawnInfo: SpawnInfo)): EventHandlerHandle
 ---@overload fun(name: 'chatMessage', fn: fun(playerId: integer, author: string, text: string)): EventHandlerHandle
 ---@overload fun(name: 'chat:addMessage', fn: fun(message: SixMChatMessage)): EventHandlerHandle
 ---@overload fun(name: 'chat:addTemplate', fn: fun(templateId: string, html: string)): EventHandlerHandle
@@ -350,8 +351,31 @@ function TriggerLatentClientEvent(name, target, bytesPerSecond, ...) end
 -- Exports (runtime + manifest directive)
 -- =============================================================================
 
+---@class SpawnPoint
+---@field x number
+---@field y number
+---@field z number
+---@field heading number
+---@field model string|integer|nil
+---@field skipFade boolean|nil
+
+---@class SpawnInfo: SpawnPoint
+---@field model integer
+---@field skipFade boolean
+---@field idx integer|nil
+
+---@class SpawnManagerExports
+---@field addSpawnPoint fun(spawn: SpawnPoint): integer
+---@field removeSpawnPoint fun(id: integer): boolean
+---@field loadSpawns fun(json: string): boolean
+---@field spawnPlayer fun(spawnIdOrObject: integer|SpawnPoint|nil, callback: fun(info: SpawnInfo)|nil): boolean
+---@field setAutoSpawn fun(enabled: boolean)
+---@field setAutoSpawnCallback fun(callback: fun())
+---@field forceRespawn fun()
+
 ---@class SixMExports
 ---@field [string] table<string, function>
+---@field spawnmanager SpawnManagerExports
 ---@overload fun(name: string, fn: function)
 ---@overload fun(manifestNames: FxManifestValue): FxManifestChain
 exports = {}

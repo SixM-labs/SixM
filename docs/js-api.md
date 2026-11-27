@@ -130,6 +130,37 @@ const sum = exports.myresource.add(2, 3);
   through JS callback arguments); functions passed as callbacks become
   cross-runtime references released when GC collects them.
 
+## Stock client resources
+
+### `spawnmanager`
+
+The example `[system]/spawnmanager` resource exposes these client exports to
+Lua and JavaScript resources:
+
+| Export | Arguments | Result |
+|---|---|---|
+| `addSpawnPoint` | `{ x, y, z, heading, model?, skipFade? }` | Positive integer id. Coordinates and heading must be finite. `model` is a nonempty name or 32-bit hash; `skipFade` defaults to `false`. |
+| `removeSpawnPoint` | `id` | `true` when removed, otherwise `false` for an unknown id. |
+| `loadSpawns` | JSON string containing `{ "spawns": [ ... ] }` | `true`; malformed input raises an error and adds no points. New ids are assigned in array order. |
+| `spawnPlayer` | `[idOrSpawnObject [, callback]]` | `true` on success; `false` for an unknown id, no registered point, or unavailable ped. With no argument it chooses a registered point randomly. The callback receives the normalized `spawnInfo`. |
+| `setAutoSpawn` | `enabled` boolean | No return. Enables or disables the single initial spawn attempt. |
+| `setAutoSpawnCallback` | `callback` function | No return. Sets the callback used for the initial attempt and `forceRespawn`. |
+| `forceRespawn` | none | No specified return. When auto-spawn is enabled, invokes the configured callback or attempts `spawnPlayer()`. |
+
+Successful spawns emit local `playerSpawned(spawnInfo)` once before invoking
+the optional callback, both on the next client tick after movement. The object
+contains `x`, `y`, `z`, `heading`,
+`skipFade`, and `model` (the requested model hash, or the ped's current model
+hash); it also contains `idx` for a registered spawn point. A direct spawn
+object has no `idx`. Enabling auto-spawn provides one initial attempt after a
+ped and a point or callback are available. `forceRespawn` is the repeatable
+entry point. There is no death-triggered respawn; model loading, fade, and
+death integration require a game adapter.
+
+`loadSpawns` validates JSON shape with a private parser before converting the
+spawn array to Lua. It rejects object-shaped `spawns`, null entries (including
+a trailing null), and non-object spawn entries before the registry is changed.
+
 ## State bags
 
 `GlobalState`, `Player(id).state`, `LocalPlayer.state` (client), and

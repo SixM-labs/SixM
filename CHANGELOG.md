@@ -41,6 +41,8 @@ may change the protocol and the API.
   clean-room `[system]/sessionmanager` and `[system]/baseevents` resources in
   `examples/server-data`.
 - Lua vector helpers `vector`, `dot`, `cross`, `norm`, `inv` and `slerp`.
+- Stock client `[system]/spawnmanager` resource with the seven client exports
+  and local `playerSpawned(spawnInfo)` event.
 - Server events `onPlayerBucketChange`, `onEntityBucketChange`,
   `onResourceListRefresh`; `playerJoining` gets `oldID`, `playerDropped` gets
   `resourceName` and `clientDropReason`.

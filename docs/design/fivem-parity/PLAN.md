@@ -295,7 +295,7 @@ equivalent / no effect / absent".
 | A7 | done | ChatGPT (Luna impl, Terra review) | `git log --grep "^A7:"` |
 | A8 | done | ChatGPT (Luna docs, Terra review) | `git log --grep "^A8:"` |
 | B1 | done | ChatGPT (Luna impl, Terra review) | `git log --grep "^B1:"` |
-| B2 | todo | | |
+| B2 | wip (see log) | ChatGPT (Luna impl, Terra review) | `git log --grep "^WIP B2"` |
 | B3 | todo | | |
 | B4 | todo | | |
 | C1 | todo | | |
@@ -370,3 +370,9 @@ what is next, anything surprising.
   server resolves the author from the connection. The loopback tests cover
   broadcast, cancellation, command suggestions and headless `say`.
   B2 is next.
+- 2026-11-28, ChatGPT, `feat/fivem-parity-b`: B2 implementation follows
+  5921775. Lua and JavaScript exports, strict JSON spawn loading, and the
+  SimAdapter integration test are in place. Terra's review led to stricter
+  JSON validation and changes to initial and forced spawn scheduling. The
+  isolated SimAdapter test passes. Remaining B2 verification covers a
+  missing or frozen ped and cancellation of a pending retry on disable.

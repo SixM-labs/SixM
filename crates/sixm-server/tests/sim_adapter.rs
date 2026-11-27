@@ -81,6 +81,99 @@ RegisterNetEvent("sim:checkSpeedJs", () => {
 });
 "#;
 
+const SPAWNMGR: &str =
+    include_str!("../../../examples/server-data/resources/[system]/spawnmanager/client.lua");
+const SPAWNJSON: &str =
+    include_str!("../../../examples/server-data/resources/[system]/spawnmanager/json.js");
+const MANIFEST: &str =
+    include_str!("../../../examples/server-data/resources/[system]/spawnmanager/fxmanifest.lua");
+const REPORT_SERVER: &str = r"
+local report = ''
+local peds = {}
+AddEventHandler('playerJoining', function()
+local player = tonumber(source)
+peds[player] = GetPlayerPed(player)
+end)
+RegisterNetEvent('spawn:report', function(value) report = value end)
+exports('report', function() return report end)
+exports('ped', function(player) return peds[player] or 0 end)
+";
+const CALLER: &str = r#"
+if (GetPlayerServerId(PlayerId()) === 1) {
+    try {
+        const results = {};
+        const eventInfos = [];
+        let callbackInfo;
+        on("playerSpawned", info => {
+            eventInfos.push(info);
+            results.eventInfo = info;
+        });
+        const sm = exports.spawnmanager;
+        const first = sm.addSpawnPoint({ x: 31, y: 4, z: 2, heading: 78 });
+        sm.setAutoSpawnCallback(() => {
+            results.auto = (results.auto || 0) + 1;
+            const ped = PlayerPedId();
+            results.autoPed = [ped, DoesEntityExist(ped), IsEntityPositionFrozen(ped), IsEntityAttached(ped)];
+            results.autoSpawn = sm.spawnPlayer(first);
+        });
+        sm.forceRespawn();
+        sm.setAutoSpawn(true);
+        sm.forceRespawn();
+        const loaded = sm.loadSpawns('{"spawns":[{"x":40,"y":1,"z":2,"heading":10}]}');
+        let malformed = false;
+        try {
+            sm.loadSpawns('{"spawns":[{"x":1,"y":2,"z":3,"heading":0},null,{"x":4,"y":5,"z":6,"heading":0}]}');
+        } catch (_) { malformed = true; }
+        let trailingNullRejected = false;
+        try {
+            sm.loadSpawns('{"spawns":[{"x":1,"y":2,"z":3,"heading":0},null]}');
+        } catch (_) { trailingNullRejected = true; }
+        let objectSpawnsRejected = false;
+        try { sm.loadSpawns('{"spawns":{}}'); }
+        catch (_) { objectSpawnsRejected = true; }
+        const third = sm.addSpawnPoint({ x: 50, y: 8, z: 3, heading: 90 });
+        const unknownRemoved = !sm.removeSpawnPoint(99999);
+        const removed = sm.removeSpawnPoint(third);
+        const removedAgain = !sm.removeSpawnPoint(third);
+        const unknownSpawn = !sm.spawnPlayer(99999);
+        const direct = sm.spawnPlayer({ x: 60, y: 9, z: 4, heading: 123, skipFade: true });
+        const randomSpawn = sm.spawnPlayer(undefined, info => { results.randomInfo = info; });
+        let callbackCount = 0;
+        const explicit = sm.spawnPlayer(first, info => { callbackCount++; callbackInfo = info; });
+        let noPoint = false;
+        setTimeout(() => {
+            sm.forceRespawn();
+            sm.forceRespawn();
+            setTimeout(() => {
+                noPoint = sm.removeSpawnPoint(first) && sm.removeSpawnPoint(2) && !sm.spawnPlayer();
+                sm.setAutoSpawn(false);
+                sm.forceRespawn();
+                setTimeout(() => {
+                    const info = results.eventInfo || {};
+                    const callback = callbackInfo || {};
+                    const randomInfo = results.randomInfo || {};
+                    const adapter = Citizen.InvokeNative(GetHashKey("GetSimEntityCoords"), PlayerPedId());
+                    const report = [first, loaded, malformed, trailingNullRejected, objectSpawnsRejected,
+                        third, unknownRemoved, removed,
+                        removedAgain, explicit, unknownSpawn, direct, randomSpawn, noPoint,
+                        results.auto, results.autoSpawn, ...results.autoPed, eventInfos.length, callbackCount,
+                        randomInfo.idx === 1 || randomInfo.idx === 2,
+                        info.idx, callback.idx,
+                        info.idx === callback.idx && info.x === callback.x && info.y === callback.y
+                            && info.z === callback.z && info.heading === callback.heading,
+                        info.x, info.y, info.z, info.heading, adapter.x, adapter.y, adapter.z,
+                        (() => { try { sm.spawnPlayer({ x: 1, y: 2, z: 3, heading: NaN }); return false; }
+                            catch (_) { return true; } })()]
+                        .map(String).join("|");
+                    TriggerServerEvent("spawn:report", report);
+                }, 20);
+            }, 100);
+        }, 5);
+    } catch (err) {
+        TriggerServerEvent("spawn:report", `ERR:${String(err)}`);
+    }
+}
+"#;
 struct Loopback {
     fx: Fixture,
     input: Receiver<Input>,
@@ -286,6 +379,97 @@ fn failing_adapter_attach_returns_error_from_try_start_synced() {
     let err = rt.try_start_synced().expect_err("attach fails");
     assert!(matches!(err, AdapterError::NotReady));
     rt.shutdown();
+}
+
+#[test]
+fn stock_spawnmanager_exports_move_the_local_ped_and_dispatch_callbacks_next_tick() {
+    let fx = Fixture::new();
+    fx.add_resource(
+        "simtest",
+        "fx_version 'cerulean'\ngame 'common'\nserver_script 'srv.lua'\nserver_export 'report'\nserver_export 'ped'\n",
+        &[("srv.lua", REPORT_SERVER)],
+    );
+    fx.add_resource(
+        "spawnmanager",
+        MANIFEST,
+        &[("client.lua", SPAWNMGR), ("json.js", SPAWNJSON)],
+    );
+    fx.add_resource(
+        "spawncaller",
+        "fx_version 'cerulean'\ngame 'common'\nclient_script 'client.js'\ndependency 'spawnmanager'\n",
+        &[("client.js", CALLER)],
+    );
+    fx.server.execute("endpoint_add_udp 127.0.0.1:0");
+    let (tx, input) = mpsc::channel();
+    let addr = fx.server.start_network(tx).expect("loopback server");
+    fx.server.execute("ensure simtest");
+    fx.server.execute("ensure spawncaller");
+    let lb = Loopback { fx, input, addr };
+
+    let (cache, data) = (
+        TempDir::new().expect("cache"),
+        TempDir::new().expect("data"),
+    );
+    let rt_a = ClientRuntime::new(lb.connect("SpawnerA", cache.path()), data.path());
+    rt_a.set_adapter(Box::new(SimAdapter::new()));
+    rt_a.try_start_synced().expect("adapter A attaches");
+    let (cache_b, data_b) = (
+        TempDir::new().expect("cache B"),
+        TempDir::new().expect("data B"),
+    );
+    let rt_b = ClientRuntime::new(lb.connect("SpawnerB", cache_b.path()), data_b.path());
+    rt_b.set_adapter(Box::new(SimAdapter::new()));
+    rt_b.try_start_synced().expect("adapter B attaches");
+    let other_ped = match &lb
+        .fx
+        .manager()
+        .call_export("simtest", "ped", &[Value::Int(2)], None)
+        .unwrap()[0]
+    {
+        Value::Int(id) => u32::try_from(*id).expect("other ped id"),
+        other => panic!("unexpected other ped handle {other:?}"),
+    };
+    let other_before = rt_b
+        .entity(other_ped)
+        .expect("second client's local ped is mirrored")
+        .position;
+
+    let mut now = Instant::now();
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        lb.pump_clients(&rt_a, Some(&rt_b), now);
+        let report = lb.fx.text("simtest", "report");
+        if !report.is_empty() {
+            assert_eq!(
+                report,
+                "1|true|true|true|true|3|true|true|true|true|true|true|true|true|3|true|1|true|false|false|6|1|true|1|1|true|31|4|2|78|31|4|2|true"
+            );
+            let ped = match &lb
+                .fx
+                .manager()
+                .call_export("simtest", "ped", &[Value::Int(1)], None)
+                .unwrap()[0]
+            {
+                Value::Int(id) => u32::try_from(*id).expect("ped id"),
+                other => panic!("unexpected ped handle {other:?}"),
+            };
+            let info = rt_a.entity(ped).expect("SimAdapter mirrors local ped");
+            assert_eq!(info.position, [31.0, 4.0, 2.0]);
+            assert_eq!(info.rotation[2], 78.0);
+            assert_eq!(
+                rt_b.entity(other_ped)
+                    .expect("other ped remains mirrored")
+                    .position,
+                other_before
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "spawnmanager report timed out");
+        thread::sleep(STEP);
+        now += Duration::from_millis(50);
+    }
+    rt_a.shutdown();
+    rt_b.shutdown();
 }
 
 fn verify_freeze_and_teleport(lb: &Loopback, rt_a: &ClientRuntime, ped_id: u32, now: &mut Instant) {

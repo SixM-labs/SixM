@@ -72,6 +72,14 @@ See [manifest.md](../manifest.md) for all manifest rules.
 - Callbacks can be passed across exports, and `GetInvokingResource()` tracks
   the caller across both `TriggerEvent` and `exports` calls.
 
+### `spawnmanager`
+
+SixM's stock `[system]/spawnmanager` resource moves the local player ped through
+the client entity transform API and emits `playerSpawned(spawnInfo)`. This
+transform is simulated by the headless client. Model loading, fade effects,
+and death-triggered respawning require a game adapter; use `forceRespawn` for
+an explicit repeatable attempt.
+
 ### State bags
 
 - `GlobalState`, `Player(id).state`, `LocalPlayer.state`, and `Entity(id).state`
