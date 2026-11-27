@@ -9,6 +9,8 @@ may change the protocol and the API.
 
 ### Added
 
+- State bag natives `GetStateBagValue`, `SetStateBagValue`, `StateBagHasKey`,
+  `GetStateBagKeys` and `EnsureEntityStateBag` (Lua and JavaScript); new `Host::state_keys`.
 - Lua `Citizen.Trace` and `PerformHttpRequestAwait`; JS `addEventListener`,
   `addNetEventListener`, `addRawEventListener` and `addRawEventHandler`.
 - Manifest `provide` / `provides` virtual resource alias directives, resolved

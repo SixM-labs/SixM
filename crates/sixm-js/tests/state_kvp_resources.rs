@@ -272,3 +272,145 @@ fn restart_start_stop_resource_work_on_server_only() {
         ])]
     );
 }
+
+#[test]
+fn state_bag_natives_work_by_bag_name() {
+    let host = new_host();
+    host.players.borrow_mut().push((
+        1,
+        PlayerInfo {
+            name: "Bob".to_owned(),
+            endpoint: "127.0.0.1:1".to_owned(),
+        },
+    ));
+    host.entities.borrow_mut().insert(
+        5,
+        EntityInfo {
+            kind: EntityKind::Vehicle,
+            model: 1,
+            position: [0.0; 3],
+            rotation: [0.0; 3],
+            owner: None,
+        },
+    );
+    let rt = start(
+        &host,
+        "natives",
+        &["run"],
+        &[(
+            "index.js",
+            r#"
+            exports("run", () => {
+                SetStateBagValue("global", "mode", "race", true);
+                let thrown = "";
+                try {
+                    SetStateBagValue("player:9", "x", 1, true);
+                } catch (err) {
+                    thrown = String(err);
+                }
+                EnsureEntityStateBag(5);
+                return [
+                    GetStateBagValue("global", "mode"),
+                    StateBagHasKey("global", "mode"),
+                    GetStateBagKeys("global").join(","),
+                    GetStateBagValue("player:9", "x") === undefined,
+                    GetStateBagKeys("player:9") === undefined,
+                    thrown.includes("does not exist"),
+                    GetStateBagKeys("entity:5").length === 0,
+                ];
+            });
+            "#,
+        )],
+    );
+
+    assert_eq!(
+        call(&rt, "run", &[]),
+        vec![Value::Array(vec![
+            Value::from("race"),
+            Value::Bool(true),
+            Value::from("mode"),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+        ])]
+    );
+}
+
+#[test]
+fn state_bag_natives_exist_on_the_client() {
+    let host = new_client_host(1);
+    let rt = start(
+        &host,
+        "client_natives",
+        &["kinds"],
+        &[(
+            "index.js",
+            r#"
+            exports("kinds", () => [
+                typeof GetStateBagValue,
+                typeof StateBagHasKey,
+                typeof GetStateBagKeys,
+                typeof SetStateBagValue,
+                typeof EnsureEntityStateBag,
+            ].join(","));
+            "#,
+        )],
+    );
+
+    assert_eq!(
+        text(&rt, "kinds"),
+        "function,function,function,function,function"
+    );
+}
+
+#[test]
+fn set_state_bag_value_decodes_msgpack_bytes_up_to_the_length() {
+    let host = new_host();
+    let rt = start(
+        &host,
+        "packed",
+        &["run"],
+        &[(
+            "index.js",
+            r#"
+            exports("run", () => {
+                const packed = msgpack.pack([1, "two"]);
+                SetStateBagValue("global", "packed", packed, packed.length, true);
+                const kept = msgpack.pack("kept");
+                const padded = new Uint8Array(kept.length + 1);
+                padded.set(kept);
+                SetStateBagValue("global", "trailing", padded, kept.length, false);
+                let short = "";
+                try {
+                    SetStateBagValue("global", "k", packed, packed.length + 1, true);
+                } catch (err) {
+                    short = String(err);
+                }
+                let bad = false;
+                try {
+                    SetStateBagValue("global", "k", new Uint8Array([0xc1]), 1, true);
+                } catch (err) {
+                    bad = true;
+                }
+                return [
+                    GetStateBagValue("global", "packed")[1],
+                    GetStateBagValue("global", "trailing"),
+                    short.includes("valueLength exceeds data"),
+                    bad,
+                ];
+            });
+            "#,
+        )],
+    );
+
+    assert_eq!(
+        call(&rt, "run", &[]),
+        vec![Value::Array(vec![
+            Value::from("two"),
+            Value::from("kept"),
+            Value::Bool(true),
+            Value::Bool(true),
+        ])]
+    );
+}

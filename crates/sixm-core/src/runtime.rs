@@ -347,6 +347,10 @@ pub trait Host {
     /// the key is not set.
     fn state_get(&self, bag: &str, key: &str) -> Option<Value>;
 
+    /// Names of the keys set in state bag `bag`, sorted ascending, or `None` when
+    /// the bag does not exist (the same rule `state_set` uses to reject a bag).
+    fn state_keys(&self, bag: &str) -> Option<Vec<String>>;
+
     /// Stores `value` under `key` in state bag `bag`, or deletes the key when
     /// `value` is nil. Every write runs the change handlers. A replicated write
     /// is also sent to every client. Fails for an unknown bag, a key that is

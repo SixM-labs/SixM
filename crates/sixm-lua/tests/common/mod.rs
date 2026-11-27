@@ -317,6 +317,29 @@ impl Host for TestHost {
             .cloned()
     }
 
+    fn state_keys(&self, bag: &str) -> Option<Vec<String>> {
+        let player_connected = player_of_bag(bag).is_some_and(|id| {
+            self.players
+                .borrow()
+                .iter()
+                .any(|(connected, _)| *connected == id)
+        });
+        let entity_exists =
+            entity_of_bag(bag).is_some_and(|id| self.entities.borrow().contains_key(&id));
+        if bag != GLOBAL_BAG && !player_connected && !entity_exists {
+            return None;
+        }
+        let mut keys: Vec<String> = self
+            .state
+            .borrow()
+            .keys()
+            .filter(|(owner, _)| owner.as_str() == bag)
+            .map(|(_, key)| key.clone())
+            .collect();
+        keys.sort();
+        Some(keys)
+    }
+
     fn entity(&self, entity: u32) -> Option<EntityInfo> {
         self.entities.borrow().get(&entity).copied()
     }

@@ -118,6 +118,12 @@ const sum = exports.myresource.add(2, 3);
 - `RemoveStateBagChangeHandler(cookie)` removes a handler.
 - `GetPlayerFromStateBagName(bag)` and `GetEntityFromStateBagName(bag)` map
   bag names back to server/entity ids (`0` if invalid/missing).
+- `GetStateBagValue(bag, key)` returns the value, or `undefined` for an unknown bag or key.
+- `StateBagHasKey(bag, key)` returns a boolean.
+- `GetStateBagKeys(bag)` returns the sorted key names, or `undefined` for an unknown bag.
+- `SetStateBagValue(bag, key, value, replicated)` writes like `.set`; `replicated` defaults to `false`.
+  The FiveM form `SetStateBagValue(bag, key, valueData, valueLength, replicated)` takes msgpack bytes (a `Uint8Array` or string from `msgpack.pack`), decodes only the first `valueLength` bytes and stores the result.
+- `EnsureEntityStateBag(entity)` does nothing; an entity's bag exists for the whole life of the entity.
 
 On the client, writes with `replicated = true` throw an error.
 

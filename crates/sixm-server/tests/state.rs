@@ -393,3 +393,23 @@ fn state_console_command_lists_and_prints_bags() {
     h.fx.server.execute("state player:1");
     h.fx.server.execute("state player:9");
 }
+
+#[test]
+fn state_keys_lists_sorted_keys_and_none_for_unknown_bags() {
+    let h = Harness::new();
+    h.call(
+        "global_set",
+        &[Value::from("b"), Value::Int(1), Value::Bool(true)],
+    );
+    h.call(
+        "global_set",
+        &[Value::from("a"), Value::Int(2), Value::Bool(false)],
+    );
+    let manager = h.fx.manager();
+    assert_eq!(
+        manager.state_keys("global"),
+        Some(vec!["a".to_owned(), "b".to_owned()])
+    );
+    assert_eq!(manager.state_keys("player:99"), None);
+    assert_eq!(manager.state_keys("entity:99"), None);
+}

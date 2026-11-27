@@ -695,6 +695,35 @@ function GetPlayerFromStateBagName(bagName) end
 ---@return integer
 function GetEntityFromStateBagName(bagName) end
 
+--- Returns the value of `key` in state bag `bagName`, or nil when unset.
+---@param bagName string
+---@param key string
+---@return any
+function GetStateBagValue(bagName, key) end
+
+--- Returns true when state bag `bagName` has a value for `key`.
+---@param bagName string
+---@param key string
+---@return boolean
+function StateBagHasKey(bagName, key) end
+
+--- Returns the key names of state bag `bagName`, sorted, or nil for an unknown bag.
+---@param bagName string
+---@return string[]?
+function GetStateBagKeys(bagName) end
+
+--- Writes `value` under `key` in state bag `bagName`. `replicated` defaults to false.
+---@param bagName string
+---@param key string
+---@overload fun(bagName: string, key: string, valueData: string, valueLength: integer, replicated: boolean?)
+---@param value any
+---@param replicated boolean?
+function SetStateBagValue(bagName, key, value, replicated) end
+
+--- Compatibility call; does nothing, since an entity's bag lives as long as the entity.
+---@param entity integer
+function EnsureEntityStateBag(entity) end
+
 -- =============================================================================
 -- Vectors and quaternions
 -- =============================================================================

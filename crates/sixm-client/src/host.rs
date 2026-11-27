@@ -220,6 +220,10 @@ impl Host for ClientRuntime {
         self.state.borrow().get(bag, key).cloned()
     }
 
+    fn state_keys(&self, bag: &str) -> Option<Vec<String>> {
+        self.bag_exists(bag).then(|| self.state.borrow().keys(bag))
+    }
+
     fn entity(&self, entity: u32) -> Option<EntityInfo> {
         self.entities.borrow().get(&entity).map(|slot| slot.info)
     }

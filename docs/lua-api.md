@@ -440,6 +440,11 @@ client: the first is `0`, the second is the server id.
 | `AddStateBagChangeHandler` | both | `AddStateBagChangeHandler(key, bag, fn)`. Either filter may be `nil`, which matches every key or bag. Returns a cookie. |
 | `RemoveStateBagChangeHandler` | both | `RemoveStateBagChangeHandler(cookie)`. Removes a handler. |
 | `GetPlayerFromStateBagName` | both | `GetPlayerFromStateBagName(bagName)`. Returns the player id of a `player:<id>` bag, or `0` for any other name. |
+| `GetStateBagValue` | both | `GetStateBagValue(bagName, key)`. Returns the value, or `nil` when the bag or the key is not set. Bag names are `global`, `player:<id>` and `entity:<id>`. |
+| `StateBagHasKey` | both | `StateBagHasKey(bagName, key)`. Returns a boolean. A key set to `nil` is deleted, so it is `false`. |
+| `GetStateBagKeys` | both | `GetStateBagKeys(bagName)`. Returns the key names sorted ascending, `{}` for a bag without keys, and `nil` for a bag that does not exist. |
+| `SetStateBagValue` | both | `SetStateBagValue(bagName, key, value [, replicated])`. Same semantics as `bag:set`, except that `replicated` defaults to `false`. On a client, `replicated = true` fails with `clients cannot write replicated state`. The FiveM form `SetStateBagValue(bagName, key, valueData, valueLength, replicated)` takes msgpack bytes (a string from `msgpack.pack`), decodes only the first `valueLength` bytes and stores the result. It fails with `valueLength exceeds data` when the length is longer than the data, and with the decoder error for malformed bytes. |
+| `EnsureEntityStateBag` | both | `EnsureEntityStateBag(entity)`. Does nothing and never fails: an entity's bag exists for the whole life of the entity. Kept for FiveM compatibility. |
 | `Player(id).state` | server | A player's state bag. See above. |
 | `LocalPlayer.state` | client | The local player's state bag. |
 

@@ -22,6 +22,16 @@ impl StateMirror {
         self.bags.contains_key(bag)
     }
 
+    /// The names of the keys set in `bag`, sorted. Empty for an unknown bag.
+    pub(crate) fn keys(&self, bag: &str) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .bags
+            .get(bag)
+            .map_or_else(Vec::new, |keys| keys.keys().cloned().collect());
+        names.sort();
+        names
+    }
+
     /// Stores `value` under `key`, or deletes the key when `value` is nil.
     pub(crate) fn apply(&mut self, bag: &str, key: &str, value: &Value) {
         if matches!(value, Value::Nil) {
@@ -51,4 +61,19 @@ pub(crate) fn validate_key(key: &str) -> Result<(), ScriptError> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keys_are_sorted_and_deleted_keys_disappear() {
+        let mut mirror = StateMirror::default();
+        mirror.apply("global", "b", &Value::Int(1));
+        mirror.apply("global", "a", &Value::Int(2));
+        assert_eq!(mirror.keys("global"), ["a", "b"]);
+        mirror.apply("global", "b", &Value::Nil);
+        assert_eq!(mirror.keys("global"), ["a"]);
+    }
 }

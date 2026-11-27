@@ -1289,6 +1289,10 @@ impl Host for ResourceManager {
         self.state.borrow().get(bag, key).cloned()
     }
 
+    fn state_keys(&self, bag: &str) -> Option<Vec<String>> {
+        self.state_bag_keys(bag)
+    }
+
     fn state_set(
         &self,
         bag: &str,

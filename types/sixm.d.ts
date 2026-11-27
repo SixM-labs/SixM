@@ -340,6 +340,36 @@ declare function GetPlayerFromStateBagName(bagName: string): number;
  */
 declare function GetEntityFromStateBagName(bagName: string): number;
 
+/**
+ * The value of `key` in state bag `bagName`, or `undefined` when unset.
+ */
+declare function GetStateBagValue(bagName: string, key: string): any;
+
+/**
+ * Whether state bag `bagName` has a value for `key`.
+ */
+declare function StateBagHasKey(bagName: string, key: string): boolean;
+
+/**
+ * The sorted key names of state bag `bagName`, or `undefined` for an unknown bag.
+ */
+declare function GetStateBagKeys(bagName: string): string[] | undefined;
+
+/**
+ * Writes `value` under `key` in state bag `bagName`. `replicated` defaults to false.
+ */
+declare function SetStateBagValue(bagName: string, key: string, value: any, replicated?: boolean): void;
+
+/**
+ * FiveM form: `valueData` is msgpack bytes and only its first `valueLength` bytes are decoded.
+ */
+declare function SetStateBagValue(bagName: string, key: string, valueData: Uint8Array | string, valueLength: number, replicated?: boolean): void;
+
+/**
+ * Compatibility call; does nothing, since an entity's bag lives as long as the entity.
+ */
+declare function EnsureEntityStateBag(entity: number): void;
+
 // =============================================================================
 // Vectors, quaternions, and msgpack
 // =============================================================================

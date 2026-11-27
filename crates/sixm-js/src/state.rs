@@ -1,14 +1,17 @@
 //! State bags via ES6 `Proxy`: `GlobalState`, `Player(id).state`, `Entity(id).state`,
-//! `LocalPlayer.state`, change handlers, and `GetPlayerFromStateBagName`.
+//! `LocalPlayer.state`, change handlers, `GetPlayerFromStateBagName` and the
+//! name-based natives `GetStateBagValue`, `StateBagHasKey`, `GetStateBagKeys`,
+//! `SetStateBagValue` and `EnsureEntityStateBag`.
 
 use std::rc::Weak;
 
 use rquickjs::class::Trace;
 use rquickjs::function::Opt;
 use rquickjs::proxy::{Proxy, ProxyHandler, ProxyProperty, ProxyReceiver, ProxyTarget};
-use rquickjs::{Class, Ctx, Exception, Function, JsLifetime, Persistent, Value as JsValue};
-use sixm_core::{GLOBAL_BAG, Value, player_of_bag};
+use rquickjs::{Class, Ctx, Exception, FromJs, Function, JsLifetime, Persistent, Value as JsValue};
+use sixm_core::{GLOBAL_BAG, Value, msgpack, player_of_bag};
 
+use crate::natives::data_bytes;
 use crate::runtime::{CALLBACK_BUDGET, JsRuntime};
 use crate::sandbox::catch_script;
 
@@ -221,16 +224,75 @@ fn write_state<'js>(
     let val = rt
         .to_network_value(ctx, value)
         .map_err(|err| Exception::throw_message(ctx, &err.to_string()))?;
+    apply_state(rt, ctx, bag, key, &val, replicated)
+}
+
+/// The FiveM form of `SetStateBagValue`: `value` is msgpack bytes and only its
+/// first `length` bytes are decoded. The decoded value is stored like any write.
+fn write_packed<'js>(
+    rt: &JsRuntime,
+    ctx: &Ctx<'js>,
+    bag: &str,
+    key: &str,
+    value: &JsValue<'js>,
+    length: i32,
+    replicated: bool,
+) -> rquickjs::Result<()> {
+    let data = data_bytes(ctx, value)?;
+    let len = usize::try_from(length)
+        .ok()
+        .filter(|len| *len <= data.len())
+        .ok_or_else(|| {
+            Exception::throw_message(ctx, "SetStateBagValue: valueLength exceeds data")
+        })?;
+    let decoded = msgpack::unpack(&data[..len])
+        .map_err(|err| Exception::throw_message(ctx, &err.to_string()))?;
+    apply_state(rt, ctx, bag, key, &decoded, replicated)
+}
+
+/// `SetStateBagValue` in either form. The FiveM form has an integer fourth
+/// argument and a fifth argument; the other form has `replicated` fourth.
+fn set_state_value<'js>(
+    rt: &JsRuntime,
+    ctx: &Ctx<'js>,
+    bag: &str,
+    key: &str,
+    value: &JsValue<'js>,
+    fourth: Option<JsValue<'js>>,
+    fifth: Option<bool>,
+) -> rquickjs::Result<()> {
+    if let (Some(length), Some(replicated)) = (fourth.as_ref().and_then(JsValue::as_int), fifth) {
+        return write_packed(rt, ctx, bag, key, value, length, replicated);
+    }
+    let replicated = match fourth {
+        Some(flag) => bool::from_js(ctx, flag)?,
+        None => false,
+    };
+    write_state(rt, ctx, bag, key, value, replicated)
+}
+
+/// Stores `val` in `bag` with the self-skip and local change dispatch of a script write.
+fn apply_state(
+    rt: &JsRuntime,
+    ctx: &Ctx<'_>,
+    bag: &str,
+    key: &str,
+    val: &Value,
+    replicated: bool,
+) -> rquickjs::Result<()> {
     let prev_skip = rt.skip_self_state.replace(true);
     let outcome = rt.host(ctx)?.state_set(bag, key, val.clone(), replicated);
     rt.skip_self_state.set(prev_skip);
     outcome.map_err(|err| Exception::throw_message(ctx, &err.to_string()))?;
-    rt.dispatch_state_change_in_ctx(ctx, bag, key, &val, replicated);
+    rt.dispatch_state_change_in_ctx(ctx, bag, key, val, replicated);
     Ok(())
 }
 
 /// Installs `GlobalState`, `AddStateBagChangeHandler`,
-/// `RemoveStateBagChangeHandler`, and `GetPlayerFromStateBagName`.
+/// `RemoveStateBagChangeHandler`, `GetPlayerFromStateBagName` and the FiveM
+/// name-based natives `GetStateBagValue`, `StateBagHasKey`, `GetStateBagKeys`,
+/// `SetStateBagValue` and `EnsureEntityStateBag`. `EnsureEntityStateBag` does
+/// nothing: an entity's bag exists for the whole life of the entity.
 pub(crate) fn install<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::Result<()> {
     let globals = ctx.globals();
     globals.set("GlobalState", state_bag(ctx, weak, GLOBAL_BAG)?)?;
@@ -264,10 +326,67 @@ pub(crate) fn install<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::
     let player_from_bag = Function::new(ctx.clone(), |bag: String| {
         i64::from(player_of_bag(&bag).unwrap_or(0))
     })?;
+    let get_value = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, bag: String, key: String| -> rquickjs::Result<JsValue<'js>> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                match rt.host(&ctx)?.state_get(&bag, &key) {
+                    Some(value) => rt
+                        .to_js(&ctx, &value)
+                        .map_err(|err| Exception::throw_message(&ctx, &err.to_string())),
+                    None => Ok(JsValue::new_undefined(ctx)),
+                }
+            },
+        )?
+    };
+    let has_key = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, bag: String, key: String| -> rquickjs::Result<bool> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                Ok(rt.host(&ctx)?.state_get(&bag, &key).is_some())
+            },
+        )?
+    };
+    let get_keys = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, bag: String| -> rquickjs::Result<Option<Vec<String>>> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                Ok(rt.host(&ctx)?.state_keys(&bag))
+            },
+        )?
+    };
+    let set_value = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>,
+                  bag: String,
+                  key: String,
+                  value: JsValue<'js>,
+                  fourth: Opt<JsValue<'js>>,
+                  fifth: Opt<bool>|
+                  -> rquickjs::Result<()> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                set_state_value(&rt, &ctx, &bag, &key, &value, fourth.0, fifth.0)
+            },
+        )?
+    };
+    let ensure_entity = Function::new(ctx.clone(), |_entity: f64| {})?;
 
     globals.set("AddStateBagChangeHandler", add_handler)?;
     globals.set("RemoveStateBagChangeHandler", remove_handler)?;
     globals.set("GetPlayerFromStateBagName", player_from_bag)?;
+    globals.set("GetStateBagValue", get_value)?;
+    globals.set("StateBagHasKey", has_key)?;
+    globals.set("GetStateBagKeys", get_keys)?;
+    globals.set("SetStateBagValue", set_value)?;
+    globals.set("EnsureEntityStateBag", ensure_entity)?;
     Ok(())
 }
 
