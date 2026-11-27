@@ -3,7 +3,7 @@
 
 use std::rc::Weak;
 
-use mlua::{Lua, MultiValue, Table, Value as LuaValue};
+use mlua::{Function, Lua, MultiValue, Table, Value as LuaValue};
 use sixm_core::{ClientTarget, Host, PlayerInfo, ServerHost, player_bag};
 
 use crate::runtime::{LuaRuntime, bind_fn, lua_err};
@@ -16,7 +16,7 @@ const DEFAULT_DROP_REASON: &str = "Dropped by server";
 const EXACT_FLOAT_LIMIT: f64 = 9_007_199_254_740_992.0;
 
 /// Installs `TriggerClientEvent`, `GetPlayers`, `GetNumPlayerIndices`,
-/// `GetPlayerName`, `GetPlayerEndpoint`, the identifier functions, `DropPlayer`,
+/// `GetPlayerName`, `GetPlayerPed`, `GetPlayerEndpoint`, the identifier functions, `DropPlayer`,
 /// `IsPlayerAceAllowed`, `IsPrincipalAceAllowed` and `Player`. Only server
 /// runtimes call this.
 pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::Result<()> {
@@ -40,6 +40,7 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
         let count = server(&*rt.host()?)?.players().len();
         i64::try_from(count).map_err(mlua::Error::runtime)
     })?;
+    let get_player_ped = player_ped_function(lua, weak)?;
     let get_player_name = bind_fn(lua, weak, |rt, (player,): (LuaValue,)| {
         Ok(player_info(rt, &player)?.map(|info| info.name))
     })?;
@@ -103,6 +104,7 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
         ("GetPlayers", get_players),
         ("GetNumPlayerIndices", get_num_player_indices),
         ("GetPlayerName", get_player_name),
+        ("GetPlayerPed", get_player_ped),
         ("GetPlayerEndpoint", get_player_endpoint),
         ("GetPlayerIdentifiers", get_player_identifiers),
         ("GetNumPlayerIdentifiers", get_num_player_identifiers),
@@ -117,6 +119,18 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
         globals.raw_set(name, function)?;
     }
     Ok(())
+}
+
+/// `GetPlayerPed`: the ped of a connected player, or 0 for a player without one.
+fn player_ped_function(lua: &Lua, weak: &Weak<LuaRuntime>) -> mlua::Result<Function> {
+    bind_fn(lua, weak, |rt, (player,): (LuaValue,)| {
+        let host = rt.host()?;
+        let ped = match player_id(&player) {
+            Some(id) => server(&*host)?.player_ped(id),
+            None => None,
+        };
+        Ok(i64::from(ped.unwrap_or(0)))
+    })
 }
 
 /// The server services of `host`. Only server runtimes call the functions that

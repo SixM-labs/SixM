@@ -38,7 +38,7 @@ separate adapters, starting with GTA VI once a PC version is released.
 | Networking: QUIC transport and protocol (`sixm-net`) | ✅ done |
 | Players, net events and client events (`sixm-server`, `sixm-lua`) | ✅ done |
 | State bags (`sixm-server`, `sixm-lua`, `sixm-net`) | ✅ done |
-| Entity sync | ✅ done (server-owned entities, no game yet) |
+| Entity sync and player peds | ✅ done (server-owned entities and client-moved peds, no game yet) |
 | Headless client: resource sync, client scripts (`sixm-client`) | ✅ done |
 | GTA VI game adapter | ⏳ planned (needs a PC release) |
 
@@ -234,6 +234,12 @@ natives read the same values on both sides.
   and rotation, however often the script moved the entity in that frame.
 - A player who joins receives every entity that exists.
 - There is no scoping yet: every client receives every entity.
+- Each admitted player has a ped, owned by that player. The owner's client moves
+  it, with `SetEntityCoords` and the other setters, and the server passes the
+  move on to everyone else. Nobody else can move it. A server move, such as
+  `SetEntityCoords(GetPlayerPed(source), ...)`, moves it for everyone,
+  including the owner. Server scripts see the owner with `NetworkGetEntityOwner`.
+  See [Player peds and ownership](docs/lua-api.md#player-peds-and-ownership).
 
 ```lua
 local vehicle = CreateVehicle('adder', 0.0, 0.0, 72.0, 90.0, true, false)
@@ -247,14 +253,16 @@ The console command `entities` lists every entity.
 Natives, on both sides: `DoesEntityExist`, `GetEntityCoords`,
 `GetEntityHeading`, `GetEntityRotation`, `GetEntityModel`, `GetEntityType`,
 `NetworkGetNetworkIdFromEntity`, `NetworkGetEntityFromNetworkId`,
-`NetworkDoesNetworkIdExist`, `GetEntityFromStateBagName` and `Entity`.
+`NetworkDoesNetworkIdExist`, `GetEntityFromStateBagName`, `Entity`,
+`SetEntityCoords`, `SetEntityCoordsNoOffset`, `SetEntityHeading` and
+`SetEntityRotation`. On a client the setters move only the entities it owns.
 
 On the server: `CreateVehicle`, `CreateVehicleServerSetter`, `CreatePed`,
-`CreateObject`, `CreateObjectNoOffset`, `DeleteEntity`, `SetEntityCoords`,
-`SetEntityCoordsNoOffset`, `SetEntityHeading`, `SetEntityRotation`,
-`GetAllVehicles`, `GetAllPeds` and `GetAllObjects`.
+`CreateObject`, `CreateObjectNoOffset`, `DeleteEntity`, `GetPlayerPed`,
+`NetworkGetEntityOwner`, `GetAllVehicles`, `GetAllPeds` and `GetAllObjects`.
 
-On the client: `GetGamePool`, with `'CVehicle'`, `'CPed'` or `'CObject'`.
+On the client: `GetGamePool`, with `'CVehicle'`, `'CPed'` or `'CObject'`,
+`PlayerPedId` and `GetPlayerPed`.
 
 ## Contributing
 

@@ -9,6 +9,17 @@ mod common;
 use common::{call, new_client_host, new_host, start};
 use sixm_core::{EntityInfo, EntityKind, Host, Value, joaat};
 
+/// A ped that `owner` moves, or a script-created one when `owner` is `None`.
+fn ped(owner: Option<u32>) -> EntityInfo {
+    EntityInfo {
+        kind: EntityKind::Ped,
+        model: joaat(b"a_m_m_skater_01"),
+        position: [0.0; 3],
+        rotation: [0.0; 3],
+        owner,
+    }
+}
+
 #[test]
 fn vehicles_are_created_with_their_model_position_and_heading() {
     let host = new_host();
@@ -42,6 +53,7 @@ fn vehicles_are_created_with_their_model_position_and_heading() {
             model: joaat(b"adder"),
             position: [1.0, 2.0, 3.0],
             rotation: [0.0, 0.0, 90.0],
+            owner: None,
         })
     );
 }
@@ -300,6 +312,7 @@ fn the_pool_of_a_client_lists_the_entities_it_mirrors() {
             model: joaat(b"adder"),
             position: [1.0, 2.0, 3.0],
             rotation: [0.0, 0.0, 90.0],
+            owner: None,
         },
     );
     host.entities.borrow_mut().insert(
@@ -309,6 +322,7 @@ fn the_pool_of_a_client_lists_the_entities_it_mirrors() {
             model: joaat(b"a_m_m_skater_01"),
             position: [0.0; 3],
             rotation: [0.0; 3],
+            owner: None,
         },
     );
     let rt = start(
@@ -338,6 +352,111 @@ fn the_pool_of_a_client_lists_the_entities_it_mirrors() {
                assert(#GetGamePool('CObject') == 0)\n\
                assert(#GetGamePool('CNothing') == 0)\n\
                assert(CreateVehicle == nil and DeleteEntity == nil)\n\
+             end)\n",
+        )],
+    );
+
+    call(&rt, "check", &[]);
+}
+
+#[test]
+fn server_reads_player_peds_and_entity_owners() {
+    let host = new_host();
+    host.player_peds.borrow_mut().insert(1, 7);
+    host.entities.borrow_mut().insert(7, ped(Some(1)));
+    let rt = start(
+        &host,
+        "owners",
+        &["check"],
+        &[(
+            "main.lua",
+            "exports('check', function()\n\
+               assert(GetPlayerPed(1) == 7)\n\
+               assert(GetPlayerPed(2) == 0, 'a player without a ped')\n\
+               assert(GetPlayerPed(-1) == 0, 'no player is named -1')\n\
+               assert(NetworkGetEntityOwner(7) == 1)\n\
+               assert(NetworkGetEntityOwner(99) == -1, 'an unknown entity')\n\
+               local v = CreateVehicle('adder', 0.0, 0.0, 0.0, 0.0, true, false)\n\
+               assert(NetworkGetEntityOwner(v) == -1, 'a script-created entity')\n\
+               SetEntityCoords(GetPlayerPed(1), 4.0, 5.0, 6.0)\n\
+             end)\n",
+        )],
+    );
+
+    call(&rt, "check", &[]);
+    assert_eq!(
+        host.entity(7).map(|info| info.position),
+        Some([4.0, 5.0, 6.0])
+    );
+}
+
+#[test]
+fn client_moves_only_the_entities_it_owns_and_keeps_pitch_and_roll() {
+    let host = new_client_host(3);
+    host.local_ped.set(Some(7));
+    host.entities.borrow_mut().insert(7, ped(Some(3)));
+    host.entities.borrow_mut().insert(8, ped(Some(4)));
+    let rt = start(
+        &host,
+        "mover",
+        &["check"],
+        &[(
+            "main.lua",
+            "exports('check', function()\n\
+               assert(PlayerPedId() == 7)\n\
+               assert(GetPlayerPed(-1) == 7 and GetPlayerPed(PlayerId()) == 7)\n\
+               assert(GetPlayerPed(4) == 0, 'only the local player is known')\n\
+               assert(NetworkGetEntityOwner == nil, 'the owner is server only')\n\
+               SetEntityCoords(PlayerPedId(), 5.0, 6.0, 7.0)\n\
+               SetEntityCoords(8, 1.0, 1.0, 1.0)\n\
+               SetEntityHeading(8, 90.0)\n\
+               SetEntityRotation(8, 1.0, 2.0, 3.0)\n\
+               assert(not pcall(SetEntityCoords, 8, 0.0 / 0.0, 0.0, 0.0), 'not owned, still checked')\n\
+               assert(not pcall(SetEntityCoords, 7, 0.0, 1.0 / 0.0, 0.0))\n\
+               SetEntityHeading(7, 90.0)\n\
+               SetEntityRotation(7, 10.0, 20.0, 30.0)\n\
+               SetEntityHeading(7, 45.0)\n\
+               local c = GetEntityCoords(7)\n\
+               assert(c.x == 5.0 and c.y == 6.0 and c.z == 7.0)\n\
+               assert(GetEntityCoords(8).x == 0.0, 'a move of a foreign entity is not seen')\n\
+             end)\n",
+        )],
+    );
+
+    call(&rt, "check", &[]);
+    assert_eq!(
+        host.entity(7).map(|info| info.position),
+        Some([5.0, 6.0, 7.0])
+    );
+    assert_eq!(
+        host.entity(7).map(|info| info.rotation),
+        Some([10.0, 20.0, 45.0])
+    );
+    assert_eq!(host.entity(8).map(|info| info.position), Some([0.0; 3]));
+    assert_eq!(
+        *host.owned_moves.borrow(),
+        vec![
+            (7, Some([5.0, 6.0, 7.0]), None),
+            (7, None, Some([0.0, 0.0, 90.0])),
+            (7, None, Some([10.0, 20.0, 30.0])),
+            (7, None, Some([10.0, 20.0, 45.0])),
+        ],
+        "only owned moves reach the host, one per call"
+    );
+}
+
+#[test]
+fn a_client_without_a_local_ped_reports_zero() {
+    let host = new_client_host(3);
+    let rt = start(
+        &host,
+        "no_ped",
+        &["check"],
+        &[(
+            "main.lua",
+            "exports('check', function()\n\
+               assert(PlayerPedId() == 0)\n\
+               assert(GetPlayerPed(-1) == 0)\n\
              end)\n",
         )],
     );

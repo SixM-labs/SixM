@@ -1,16 +1,19 @@
 //! Entity functions: the natives that read entities on both sides, the ones
-//! that create, move and delete them on the server, `GetGamePool` on the client,
-//! and `Entity(id)` for an entity's state bag.
+//! that create, move and delete them on the server, the movement functions of
+//! both sides, `GetGamePool` on the client, and `Entity(id)` for an entity's
+//! state bag.
 //!
 //! Every read asks the host, so an unknown entity reads as the neutral value of
 //! its type: a zero vector, zero, or `false`. A setter on an unknown entity does
-//! nothing. A number that is not finite raises an error.
+//! nothing. A number that is not finite raises an error. On the client a setter
+//! on an entity this client does not own does nothing either.
 
 use std::rc::Weak;
 
 use mlua::{Function, Lua, Table, Value as LuaValue};
 use sixm_core::{EntityInfo, EntityKind, entity_bag, entity_of_bag, joaat};
 
+use crate::client::client;
 use crate::players::{server, whole_number};
 use crate::runtime::{LuaRuntime, bind_fn, lua_err};
 use crate::state::state_bag;
@@ -79,8 +82,8 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
     Ok(())
 }
 
-/// Installs the functions only a server can use: creation, movement, deletion
-/// and the lists of entities of each kind.
+/// Installs the functions only a server can use: creation, movement, deletion,
+/// the owner of an entity and the lists of entities of each kind.
 pub(crate) fn install_server(
     lua: &Lua,
     weak: &Weak<LuaRuntime>,
@@ -89,6 +92,7 @@ pub(crate) fn install_server(
     for (name, function) in spawn_functions(lua, weak)?
         .into_iter()
         .chain(change_functions(lua, weak)?)
+        .chain(owner_functions(lua, weak)?)
         .chain(list_functions(lua, weak)?)
     {
         globals.raw_set(name, function)?;
@@ -176,7 +180,20 @@ fn spawn_functions(
     ])
 }
 
-/// The functions that move or delete an entity.
+/// A change to the transform of an entity, as the movement functions make it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Transform {
+    Position([f32; 3]),
+    Rotation([f32; 3]),
+}
+
+/// Applies a transform to the entity `id`. The server moves the entity itself,
+/// and the client moves an entity it owns. Both sides use the same argument
+/// parsing, see [`movement_functions`].
+type Apply = fn(&LuaRuntime, u32, Transform) -> mlua::Result<()>;
+
+/// The functions that delete an entity on the server, and the functions that
+/// move one, with `apply` deciding how the move is made.
 fn change_functions(
     lua: &Lua,
     weak: &Weak<LuaRuntime>,
@@ -187,47 +204,75 @@ fn change_functions(
         }
         Ok(())
     })?;
+    let mut functions = movement_functions(lua, weak, server_move)?;
+    functions.push(("DeleteEntity", delete_entity));
+    Ok(functions)
+}
+
+/// The functions that move an entity: `SetEntityCoords`,
+/// `SetEntityCoordsNoOffset`, `SetEntityHeading` and `SetEntityRotation`.
+/// Every argument is checked before the entity is looked at, so a bad number
+/// fails on both sides. A heading keeps the pitch and roll of the entity.
+fn movement_functions(
+    lua: &Lua,
+    weak: &Weak<LuaRuntime>,
+    apply: Apply,
+) -> mlua::Result<Vec<(&'static str, Function)>> {
     let set_coords = bind_fn(
         lua,
         weak,
-        |rt, (entity, x, y, z): (LuaValue, LuaValue, LuaValue, LuaValue)| {
+        move |rt, (entity, x, y, z): (LuaValue, LuaValue, LuaValue, LuaValue)| {
             let position = coordinates(&x, &y, &z)?;
-            move_entity(rt, &entity, position)
+            move_entity(rt, &entity, Transform::Position(position), apply)
         },
     )?;
     let set_coords_no_offset = set_coords.clone();
-    let set_heading = bind_fn(lua, weak, |rt, (entity, heading): (LuaValue, LuaValue)| {
-        let heading = real(&heading, "heading")?;
-        match existing(rt, &entity)? {
-            Some((id, info)) => {
-                let [pitch, roll, _] = info.rotation;
-                set_rotation(rt, id, [pitch, roll, heading])
+    let set_heading = bind_fn(
+        lua,
+        weak,
+        move |rt, (entity, heading): (LuaValue, LuaValue)| {
+            let heading = real(&heading, "heading")?;
+            match existing(rt, &entity)? {
+                Some((id, info)) => {
+                    let [pitch, roll, _] = info.rotation;
+                    apply(rt, id, Transform::Rotation([pitch, roll, heading]))
+                }
+                None => Ok(()),
             }
-            None => Ok(()),
-        }
-    })?;
+        },
+    )?;
     let set_rotation_function = bind_fn(
         lua,
         weak,
-        |rt, (entity, pitch, roll, yaw): (LuaValue, LuaValue, LuaValue, LuaValue)| {
+        move |rt, (entity, pitch, roll, yaw): (LuaValue, LuaValue, LuaValue, LuaValue)| {
             let rotation = [
                 real(&pitch, "pitch")?,
                 real(&roll, "roll")?,
                 real(&yaw, "yaw")?,
             ];
-            match existing(rt, &entity)? {
-                Some((id, _)) => set_rotation(rt, id, rotation),
-                None => Ok(()),
-            }
+            move_entity(rt, &entity, Transform::Rotation(rotation), apply)
         },
     )?;
     Ok(vec![
-        ("DeleteEntity", delete_entity),
         ("SetEntityCoords", set_coords),
         ("SetEntityCoordsNoOffset", set_coords_no_offset),
         ("SetEntityHeading", set_heading),
         ("SetEntityRotation", set_rotation_function),
     ])
+}
+
+/// The functions that tell who moves an entity on the server.
+fn owner_functions(
+    lua: &Lua,
+    weak: &Weak<LuaRuntime>,
+) -> mlua::Result<Vec<(&'static str, Function)>> {
+    let owner = bind_fn(lua, weak, |rt, (entity,): (LuaValue,)| {
+        // An entity without an owner, or an unknown one, reads as -1.
+        Ok(existing(rt, &entity)?
+            .and_then(|(_, info)| info.owner)
+            .map_or(-1, i64::from))
+    })?;
+    Ok(vec![("NetworkGetEntityOwner", owner)])
 }
 
 /// The functions that list the entities of each kind.
@@ -246,13 +291,17 @@ fn list_functions(
     ])
 }
 
-/// Installs `GetGamePool`, which only a client can answer from its copy of the
-/// entities.
+/// Installs the movement functions of a client, which move the entities this
+/// client owns, and `GetGamePool`, which only a client can answer from its copy
+/// of the entities.
 pub(crate) fn install_client(
     lua: &Lua,
     weak: &Weak<LuaRuntime>,
     globals: &Table,
 ) -> mlua::Result<()> {
+    for (name, function) in movement_functions(lua, weak, client_move)? {
+        globals.raw_set(name, function)?;
+    }
     let game_pool = bind_fn(lua, weak, |rt, (name,): (String,)| {
         let kind = match name.as_str() {
             "CVehicle" => Some(EntityKind::Vehicle),
@@ -300,29 +349,61 @@ fn spawn(
         model: model_of(model)?,
         position,
         rotation,
+        owner: None,
     };
     let host = rt.host()?;
     let id = server(&*host)?.create_entity(info).map_err(lua_err)?;
     Ok(i64::from(id))
 }
 
-/// Moves the entity `entity` names, when it exists.
-fn move_entity(rt: &LuaRuntime, entity: &LuaValue, position: [f32; 3]) -> mlua::Result<()> {
-    let Some((id, _)) = existing(rt, entity)? else {
-        return Ok(());
-    };
-    let host = rt.host()?;
-    server(&*host)?
-        .set_entity_position(id, position)
-        .map_err(lua_err)
+/// Applies `transform` to the entity `entity` names. A value that names no
+/// entity does nothing.
+fn move_entity(
+    rt: &LuaRuntime,
+    entity: &LuaValue,
+    transform: Transform,
+    apply: Apply,
+) -> mlua::Result<()> {
+    match entity_id(entity) {
+        Some(id) => apply(rt, id, transform),
+        None => Ok(()),
+    }
 }
 
-/// Rotates the entity `id`.
-fn set_rotation(rt: &LuaRuntime, id: u32, rotation: [f32; 3]) -> mlua::Result<()> {
+/// The server's move: it sets the transform, which reaches every client, and
+/// the owner of the entity takes it too. An unknown entity does nothing.
+fn server_move(rt: &LuaRuntime, id: u32, transform: Transform) -> mlua::Result<()> {
     let host = rt.host()?;
-    server(&*host)?
-        .set_entity_rotation(id, rotation)
-        .map_err(lua_err)
+    if host.entity(id).is_none() {
+        return Ok(());
+    }
+    let server = server(&*host)?;
+    match transform {
+        Transform::Position(position) => server.set_entity_position(id, position),
+        Transform::Rotation(rotation) => server.set_entity_rotation(id, rotation),
+    }
+    .map_err(lua_err)
+}
+
+/// The client's move of an entity it owns. An entity this client does not own,
+/// or does not know, is left alone, as the server leaves unknown entities alone.
+fn client_move(rt: &LuaRuntime, id: u32, transform: Transform) -> mlua::Result<()> {
+    let host = rt.host()?;
+    let owner_host = client(&*host)?;
+    let (position, rotation) = match transform {
+        Transform::Position(position) => (Some(position), None),
+        Transform::Rotation(rotation) => (None, Some(rotation)),
+    };
+    match owner_host.move_owned_entity(id, position, rotation) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            // The host refuses only what it does not own, or cannot find, and
+            // the arguments were checked already, so anything else is an error.
+            let owned =
+                host.entity(id).and_then(|info| info.owner) == Some(owner_host.local_player());
+            if owned { Err(lua_err(err)) } else { Ok(()) }
+        }
+    }
 }
 
 /// The model hash `value` names. A string is hashed, and a whole number is the

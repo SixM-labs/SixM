@@ -1,27 +1,34 @@
-//! Server-owned entities: their ids, their transforms, and the transform updates
-//! due for clients at the end of each frame.
+//! Entities: their ids, their transforms, and the transform updates due for
+//! clients at the end of each frame.
 //!
 //! Scripts create, move and delete entities. Creation and deletion reach clients
 //! at once. A move only marks the entity, and each marked entity is sent once
-//! per frame with its latest transform.
+//! per frame with its latest transform. The owner of an entity may move it too,
+//! and then the other clients receive the owner's transform.
 
 use std::collections::BTreeMap;
 
 use sixm_core::{
     EntityInfo, EntityKind, EventSource, MAX_ENTITIES, ScriptError, Value, entity_bag, is_finite,
+    joaat,
 };
 use sixm_net::EntityEntry;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::manager::ResourceManager;
 
-/// One transform as clients receive it: the entity id, its position and its rotation.
-pub(crate) type EntityUpdate = (u32, [f32; 3], [f32; 3]);
+/// One transform as clients receive it: the entity id, its position, its
+/// rotation, and its teleport epoch.
+pub(crate) type EntityUpdate = (u32, [f32; 3], [f32; 3], u32);
 
-/// An entity and whether its transform is queued for the next frame.
+/// An entity, its teleport epoch, and whether its transform is queued for the
+/// next frame.
 #[derive(Debug, Clone, Copy)]
 struct Slot {
     info: EntityInfo,
+    /// How many times the server has moved the entity itself. Only the server
+    /// changes it, and an owner's update must carry the current value.
+    epoch: u32,
     dirty: bool,
 }
 
@@ -63,7 +70,14 @@ impl EntityStore {
             return Err(ScriptError::Runtime("no entity ids are left".to_owned()));
         }
         self.next_id = id.checked_add(1).unwrap_or(0);
-        self.by_id.insert(id, Slot { info, dirty: false });
+        self.by_id.insert(
+            id,
+            Slot {
+                info,
+                epoch: 0,
+                dirty: false,
+            },
+        );
         Ok(id)
     }
 
@@ -82,11 +96,11 @@ impl EntityStore {
         self.by_id.contains_key(&id)
     }
 
-    /// Every entity, in ascending id order.
-    pub(crate) fn all(&self) -> Vec<(u32, EntityInfo)> {
+    /// Every entity with its epoch, in ascending id order.
+    pub(crate) fn all(&self) -> Vec<(u32, EntityInfo, u32)> {
         self.by_id
             .iter()
-            .map(|(id, slot)| (*id, slot.info))
+            .map(|(id, slot)| (*id, slot.info, slot.epoch))
             .collect()
     }
 
@@ -100,30 +114,67 @@ impl EntityStore {
             .collect()
     }
 
-    /// Moves the entity `id` to `position`, and queues it for the next frame.
+    /// Moves the entity `id` to `position` on the server, and queues it for the
+    /// next frame with a new epoch.
     pub(crate) fn set_position(&mut self, id: u32, position: [f32; 3]) -> Result<(), ScriptError> {
         check_finite(position)?;
         self.update(id, |info| info.position = position)
     }
 
-    /// Rotates the entity `id`, and queues it for the next frame.
+    /// Rotates the entity `id` on the server, and queues it for the next frame
+    /// with a new epoch.
     pub(crate) fn set_rotation(&mut self, id: u32, rotation: [f32; 3]) -> Result<(), ScriptError> {
         check_finite(rotation)?;
         self.update(id, |info| info.rotation = rotation)
     }
 
-    /// Applies `change` to the entity `id`, and queues it unless it already is.
+    /// Applies `change` to the entity `id` as a server move: the epoch goes up,
+    /// so every owner update sent before it is refused, and the entity is queued.
     fn update(&mut self, id: u32, change: impl FnOnce(&mut EntityInfo)) -> Result<(), ScriptError> {
         let slot = self
             .by_id
             .get_mut(&id)
             .ok_or_else(|| ScriptError::Runtime(format!("entity {id} does not exist")))?;
         change(&mut slot.info);
+        slot.epoch = slot.epoch.wrapping_add(1);
         if !slot.dirty {
             slot.dirty = true;
             self.dirty.push(id);
         }
         Ok(())
+    }
+
+    /// Stores a transform that `player`, the owner of the entity `id`, sent for
+    /// the teleport epoch `epoch`. Returns `false` and changes nothing unless the
+    /// entity exists, `player` owns it, every component is finite, and `epoch`
+    /// is the entity's current epoch. An update computed before a server move
+    /// therefore never lands, whenever it arrives. An accepted transform keeps
+    /// the epoch.
+    pub(crate) fn owner_move(
+        &mut self,
+        player: u32,
+        id: u32,
+        position: [f32; 3],
+        rotation: [f32; 3],
+        epoch: u32,
+    ) -> bool {
+        let Some(slot) = self.by_id.get_mut(&id) else {
+            return false;
+        };
+        if slot.info.owner != Some(player)
+            || slot.epoch != epoch
+            || !is_finite(position)
+            || !is_finite(rotation)
+        {
+            return false;
+        }
+        slot.info.position = position;
+        slot.info.rotation = rotation;
+        if !slot.dirty {
+            slot.dirty = true;
+            self.dirty.push(id);
+        }
+        true
     }
 
     /// Moves the transform of every queued entity into `out`, in the order the
@@ -133,7 +184,7 @@ impl EntityStore {
         for id in self.dirty.drain(..) {
             if let Some(slot) = self.by_id.get_mut(&id) {
                 slot.dirty = false;
-                out.push((id, slot.info.position, slot.info.rotation));
+                out.push((id, slot.info.position, slot.info.rotation, slot.epoch));
             }
         }
     }
@@ -156,7 +207,7 @@ impl ResourceManager {
     pub(crate) fn spawn_entity(&self, info: EntityInfo) -> Result<u32, ScriptError> {
         let id = self.entities.borrow_mut().insert(info)?;
         self.state.borrow_mut().create_bag(&entity_bag(id));
-        let entry = EntityEntry::from((id, info));
+        let entry = EntityEntry::from((id, info, 0));
         self.with_server(|server| {
             if let Err(err) = server.broadcast_entity_created(entry) {
                 warn!("cannot announce entity {id}: {err}");
@@ -200,6 +251,49 @@ impl ResourceManager {
         true
     }
 
+    /// Creates the ped of player `player`, owned by it, at the origin, and
+    /// returns its id. Its model is the `sixm_playerModel` convar. Clients see
+    /// it like any entity, and it is deleted again when the player leaves.
+    pub(crate) fn spawn_player_ped(&self, player: u32) -> Option<u32> {
+        let model = joaat(self.convars.borrow().player_model().as_bytes());
+        let info = EntityInfo {
+            kind: EntityKind::Ped,
+            model,
+            position: [0.0; 3],
+            rotation: [0.0; 3],
+            owner: Some(player),
+        };
+        match self.spawn_entity(info) {
+            Ok(id) => Some(id),
+            Err(err) => {
+                warn!("cannot create the ped of player {player}: {err}");
+                None
+            }
+        }
+    }
+
+    /// Applies the transforms a client sent for the entities it owns. A
+    /// transform that breaks the rules is ignored, and is only logged at debug
+    /// level, since a client may race a server move.
+    pub(crate) fn player_transforms(
+        &self,
+        player: u32,
+        updates: &[(u32, [f32; 3], [f32; 3], u32)],
+    ) {
+        let ignored = {
+            let mut entities = self.entities.borrow_mut();
+            updates
+                .iter()
+                .filter(|&&(id, position, rotation, epoch)| {
+                    !entities.owner_move(player, id, position, rotation, epoch)
+                })
+                .count()
+        };
+        if ignored > 0 {
+            debug!(player, ignored, "ignored entity transforms it may not send");
+        }
+    }
+
     /// Sends the transforms queued since the last frame, one update per entity.
     /// Nothing is sent when no entity moved. The update buffer is reused, so a
     /// frame does not allocate once the buffer has grown.
@@ -218,7 +312,7 @@ impl ResourceManager {
     }
 
     /// Every entity, in ascending id order, for the console and for joining players.
-    pub(crate) fn entity_list(&self) -> Vec<(u32, EntityInfo)> {
+    pub(crate) fn entity_list(&self) -> Vec<(u32, EntityInfo, u32)> {
         self.entities.borrow().all()
     }
 
@@ -247,6 +341,14 @@ mod tests {
             model: 1,
             position: [x, 0.0, 0.0],
             rotation: [0.0, 0.0, 0.0],
+            owner: None,
+        }
+    }
+
+    fn owned_by(player: u32) -> EntityInfo {
+        EntityInfo {
+            owner: Some(player),
+            ..info(EntityKind::Ped, 0.0)
         }
     }
 
@@ -255,6 +357,9 @@ mod tests {
         store.take_dirty(&mut out);
         out
     }
+
+    /// The position of an owner move, and the rotation it keeps.
+    const OWNER_POSITION: [f32; 3] = [9.0, 8.0, 7.0];
 
     #[test]
     fn ids_count_up_from_one_and_are_never_reused() {
@@ -317,7 +422,8 @@ mod tests {
 
         assert_eq!(
             dirty(&mut store),
-            vec![(id, [2.0, 0.0, 0.0], [0.0, 0.0, 90.0])]
+            vec![(id, [2.0, 0.0, 0.0], [0.0, 0.0, 90.0], 3)],
+            "three server moves, one update carrying the last transform and epoch"
         );
         assert!(dirty(&mut store).is_empty(), "the queue is cleared");
     }
@@ -333,7 +439,7 @@ mod tests {
 
         assert_eq!(
             dirty(&mut store),
-            vec![(kept, [6.0, 0.0, 0.0], [0.0, 0.0, 0.0])]
+            vec![(kept, [6.0, 0.0, 0.0], [0.0, 0.0, 0.0], 1)]
         );
     }
 
@@ -342,6 +448,101 @@ mod tests {
         let mut store = EntityStore::default();
         assert!(store.set_position(7, [0.0; 3]).is_err());
         assert!(store.set_rotation(7, [0.0; 3]).is_err());
+    }
+
+    #[test]
+    fn a_server_move_advances_the_epoch_and_an_owner_move_keeps_it() {
+        let mut store = EntityStore::default();
+        let ped = store.insert(owned_by(4)).unwrap();
+        assert!(store.owner_move(4, ped, OWNER_POSITION, [0.0; 3], 0));
+        assert_eq!(
+            dirty(&mut store),
+            vec![(ped, OWNER_POSITION, [0.0; 3], 0)],
+            "an owner move keeps epoch 0"
+        );
+
+        store.set_position(ped, [1.0, 1.0, 1.0]).unwrap();
+        assert_eq!(
+            dirty(&mut store),
+            vec![(ped, [1.0, 1.0, 1.0], [0.0; 3], 1)],
+            "a server move starts epoch 1"
+        );
+        assert!(store.owner_move(4, ped, OWNER_POSITION, [0.0; 3], 1));
+        assert_eq!(
+            dirty(&mut store),
+            vec![(ped, OWNER_POSITION, [0.0; 3], 1)],
+            "an owner move at the current epoch keeps it"
+        );
+    }
+
+    #[test]
+    fn an_owner_update_for_an_old_epoch_is_refused_after_a_server_move_in_the_same_frame() {
+        let mut store = EntityStore::default();
+        let ped = store.insert(owned_by(4)).unwrap();
+        store.set_position(ped, [100.0, 0.0, 0.0]).unwrap();
+        // The owner's update was computed before the teleport, so it is refused
+        // whatever the order of arrival, and the teleport keeps its position.
+        assert!(!store.owner_move(4, ped, OWNER_POSITION, [0.0; 3], 0));
+        assert_eq!(
+            dirty(&mut store),
+            vec![(ped, [100.0, 0.0, 0.0], [0.0; 3], 1)]
+        );
+    }
+
+    #[test]
+    fn an_owner_update_for_an_old_epoch_is_refused_after_the_server_move_was_sent() {
+        let mut store = EntityStore::default();
+        let ped = store.insert(owned_by(4)).unwrap();
+        store.set_position(ped, [100.0, 0.0, 0.0]).unwrap();
+        dirty(&mut store);
+
+        // A stale update that arrives after the teleport frame is still refused,
+        // and the owner's update made with the new epoch is accepted.
+        assert!(!store.owner_move(4, ped, OWNER_POSITION, [0.0; 3], 0));
+        assert_eq!(store.get(ped).unwrap().position, [100.0, 0.0, 0.0]);
+        assert!(store.owner_move(4, ped, OWNER_POSITION, [0.0; 3], 1));
+        assert_eq!(store.get(ped).unwrap().position, OWNER_POSITION);
+        assert_eq!(dirty(&mut store), vec![(ped, OWNER_POSITION, [0.0; 3], 1)]);
+    }
+
+    #[test]
+    fn the_epoch_wraps_around() {
+        let mut store = EntityStore::default();
+        let ped = store.insert(owned_by(4)).unwrap();
+        store.by_id.get_mut(&ped).unwrap().epoch = u32::MAX;
+        store.set_position(ped, [1.0, 0.0, 0.0]).unwrap();
+        assert_eq!(dirty(&mut store), vec![(ped, [1.0, 0.0, 0.0], [0.0; 3], 0)]);
+    }
+
+    #[test]
+    fn owner_moves_are_refused_for_the_wrong_player_or_entity() {
+        let mut store = EntityStore::default();
+        let ped = store.insert(owned_by(4)).unwrap();
+        let vehicle = store.insert(info(EntityKind::Vehicle, 0.0)).unwrap();
+
+        assert!(
+            !store.owner_move(5, ped, OWNER_POSITION, [0.0; 3], 0),
+            "not the owner"
+        );
+        assert!(
+            !store.owner_move(4, vehicle, OWNER_POSITION, [0.0; 3], 0),
+            "script-created"
+        );
+        assert!(
+            !store.owner_move(4, 99, OWNER_POSITION, [0.0; 3], 0),
+            "unknown entity"
+        );
+        assert!(dirty(&mut store).is_empty(), "nothing is queued");
+        assert_eq!(store.get(ped).unwrap().position, [0.0; 3]);
+    }
+
+    #[test]
+    fn owner_moves_with_a_value_that_is_not_finite_are_refused() {
+        let mut store = EntityStore::default();
+        let ped = store.insert(owned_by(4)).unwrap();
+        assert!(!store.owner_move(4, ped, [f32::NAN, 0.0, 0.0], [0.0; 3], 0));
+        assert!(!store.owner_move(4, ped, [0.0; 3], [0.0, f32::INFINITY, 0.0], 0));
+        assert!(dirty(&mut store).is_empty(), "nothing is queued");
     }
 
     #[test]

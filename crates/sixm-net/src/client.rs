@@ -28,7 +28,10 @@ use crate::protocol::{
 };
 use crate::transfer::HEADER_LEN;
 use crate::transport::{ServerVerifier, Trust, client_config, close_connection, closing_reason};
-use crate::wire::{decode_server_message, encode_command, encode_event, encode_frame, read_frame};
+use crate::wire::{
+    decode_server_message, encode_client_transforms, encode_command, encode_event, encode_frame,
+    read_frame,
+};
 
 /// Time allowed for the connection to close after the client disconnects.
 const DISCONNECT_GRACE: Duration = Duration::from_secs(1);
@@ -58,9 +61,10 @@ pub enum ClientEvent {
     ResourceStopped { name: String },
     /// An entity was created.
     EntityCreated { entity: EntityEntry },
-    /// New positions and rotations, as `(id, position, rotation)`.
+    /// New positions and rotations, as `(id, position, rotation, epoch)`.
+    /// `epoch` changes each time the server moves the entity itself.
     EntityTransforms {
-        updates: Vec<(u32, [f32; 3], [f32; 3])>,
+        updates: Vec<(u32, [f32; 3], [f32; 3], u32)>,
     },
     /// An entity was deleted.
     EntityDeleted { id: u32 },
@@ -248,6 +252,20 @@ impl NetClient {
             .ok_or(NetError::Closed)?
             .send(frame)
             .map_err(|_| NetError::Closed)
+    }
+
+    /// Sends the transforms of entities this client owns, as `(id, position,
+    /// rotation, epoch)`. They travel in as few messages as possible, each
+    /// carrying at most 1024 updates. Nothing is sent for an empty list.
+    pub fn send_entity_transforms(
+        &self,
+        updates: &[(u32, [f32; 3], [f32; 3], u32)],
+    ) -> Result<(), NetError> {
+        let commands = self.commands.as_ref().ok_or(NetError::Closed)?;
+        for frame in encode_client_transforms(updates, MAX_FRAME)? {
+            commands.send(frame).map_err(|_| NetError::Closed)?;
+        }
+        Ok(())
     }
 
     /// Waits up to `timeout` for the next event from the server. Returns `None`

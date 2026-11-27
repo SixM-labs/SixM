@@ -21,16 +21,24 @@ pub struct EntityEntry {
     pub position: [f32; 3],
     /// Rotation in degrees: pitch, roll and yaw.
     pub rotation: [f32; 3],
+    /// Id of the player whose client moves the entity, or 0 when only the
+    /// server does. Player ids start at 1.
+    pub owner: u32,
+    /// Teleport epoch: how many times the server has moved the entity itself.
+    /// An owner's update is accepted only for the epoch the server is at.
+    pub epoch: u32,
 }
 
-impl From<(u32, EntityInfo)> for EntityEntry {
-    fn from((id, info): (u32, EntityInfo)) -> Self {
+impl From<(u32, EntityInfo, u32)> for EntityEntry {
+    fn from((id, info, epoch): (u32, EntityInfo, u32)) -> Self {
         Self {
             id,
             kind: info.kind.code(),
             model: info.model,
             position: info.position,
             rotation: info.rotation,
+            owner: info.owner.unwrap_or(0),
+            epoch,
         }
     }
 }
@@ -51,7 +59,34 @@ impl TryFrom<EntityEntry> for (u32, EntityInfo) {
             model: entry.model,
             position: entry.position,
             rotation: entry.rotation,
+            owner: (entry.owner != 0).then_some(entry.owner),
         };
         Ok((entry.id, info))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owner_zero_on_the_wire_means_no_owner() {
+        let entry = EntityEntry {
+            id: 2,
+            kind: 1,
+            model: 7,
+            position: [0.0; 3],
+            rotation: [0.0; 3],
+            owner: 4,
+            epoch: 3,
+        };
+        let (id, info) = <(u32, EntityInfo)>::try_from(entry).expect("a known kind");
+        assert_eq!((id, info.owner), (2, Some(4)));
+        let server_owned = EntityInfo {
+            owner: None,
+            ..info
+        };
+        let back = EntityEntry::from((id, server_owned, 3));
+        assert_eq!((back.owner, back.epoch), (0, 3));
     }
 }

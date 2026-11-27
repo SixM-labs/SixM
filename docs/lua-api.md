@@ -322,6 +322,7 @@ library can tell who called it. It is `nil` when no resource caused it.
 | `GetPlayers` | `GetPlayers()`. Returns an array of player ids as strings, in join order. |
 | `GetNumPlayerIndices` | `GetNumPlayerIndices()`. Returns the number of connected players as an integer. |
 | `GetPlayerName` | `GetPlayerName(player)`. Returns the name, or `nil` when the id is not connected. Accepts an id as a number or a string. |
+| `GetPlayerPed` | `GetPlayerPed(player)`. Returns the id of the player's ped, or `0` for a player without one. See [Entities](#entities). |
 | `GetPlayerEndpoint` | `GetPlayerEndpoint(player)`. Returns the remote address (`ip:port`), or `nil`. |
 | `GetPlayerIdentifiers` | `GetPlayerIdentifiers(player)`. Returns an array of the player's identifiers, in order, or an empty table for an unknown player. |
 | `GetNumPlayerIdentifiers` | `GetNumPlayerIdentifiers(player)`. Returns the number of identifiers as an integer, `0` for an unknown player. |
@@ -352,6 +353,8 @@ the player is not yet listed by `GetPlayers`. `GetPlayers` and
 |---|---|
 | `PlayerId` | `PlayerId()`. Always returns `0`. Remote players are not tracked on the client, so `0` names the local player. |
 | `GetPlayerServerId` | `GetPlayerServerId(player)`. Returns the local player's server id when `player` is `0`, and `nil` otherwise. |
+| `PlayerPedId` | `PlayerPedId()`. Returns the id of the local player's ped, or `0` until the server has sent it. |
+| `GetPlayerPed` | `GetPlayerPed(player)`. Returns the local player's ped when `player` is `-1` or `PlayerId()`, and `0` for any other player. |
 | `LocalPlayer` | A table. `LocalPlayer.state` is the local player's state bag. |
 
 `PlayerId()` and `GetPlayerServerId(PlayerId())` are not the same value on a
@@ -418,10 +421,11 @@ Behaviour:
 
 ## Entities
 
-The server owns every entity. Clients keep a copy and cannot change it. An
-entity id is also its network id and its handle on both sides. There is no
-game yet, so an entity is its kind, model, position and rotation. Every client
-receives every entity: there is no distance scoping yet.
+The server owns every entity, with one exception: each player has a ped, which
+the client of that player moves. An entity id is also its network id and its
+handle on both sides. There is no game yet, so an entity is its kind, model,
+position and rotation. Every client receives every entity: there is no distance
+scoping yet.
 
 | Name | Side | Signature and result |
 |---|---|---|
@@ -430,9 +434,10 @@ receives every entity: there is no distance scoping yet.
 | `CreatePed` | server | `CreatePed(pedType, model, x, y, z, heading, isNetwork, bScriptHostPed)`. Returns the id. |
 | `CreateObject` / `CreateObjectNoOffset` | server | `CreateObject(model, x, y, z, isNetwork, netMissionEntity, doorFlag)`. Returns the id. |
 | `DeleteEntity` | server | `DeleteEntity(entity)`. Does nothing for an unknown entity. |
-| `SetEntityCoords` / `SetEntityCoordsNoOffset` | server | `SetEntityCoords(entity, x, y, z, ...)`. Extra arguments are ignored. |
-| `SetEntityHeading` | server | `SetEntityHeading(entity, heading)`. Keeps pitch and roll. |
-| `SetEntityRotation` | server | `SetEntityRotation(entity, pitch, roll, yaw, ...)`. |
+| `SetEntityCoords` / `SetEntityCoordsNoOffset` | both | `SetEntityCoords(entity, x, y, z, ...)`. Extra arguments are ignored. On the server it moves any entity. On a client it moves only an entity the client owns. |
+| `SetEntityHeading` | both | `SetEntityHeading(entity, heading)`. Keeps pitch and roll. Same rules as `SetEntityCoords`. |
+| `SetEntityRotation` | both | `SetEntityRotation(entity, pitch, roll, yaw, ...)`. Same rules as `SetEntityCoords`. |
+| `NetworkGetEntityOwner` | server | `NetworkGetEntityOwner(entity)`. Returns the id of the player that owns the entity, or `-1` for a server-owned or unknown entity. |
 | `GetAllVehicles` / `GetAllPeds` / `GetAllObjects` | server | Return arrays of entity ids, ascending. |
 | `GetGamePool` | client | `GetGamePool(name)` with `'CVehicle'`, `'CPed'` or `'CObject'`. Returns an array of ids. Other names give an empty array. |
 | `DoesEntityExist` | both | `DoesEntityExist(entity)`. Returns a boolean. |
@@ -451,11 +456,44 @@ receives every entity: there is no distance scoping yet.
   negative hash names the same model as its unsigned value.
 - Reading an unknown entity gives a neutral value: `vector3(0, 0, 0)`, `0` or
   `false`. Setting one does nothing.
-- Coordinates and angles must be finite. NaN or infinity raises an error.
+- Coordinates and angles must be finite. NaN or infinity raises an error, on
+  both sides and whoever owns the entity.
 - The server sends creation and deletion at once. Moves are collected, and each
   entity that moved is sent once per server frame with its latest transform.
 - A deleted entity's state bag is removed on the server and on every client.
 - The console command `entities` lists every entity.
+
+### Player peds and ownership
+
+When a player is admitted, the server creates its ped at the origin, owned by
+that player and modelled on the `sixm_playerModel` convar (default `player`).
+`GetPlayerPed` returns it on the server and, for the local player, on the
+client. The ped is created before `playerJoining` and deleted after
+`playerDropped`, through the normal creation and deletion path, so the other
+players see it appear and disappear with `entityCreated` and `entityRemoved`.
+Entities created by scripts have no owner.
+
+Which side moves what:
+
+- **The owner moves its entity from its client.** A client that owns an entity
+  calls `SetEntityCoords` (or a related setter) as usual. The change shows at
+  once in that client's own natives, and the latest transform is sent to the
+  server once per client frame, in one message. The server applies it and sends
+  it on to the other clients.
+- **Nobody else can move it.** A client that does not own an entity does
+  nothing when a script moves it. The server ignores transforms that a player
+  sends for entities it does not own.
+- **The server can move any entity.** A server move reaches every client,
+  including the owner, which takes it even though it owns the entity. A
+  teleport such as `SetEntityCoords(GetPlayerPed(source), x, y, z)` therefore
+  moves the player's ped everywhere.
+- **A server move wins over owner moves sent before it.** Each entity has a
+  teleport epoch, which the server increases on every move it makes itself. An
+  owner's update is accepted only for the current epoch, so an update that was
+  computed before a server move is dropped, whenever it arrives. The server's
+  move then stands everywhere, even if the owner stops moving afterwards.
+
+`NetworkGetEntityOwner` is available on the server only.
 
 ## JSON
 

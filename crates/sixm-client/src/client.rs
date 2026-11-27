@@ -85,11 +85,15 @@ pub enum ClientNotice {
     /// A state bag was removed, because its player left.
     StateBagRemoved { bag: String },
     /// An entity was created, or was already there when the client joined.
-    EntityCreated { id: u32, info: EntityInfo },
-    /// New positions and rotations, as `(id, position, rotation)`. Entities the
-    /// client does not know are ignored.
+    EntityCreated {
+        id: u32,
+        info: EntityInfo,
+        epoch: u32,
+    },
+    /// New positions and rotations, as `(id, position, rotation, epoch)`.
+    /// Entities the client does not know are ignored.
     EntityTransforms {
-        updates: Vec<(u32, [f32; 3], [f32; 3])>,
+        updates: Vec<(u32, [f32; 3], [f32; 3], u32)>,
     },
     /// An entity was deleted.
     EntityDeleted { id: u32 },
@@ -175,6 +179,15 @@ impl Client {
     /// permissions.
     pub fn send_command(&self, line: &str) -> Result<(), NetError> {
         self.net.send_command(line)
+    }
+
+    /// Sends the transforms of entities this client owns, as `(id, position,
+    /// rotation)`, in as few messages as possible.
+    pub fn send_entity_transforms(
+        &self,
+        updates: &[(u32, [f32; 3], [f32; 3], u32)],
+    ) -> Result<(), NetError> {
+        self.net.send_entity_transforms(updates)
     }
 
     /// The running resources, in start order, with their files in the cache.
@@ -284,12 +297,13 @@ impl Client {
             ClientEvent::StateBag { bag, key, value } => ClientNotice::StateBag { bag, key, value },
             ClientEvent::StateBagRemoved { bag } => ClientNotice::StateBagRemoved { bag },
             ClientEvent::EntityCreated { entity } => {
+                let epoch = entity.epoch;
                 // The network decoder already rejects unknown kinds, so this
                 // conversion does not fail for a frame it accepted.
                 let Ok((id, info)) = <(u32, EntityInfo)>::try_from(entity) else {
                     return None;
                 };
-                ClientNotice::EntityCreated { id, info }
+                ClientNotice::EntityCreated { id, info, epoch }
             }
             ClientEvent::EntityTransforms { updates } => ClientNotice::EntityTransforms { updates },
             ClientEvent::EntityDeleted { id } => ClientNotice::EntityDeleted { id },

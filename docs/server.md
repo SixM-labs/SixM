@@ -183,6 +183,7 @@ Convar names are case-insensitive. Scripts read them with `GetConvar` and
 | `sv_maxclients` | `32` | Player limit, clamped to 1 to 1024. A value that is not a number gives 32. |
 | `sixm_deferralTimeout` | `120` | Seconds a connection that `playerConnecting` deferred may wait for `done`, clamped to 1 to 3600. A deferral that runs longer is refused with `connection timed out`. A value that is not a number gives 120. |
 | `sv_hostname` | `SixM Server` | Server name sent to players when they connect. |
+| `sixm_playerModel` | `player` | Model name of the ped created for each player when it is admitted. The ped is owned by the player and deleted when it leaves. |
 
 Any other convar can be set with `set`, `sets` or `setr`, or with the Lua
 setters, and read by scripts. The server checks a value only when the convar is

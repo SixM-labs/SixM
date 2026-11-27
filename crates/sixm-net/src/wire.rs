@@ -10,6 +10,7 @@
 
 use std::cell::Cell;
 use std::fmt;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use quinn::{ReadExactError, RecvStream};
@@ -31,7 +32,8 @@ use crate::files::{
 };
 use crate::protocol::{
     ClientMessage, MAX_COMMAND_LEN, MAX_CONVAR_NAME_LEN, MAX_CONVAR_VALUE_LEN, MAX_DECODED_VALUES,
-    MAX_DEFERRAL_MESSAGE_LEN, MAX_EVENT_NAME_LEN, MAX_VALUE_DEPTH, ServerMessage,
+    MAX_DEFERRAL_MESSAGE_LEN, MAX_EVENT_NAME_LEN, MAX_TRANSFORMS_PER_MESSAGE, MAX_VALUE_DEPTH,
+    ServerMessage,
 };
 
 const FRAME_HEADER_LEN: usize = 4;
@@ -50,7 +52,13 @@ const TAG_VECTOR4: u32 = 9;
 const VALUE_VARIANTS: &[&str] = &[
     "Nil", "Bool", "Int", "Float", "String", "Array", "Map", "Vector2", "Vector3", "Vector4",
 ];
-const CLIENT_VARIANTS: &[&str] = &["Hello", "Event", "RequestFile", "Command"];
+const CLIENT_VARIANTS: &[&str] = &[
+    "Hello",
+    "Event",
+    "RequestFile",
+    "Command",
+    "EntityTransforms",
+];
 const SERVER_VARIANTS: &[&str] = &[
     "Welcome",
     "Rejected",
@@ -308,10 +316,28 @@ pub(crate) fn encode_resources_snapshot(
 /// Encodes entity transforms as the fewest frames that carry them in order.
 /// Each update costs one unit of the decoding budget.
 pub(crate) fn encode_entity_transforms(
-    updates: &[(u32, [f32; 3], [f32; 3])],
+    updates: &[(u32, [f32; 3], [f32; 3], u32)],
     max_frame: usize,
 ) -> Result<Vec<Arc<[u8]>>, NetError> {
     encode_items(ServerMessage::ENTITY_TRANSFORMS_TAG, updates, max_frame)
+}
+
+/// Encodes the transforms a client sends as the fewest frames that carry them
+/// in order. Each frame is one message and holds at most
+/// [`MAX_TRANSFORMS_PER_MESSAGE`] updates.
+pub(crate) fn encode_client_transforms(
+    updates: &[(u32, [f32; 3], [f32; 3], u32)],
+    max_frame: usize,
+) -> Result<Vec<Arc<[u8]>>, NetError> {
+    let mut frames = Vec::new();
+    for batch in updates.chunks(MAX_TRANSFORMS_PER_MESSAGE) {
+        frames.extend(encode_items(
+            ClientMessage::ENTITY_TRANSFORMS_TAG,
+            batch,
+            max_frame,
+        )?);
+    }
+    Ok(frames)
 }
 
 /// Encodes a list of entities as the fewest frames that carry them in order.
@@ -363,18 +389,31 @@ fn encode_items<T: Serialize>(
     let mut frames = Vec::new();
     let mut chunk = SnapshotChunk::new(tag);
     for item in items {
-        let encoded = postcard::to_extend(item, Vec::<u8>::new())
-            .map_err(|err| NetError::Protocol(format!("cannot encode message: {err}")))?;
-        if !chunk.is_empty() && !chunk.accepts(encoded.len(), 1, max_frame) {
+        // The item is encoded straight into the chunk's bytes, so encoding a
+        // batch allocates only when the chunk grows.
+        let start = chunk.bytes.len();
+        append_encoded(&mut chunk.bytes, item)?;
+        if !chunk.is_empty() && !chunk.fits(chunk.bytes.len(), 1, max_frame) {
+            chunk.bytes.truncate(start);
             frames.push(chunk.seal(max_frame)?);
             chunk = SnapshotChunk::new(tag);
+            append_encoded(&mut chunk.bytes, item)?;
         }
-        chunk.push(&encoded, 1);
+        chunk.count += 1;
+        chunk.values += 1;
     }
     if !chunk.is_empty() {
         frames.push(chunk.seal(max_frame)?);
     }
     Ok(frames)
+}
+
+/// Appends the postcard encoding of `item` to `bytes`.
+fn append_encoded<T: Serialize>(bytes: &mut Vec<u8>, item: &T) -> Result<(), NetError> {
+    let buffer = std::mem::take(bytes);
+    *bytes = postcard::to_extend(item, buffer)
+        .map_err(|err| NetError::Protocol(format!("cannot encode message: {err}")))?;
+    Ok(())
 }
 
 /// Entries of a snapshot frame that are being collected. `bytes` holds the
@@ -404,10 +443,16 @@ impl SnapshotChunk {
     /// Whether an entry of `entry_len` bytes and `values` decoded values can
     /// join this chunk without exceeding the frame or the decoding budget.
     fn accepts(&self, entry_len: usize, values: usize, max_frame: usize) -> bool {
+        self.fits(self.bytes.len() + entry_len, values, max_frame)
+    }
+
+    /// Whether the chunk, holding `bytes_len` bytes of entries in total, with
+    /// one more entry counted in the header, fits the frame and the budget.
+    /// `values` decoded values are added to the ones already counted.
+    fn fits(&self, bytes_len: usize, values: usize, max_frame: usize) -> bool {
         let payload = varint_len(u64::from(self.tag))
             + varint_len(u64::try_from(self.count + 1).unwrap_or(u64::MAX))
-            + self.bytes.len()
-            + entry_len;
+            + bytes_len;
         FRAME_HEADER_LEN + payload <= max_frame && self.values + values <= MAX_DECODED_VALUES
     }
 
@@ -784,6 +829,12 @@ impl<'de> Visitor<'de> for ClientMessageVisitor<'_> {
                 }
                 Ok(ClientMessage::Command { line })
             }
+            ClientMessage::ENTITY_TRANSFORMS_TAG => variant
+                .newtype_variant_seed(TransformsSeed::<(u32, [f32; 3], [f32; 3], u32)>::new(
+                    self.budget,
+                    MAX_TRANSFORMS_PER_MESSAGE,
+                ))
+                .map(|updates| ClientMessage::EntityTransforms { updates }),
             other => Err(de::Error::unknown_variant(
                 &other.to_string(),
                 CLIENT_VARIANTS,
@@ -885,9 +936,10 @@ impl<'de> Visitor<'de> for ServerMessageVisitor<'_> {
                 })
                 .map(|entity| ServerMessage::EntityCreated { entity }),
             ServerMessage::ENTITY_TRANSFORMS_TAG => variant
-                .newtype_variant_seed(TransformsSeed {
-                    budget: self.budget,
-                })
+                .newtype_variant_seed(TransformsSeed::<(u32, [f32; 3], [f32; 3], u32)>::new(
+                    self.budget,
+                    usize::MAX,
+                ))
                 .map(|updates| ServerMessage::EntityTransforms { updates }),
             ServerMessage::ENTITY_DELETED_TAG => variant
                 .newtype_variant::<u32>()
@@ -1026,43 +1078,59 @@ impl<'de> DeserializeSeed<'de> for EntitySeed<'_> {
     }
 }
 
-/// Decodes a sequence of entity transforms. Each update costs one unit of the budget.
-#[derive(Clone, Copy)]
-struct TransformsSeed<'a> {
+/// Decodes a sequence of entity transforms of type `T`. Each update costs one
+/// unit of the budget, and a sequence longer than `limit` is rejected.
+struct TransformsSeed<'a, T> {
     budget: &'a ValueBudget,
+    limit: usize,
+    marker: PhantomData<fn() -> T>,
 }
 
-impl<'de> DeserializeSeed<'de> for TransformsSeed<'_> {
-    type Value = Vec<(u32, [f32; 3], [f32; 3])>;
+impl<'a, T> TransformsSeed<'a, T> {
+    fn new(budget: &'a ValueBudget, limit: usize) -> Self {
+        Self {
+            budget,
+            limit,
+            marker: PhantomData,
+        }
+    }
+}
 
-    fn deserialize<D: Deserializer<'de>>(
-        self,
-        deserializer: D,
-    ) -> Result<Vec<(u32, [f32; 3], [f32; 3])>, D::Error> {
+impl<'de, T: serde::Deserialize<'de>> DeserializeSeed<'de> for TransformsSeed<'_, T> {
+    type Value = Vec<T>;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Vec<T>, D::Error> {
         deserializer.deserialize_seq(TransformsVisitor {
             budget: self.budget,
+            limit: self.limit,
+            marker: PhantomData,
         })
     }
 }
 
-struct TransformsVisitor<'a> {
+struct TransformsVisitor<'a, T> {
     budget: &'a ValueBudget,
+    limit: usize,
+    marker: PhantomData<fn() -> T>,
 }
 
-impl<'de> Visitor<'de> for TransformsVisitor<'_> {
-    type Value = Vec<(u32, [f32; 3], [f32; 3])>;
+impl<'de, T: serde::Deserialize<'de>> Visitor<'de> for TransformsVisitor<'_, T> {
+    type Value = Vec<T>;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         formatter.write_str("a sequence of entity transforms")
     }
 
-    fn visit_seq<A: SeqAccess<'de>>(
-        self,
-        mut seq: A,
-    ) -> Result<Vec<(u32, [f32; 3], [f32; 3])>, A::Error> {
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
         let mut updates = Vec::new();
-        while let Some(update) = seq.next_element::<(u32, [f32; 3], [f32; 3])>()? {
+        while let Some(update) = seq.next_element::<T>()? {
             self.budget.spend::<A::Error>()?;
+            if updates.len() == self.limit {
+                return Err(de::Error::custom(format!(
+                    "a message carries at most {} entity transforms",
+                    self.limit
+                )));
+            }
             updates.push(update);
         }
         Ok(updates)
@@ -2440,8 +2508,8 @@ mod tests {
         assert_eq!(decode_resources_snapshot(&frames, MAX_FRAME), resources);
     }
 
-    /// One entity transform, as a batch carries it.
-    type Update = (u32, [f32; 3], [f32; 3]);
+    /// One entity transform, as the server sends it.
+    type Update = (u32, [f32; 3], [f32; 3], u32);
 
     fn entry(id: u32) -> EntityEntry {
         EntityEntry {
@@ -2450,6 +2518,8 @@ mod tests {
             model: 0xB779_A091,
             position: [1.0, 2.0, 3.0],
             rotation: [0.0, 0.0, 90.0],
+            owner: 0,
+            epoch: 0,
         }
     }
 
@@ -2510,12 +2580,50 @@ mod tests {
             decode_server_message(&payload_of(&snapshot)),
             Ok(ServerMessage::EntitySnapshot { entities }) if entities == [entry(1), entry(2)]
         ));
-        let frames = encode_entity_transforms(&[(4, [1.0; 3], [2.0; 3])], MAX_FRAME)
+        let frames = encode_entity_transforms(&[(4, [1.0; 3], [2.0; 3], 3)], MAX_FRAME)
             .expect("transforms encode");
         assert_eq!(
             decode_frames(&frames, MAX_FRAME, transforms_of),
-            vec![(4, [1.0; 3], [2.0; 3])]
+            vec![(4, [1.0; 3], [2.0; 3], 3)]
         );
+    }
+
+    #[test]
+    fn client_transforms_round_trip_and_split_at_the_message_limit() {
+        let updates: Vec<(u32, [f32; 3], [f32; 3], u32)> = (1..=2500_u32)
+            .map(|id| (id, [1.0, 2.0, 3.0], [0.0, 0.0, 90.0], 0))
+            .collect();
+        let frames = encode_client_transforms(&updates, MAX_FRAME).expect("transforms encode");
+        assert_eq!(frames.len(), 3, "2500 updates make 1024 + 1024 + 452");
+        let mut decoded = Vec::new();
+        for frame in &frames {
+            match decode_client_message(&frame[FRAME_HEADER_LEN..]) {
+                Ok(ClientMessage::EntityTransforms { updates }) => {
+                    assert!(updates.len() <= MAX_TRANSFORMS_PER_MESSAGE);
+                    decoded.extend(updates);
+                }
+                other => panic!("unexpected decode: {other:?}"),
+            }
+        }
+        assert_eq!(decoded, updates);
+        assert_eq!(
+            encode_client_transforms(&[], MAX_FRAME)
+                .expect("empty")
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn client_transform_messages_over_the_limit_are_rejected() {
+        let over = ClientMessage::EntityTransforms {
+            updates: vec![(1, [0.0; 3], [0.0; 3], 0); MAX_TRANSFORMS_PER_MESSAGE + 1],
+        };
+        let frame = encode_frame(&over, MAX_FRAME * 4).expect("message encodes");
+        assert!(matches!(
+            decode_client_message(&frame[FRAME_HEADER_LEN..]),
+            Err(NetError::Protocol(_))
+        ));
     }
 
     #[test]
@@ -2551,8 +2659,8 @@ mod tests {
     #[test]
     fn entity_transforms_split_and_decode_to_the_same_updates() {
         const MAX: usize = 512;
-        let updates: Vec<(u32, [f32; 3], [f32; 3])> = (0..3000_u32)
-            .map(|id| (id, [1.0, 2.0, 3.0], [0.0, 0.0, 90.0]))
+        let updates: Vec<Update> = (0..3000_u32)
+            .map(|id| (id, [1.0, 2.0, 3.0], [0.0, 0.0, 90.0], id % 7))
             .collect();
         let frames = encode_entity_transforms(&updates, MAX).expect("transforms encode");
         assert!(
@@ -2579,7 +2687,7 @@ mod tests {
         // Each update costs one unit, so 70 000 of them need two frames even
         // though they fit one frame by size.
         const LARGE: usize = 16 * 1024 * 1024;
-        let updates = vec![(1_u32, [0.0; 3], [0.0; 3]); 70_000];
+        let updates = vec![(1_u32, [0.0; 3], [0.0; 3], 0); 70_000];
         let frames = encode_entity_transforms(&updates, LARGE).expect("transforms encode");
         assert_eq!(frames.len(), 2);
         assert_eq!(decode_frames(&frames, LARGE, transforms_of).len(), 70_000);
@@ -2589,7 +2697,7 @@ mod tests {
     fn entity_batches_over_the_decoding_budget_are_rejected() {
         const LARGE: usize = 16 * 1024 * 1024;
         let over = ServerMessage::EntityTransforms {
-            updates: vec![(1, [0.0; 3], [0.0; 3]); MAX_DECODED_VALUES + 1],
+            updates: vec![(1, [0.0; 3], [0.0; 3], 0); MAX_DECODED_VALUES + 1],
         };
         let frame = encode_frame(&over, LARGE).expect("message encodes");
         assert!(matches!(

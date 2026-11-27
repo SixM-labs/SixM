@@ -941,4 +941,8 @@ impl ServerHost for ResourceManager {
     fn set_entity_rotation(&self, entity: u32, rotation: [f32; 3]) -> Result<(), ScriptError> {
         self.entities.borrow_mut().set_rotation(entity, rotation)
     }
+
+    fn player_ped(&self, player: u32) -> Option<u32> {
+        self.ped_of_player(player)
+    }
 }

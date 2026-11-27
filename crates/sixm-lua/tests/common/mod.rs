@@ -29,6 +29,9 @@ pub enum Side {
 }
 
 /// Owns runtimes in start order and routes calls between them.
+/// A move of an owned entity: the entity, and the parts of its transform that moved.
+pub type OwnedMove = (u32, Option<[f32; 3]>, Option<[f32; 3]>);
+
 #[derive(Debug, Default)]
 pub struct TestHost {
     /// The side this host plays. Decides which services it exposes.
@@ -61,6 +64,12 @@ pub struct TestHost {
     /// Entities by id, in id order. On a server they are created and deleted
     /// through the host; on a client a test fills them in directly.
     pub entities: RefCell<BTreeMap<u32, EntityInfo>>,
+    /// The ped of each player by player id, as a server host reports it.
+    pub player_peds: RefCell<HashMap<u32, u32>>,
+    /// The ped a client host reports as the local player's, once set.
+    pub local_ped: Cell<Option<u32>>,
+    /// Moves a client host accepted, as `(entity, position, rotation)`, in order.
+    pub owned_moves: RefCell<Vec<OwnedMove>>,
     /// The last entity id handed out. Ids start at 1.
     pub last_entity: Cell<u32>,
     /// Lifecycle states set by a test. A resource without one is `Started` when
@@ -384,6 +393,10 @@ impl ServerHost for TestHost {
             .push((name.to_owned(), value.to_owned(), kind));
         Ok(())
     }
+
+    fn player_ped(&self, player: u32) -> Option<u32> {
+        self.player_peds.borrow().get(&player).copied()
+    }
 }
 
 impl TestHost {
@@ -421,6 +434,38 @@ impl ClientHost for TestHost {
 
     fn local_player(&self) -> u32 {
         self.local_player
+    }
+
+    fn local_ped(&self) -> Option<u32> {
+        self.local_ped.get()
+    }
+
+    /// Applies the move to the entity like the client does, and records it.
+    /// Only an entity this host owns can be moved.
+    fn move_owned_entity(
+        &self,
+        entity: u32,
+        position: Option<[f32; 3]>,
+        rotation: Option<[f32; 3]>,
+    ) -> Result<(), ScriptError> {
+        let mut entities = self.entities.borrow_mut();
+        let info = entities
+            .get_mut(&entity)
+            .filter(|info| info.owner == Some(self.local_player))
+            .ok_or_else(|| {
+                ScriptError::Runtime(format!("entity {entity} is not owned by this client"))
+            })?;
+        check_transform(position.unwrap_or([0.0; 3]), rotation.unwrap_or([0.0; 3]))?;
+        if let Some(position) = position {
+            info.position = position;
+        }
+        if let Some(rotation) = rotation {
+            info.rotation = rotation;
+        }
+        self.owned_moves
+            .borrow_mut()
+            .push((entity, position, rotation));
+        Ok(())
     }
 }
 

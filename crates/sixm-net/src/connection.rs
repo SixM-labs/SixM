@@ -233,7 +233,8 @@ async fn read_hello(connection: &Connection, max_frame: usize) -> Result<Hello, 
         }),
         ClientMessage::Event { .. }
         | ClientMessage::RequestFile { .. }
-        | ClientMessage::Command { .. } => Err(NetError::Protocol(
+        | ClientMessage::Command { .. }
+        | ClientMessage::EntityTransforms { .. } => Err(NetError::Protocol(
             "the first message must be Hello".to_owned(),
         )),
     }
@@ -381,9 +382,9 @@ fn join_writer(result: Result<String, tokio::task::JoinError>) -> String {
     result.unwrap_or_else(|err| format!("connection task failed: {err}"))
 }
 
-/// Receives events, commands and file requests from the player until the
-/// stream ends or the player is kicked for breaking a limit. Events and
-/// commands share one rate limit.
+/// Receives events, commands, entity transforms and file requests from the
+/// player until the stream ends or the player is kicked for breaking a limit.
+/// Events, commands and transform messages share one rate limit.
 async fn read_loop(
     shared: &Shared,
     player: u32,
@@ -405,6 +406,9 @@ async fn read_loop(
                 Inbound::Event { name, args: args.0 }
             }
             Ok(ClientMessage::Command { line }) => Inbound::Command { line },
+            Ok(ClientMessage::EntityTransforms { updates }) => {
+                Inbound::EntityTransforms { updates }
+            }
             Ok(ClientMessage::RequestFile { hash }) => {
                 if let Err(reason) = requests.request(hash) {
                     return Stop::Kick(reason.to_owned());
@@ -421,6 +425,9 @@ async fn read_loop(
             Verdict::Accept => (shared.on_event)(match inbound {
                 Inbound::Event { name, args } => NetEvent::Event { player, name, args },
                 Inbound::Command { line } => NetEvent::Command { player, line },
+                Inbound::EntityTransforms { updates } => {
+                    NetEvent::EntityTransforms { player, updates }
+                }
             }),
             Verdict::Drop => {
                 if let Some(dropped) = limiter.take_drop_report(now) {
@@ -434,8 +441,16 @@ async fn read_loop(
 
 /// A decoded message from a player that is delivered if the rate limit admits it.
 enum Inbound {
-    Event { name: String, args: Vec<Value> },
-    Command { line: String },
+    Event {
+        name: String,
+        args: Vec<Value>,
+    },
+    Command {
+        line: String,
+    },
+    EntityTransforms {
+        updates: Vec<(u32, [f32; 3], [f32; 3], u32)>,
+    },
 }
 
 /// Everything the writer task owns.
