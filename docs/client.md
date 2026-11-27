@@ -138,8 +138,10 @@ identifier from the certificate's fingerprint, so:
 - The file is created on the first connection. Later connections read it, and
   the same player gets the same `license` every time.
 - Deleting the file, or using another one, gives the player a new `license`.
-- On Unix the file is created with mode `0600`. On Windows it takes the access
-  list of its folder.
+- On Unix the file is created with mode `0600`. On Windows,
+  before the key is written, its access list is replaced with one entry: full
+  control for the file's owner, with nothing inherited from the folder. A file
+  system without access lists keeps the folder's, with a warning in the log.
 - A file that is not a SixM identity stops the connection with an error. Delete
   it to create a new one.
 - The client logs its fingerprint at connect as `Client fingerprint`.
