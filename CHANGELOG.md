@@ -9,6 +9,12 @@ may change the protocol and the API.
 
 ### Added
 
+- Frame and per-resource profiling with `profiler record [frames]`,
+  `profiler stop`, `profiler status`, and Chrome Trace export via
+  `profiler saveJSON <path>`.
+- Authenticated remote console on `POST /rcon` with a console-only
+  `rcon_password`, per-address failure lockout, and JSON command output.
+
 - FiveM scripting compatibility (`PROTOCOL_VERSION` 14):
   - Lua compile-time backtick JOAAT hash literals (`` `adder` ``) with comment/string awareness and line-number preservation.
   - `quat(w, x, y, z)` (`Value::Quat`) across Lua, JavaScript, exports/state bags/network, plus `GetEntityQuaternion` and `SetEntityQuaternion`.

@@ -25,12 +25,13 @@ use tracing::{debug, error, info, warn};
 use crate::access::AccessStore;
 use crate::buckets::BucketSettings;
 use crate::commands::CommandSource;
-use crate::convars::Convars;
+use crate::convars::{Convars, RCON_PASSWORD};
 use crate::entities::{EntityStore, EntityUpdate};
 use crate::host_functions::{HostFunctions, is_host};
 use crate::http::{Completion, HttpClient};
 use crate::network::Network;
 use crate::perf::FrameHistory;
+use crate::profiler::Profiler;
 use crate::resource_files::{FileHashes, listing};
 use crate::scope::Scopes;
 use crate::state::StateStore;
@@ -123,6 +124,10 @@ pub struct ResourceManager {
     pub(crate) host_functions: RefCell<HostFunctions>,
     /// Durations of the recent frames, for the `perf` command.
     pub(crate) frames: RefCell<FrameHistory>,
+    /// Fast guard for whether `profiler` recording is active (zero idle overhead).
+    pub(crate) profiler_active: Cell<bool>,
+    /// Chrome trace frame & resource profiler state.
+    pub(crate) profiler: RefCell<Profiler>,
     /// When `perf` last ran, and the traffic totals it saw then. The rates
     /// cover the time since this mark. It starts at the server's start.
     pub(crate) perf_mark: Cell<(Instant, Traffic)>,
@@ -167,6 +172,8 @@ impl ResourceManager {
             access: RefCell::default(),
             host_functions: RefCell::default(),
             frames: RefCell::default(),
+            profiler_active: Cell::new(false),
+            profiler: RefCell::default(),
             perf_mark: Cell::new((Instant::now(), Traffic::default())),
             advertised: RefCell::default(),
             hashes: RefCell::default(),
@@ -277,6 +284,13 @@ impl ResourceManager {
         if name.is_empty() {
             return Err(ScriptError::Runtime("a convar needs a name".to_owned()));
         }
+        if name.eq_ignore_ascii_case(RCON_PASSWORD) {
+            if kind != ConvarKind::Plain {
+                return Err(ScriptError::Runtime("use set for rcon_password".to_owned()));
+            }
+            self.convars.borrow_mut().set_rcon_password(value);
+            return Ok(());
+        }
         if kind == ConvarKind::Replicated {
             check_replicated(name, value)?;
         }
@@ -382,9 +396,21 @@ impl ResourceManager {
 
     /// Runs one frame of every running resource.
     pub(crate) fn tick_all(&self, now: Instant) {
+        let profiling = self.profiler_active.get();
         let snapshot = self.snapshot();
         for runtime in snapshot.iter() {
-            runtime.tick(now);
+            if profiling {
+                let start = Instant::now();
+                runtime.tick(now);
+                self.profiler.borrow_mut().record_span(
+                    runtime.resource(),
+                    "resource",
+                    start,
+                    start.elapsed(),
+                );
+            } else {
+                runtime.tick(now);
+            }
         }
     }
 
@@ -1155,6 +1181,11 @@ fn check_replicated(name: &str, value: &str) -> Result<(), ScriptError> {
 
 impl ServerHost for ResourceManager {
     fn set_convar(&self, name: &str, value: &str, kind: ConvarKind) -> Result<(), ScriptError> {
+        if name.eq_ignore_ascii_case(RCON_PASSWORD) {
+            return Err(ScriptError::Runtime(
+                "rcon_password is console-only".to_owned(),
+            ));
+        }
         self.set_convar(name, value, kind)
     }
 

@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use ring::digest::{Digest, SHA256, digest};
 use sixm_core::ConvarKind;
 use sixm_net::Identity;
 
@@ -22,6 +23,8 @@ const MAX_CLIENTS: &str = "sv_maxclients";
 const SERVER_NAME: &str = "sv_hostname";
 /// Whether `/players.json` lists identifiers. Off unless set to `true`.
 const EXPOSE_IDENTIFIERS: &str = "sv_exposePlayerIdentifiers";
+/// Password protecting `POST /rcon`. Unset or empty disables remote console access.
+pub(crate) const RCON_PASSWORD: &str = "rcon_password";
 /// Whether the HTTP listener runs. On unless set to `false` or `0`.
 const HTTP_ENABLED: &str = "sv_httpEnabled";
 /// Convar naming how many seconds a resource's HTTP handler may take to
@@ -101,6 +104,7 @@ struct Entry {
 #[derive(Debug)]
 pub(crate) struct Convars {
     values: BTreeMap<String, Entry>,
+    rcon_password: Option<Digest>,
 }
 
 impl Convars {
@@ -108,6 +112,7 @@ impl Convars {
     pub(crate) fn new() -> Self {
         let mut convars = Self {
             values: BTreeMap::new(),
+            rcon_password: None,
         };
         convars.set(RESOURCES_PATH, "resources", ConvarKind::Plain);
         convars.set(IDENTITY_FILE, DEFAULT_IDENTITY_FILE, ConvarKind::Plain);
@@ -300,6 +305,16 @@ impl Convars {
     pub(crate) fn expose_player_identifiers(&self) -> bool {
         self.get(EXPOSE_IDENTIFIERS)
             .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+    }
+
+    /// Updates the credential outside the convar map exposed to scripts and clients.
+    pub(crate) fn set_rcon_password(&mut self, password: &str) {
+        self.rcon_password = (!password.is_empty()).then(|| digest(&SHA256, password.as_bytes()));
+    }
+
+    /// The configured digest, or `None` when RCON is disabled.
+    pub(crate) fn rcon_password(&self) -> Option<&Digest> {
+        self.rcon_password.as_ref()
     }
 
     /// The model name of each player's ped, from `sixm_playerModel`.

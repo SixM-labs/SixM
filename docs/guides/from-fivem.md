@@ -227,6 +227,14 @@ state bags. C# (`Mono`) is not present. JS runs in a strict sandbox without Node
 APIs (`require`, `fs`, `process`), `eval`, or `Function` constructors; see
 [js-api.md](../js-api.md).
 
+### 7. Remote console and profiling
+
+SixM's remote console uses an authenticated HTTP `POST /rcon` request and
+returns command output as JSON. The `profiler` command captures server frames
+and resource ticks for Chrome Trace Event viewers. See
+[Remote console](../server.md#remote-console) and
+[Frame profiling](../server.md#frame-profiling).
+
 ## What is missing (not yet implemented)
 
 Because SixM is a game-independent core without a game adapter yet, the

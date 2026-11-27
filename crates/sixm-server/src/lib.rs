@@ -17,6 +17,7 @@ mod http;
 mod manager;
 mod network;
 mod perf;
+mod profiler;
 mod resource_files;
 mod scope;
 mod server;
