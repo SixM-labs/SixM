@@ -2,7 +2,9 @@
 
 mod common;
 
-use common::{first, new_client_host, new_host, start};
+use std::time::Instant;
+
+use common::{call, first, new_client_host, new_host, start, tick};
 use sixm_core::{Host, Value};
 
 #[test]
@@ -123,6 +125,82 @@ fn a_client_has_no_perform_http_request() {
         &[(
             "main.lua",
             "exports('present', function() return PerformHttpRequest ~= nil end)\n",
+        )],
+    );
+
+    assert_eq!(first(&runtime, "present"), Value::Bool(false));
+}
+
+#[test]
+fn perform_http_request_await_returns_the_outcome_from_a_thread() {
+    let host = new_host();
+    let runtime = start(
+        &host,
+        "fetcher",
+        &["result"],
+        &[(
+            "main.lua",
+            "local result = nil\n\
+             exports('result', function() return result end)\n\
+             CreateThreadNow(function()\n\
+               local s, b, h, e = PerformHttpRequestAwait('http://example.test/', 'POST', 'x', { A = '1' }, { timeout = 500 })\n\
+               result = s .. ':' .. b .. ':' .. h['content-type'] .. ':' .. e\n\
+             end)\n",
+        )],
+    );
+
+    let (_, request, callback) = host.http_requests.borrow()[0].clone();
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.body.as_deref(), Some(&b"x"[..]));
+    assert_eq!(request.headers, vec![("A".to_owned(), "1".to_owned())]);
+    assert_eq!(request.timeout.map(|t| t.as_millis()), Some(500));
+    assert_eq!(first(&runtime, "result"), Value::Nil);
+
+    let outcome = [
+        Value::Int(200),
+        Value::from("hi"),
+        Value::Map(vec![(
+            Value::from("content-type"),
+            Value::from("text/plain"),
+        )]),
+        Value::from(""),
+    ];
+    host.call_ref(&callback, &outcome).expect("callback");
+    tick(&host, Instant::now());
+    assert_eq!(first(&runtime, "result"), Value::from("200:hi:text/plain:"));
+}
+
+#[test]
+fn perform_http_request_await_outside_a_thread_is_an_error() {
+    let host = new_host();
+    let runtime = start(
+        &host,
+        "fetcher",
+        &["try"],
+        &[(
+            "main.lua",
+            "exports('try', function() return pcall(PerformHttpRequestAwait, 'http://example.test/') end)\n",
+        )],
+    );
+
+    let outcome = call(&runtime, "try", &[]);
+    assert!(host.http_requests.borrow().is_empty());
+    let [Value::Bool(false), Value::String(text)] = outcome.as_slice() else {
+        panic!("expected a failed call, got {outcome:?}");
+    };
+    assert!(String::from_utf8_lossy(text).contains("can only be called from a thread"));
+}
+
+#[test]
+fn a_client_has_no_perform_http_request_await() {
+    let host = new_client_host(1);
+    let runtime = start(
+        &host,
+        "client_side",
+        &["present"],
+        &[(
+            "main.lua",
+            "exports('present', function() return PerformHttpRequestAwait ~= nil end)\n",
         )],
     );
 

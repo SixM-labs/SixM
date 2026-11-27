@@ -4,16 +4,18 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Weak;
 
 use rquickjs::function::{Opt, Rest};
-use rquickjs::{Ctx, Exception, Function, Object, Persistent, Value as JsValue};
+use rquickjs::{Ctx, Exception, Function, Object, Persistent, TypedArray, Value as JsValue};
 use sixm_core::{EventContext, EventSource, Value};
 
 use crate::runtime::{CALLBACK_BUDGET, JsRuntime};
 use crate::sandbox::catch_script;
 
 /// One handler registered with `on` / `AddEventHandler` or `onNet` / `RegisterNetEvent`.
+/// A raw handler receives the msgpack bytes of the arguments instead of the values.
 struct Handler {
     key: i64,
     func: Persistent<Function<'static>>,
+    raw: bool,
 }
 
 #[derive(Default)]
@@ -35,32 +37,77 @@ impl Events {
     }
 }
 
-/// Installs `on`, `AddEventHandler`, `RemoveEventHandler`, `removeEventListener`,
-/// `onNet`, `RegisterNetEvent`, `RegisterServerEvent`, `emit`, `TriggerEvent`,
-/// `CancelEvent`, and `WasEventCanceled`.
+/// Installs `on`, `AddEventHandler`, `addEventListener`, `RemoveEventHandler`,
+/// `removeEventListener`, `onNet`, `RegisterNetEvent`, `addNetEventListener`,
+/// `RegisterServerEvent`, `addRawEventListener`, `addRawEventHandler`, `emit`,
+/// `TriggerEvent`, `CancelEvent`, and `WasEventCanceled`.
 pub(crate) fn install(ctx: &Ctx<'_>, weak: &Weak<JsRuntime>) -> rquickjs::Result<()> {
     install_listeners(ctx, weak)?;
     install_dispatch(ctx, weak)?;
     Ok(())
 }
 
+/// `on` / `AddEventHandler`: attaches a handler that gets the event arguments.
+fn add_handler_function<'js>(
+    ctx: &Ctx<'js>,
+    weak: &Weak<JsRuntime>,
+) -> rquickjs::Result<Function<'js>> {
+    let weak = weak.clone();
+    Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>, name: String, func: Function<'js>| -> rquickjs::Result<Object<'js>> {
+            let rt = JsRuntime::upgrade(&ctx, &weak)?;
+            let key = rt.add_handler(&ctx, &name, func, false);
+            handle_object(&ctx, &name, key)
+        },
+    )
+}
+
+/// `addEventListener(name, fn, netSafe?)`: like `on`, optionally marking `name` as a network event.
+fn add_event_listener_function<'js>(
+    ctx: &Ctx<'js>,
+    weak: &Weak<JsRuntime>,
+) -> rquickjs::Result<Function<'js>> {
+    let weak = weak.clone();
+    Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>,
+              name: String,
+              func: Function<'js>,
+              net_safe: Opt<bool>|
+              -> rquickjs::Result<Object<'js>> {
+            let rt = JsRuntime::upgrade(&ctx, &weak)?;
+            if net_safe.0 == Some(true) {
+                rt.mark_net_event(&name);
+            }
+            let key = rt.add_handler(&ctx, &name, func, false);
+            handle_object(&ctx, &name, key)
+        },
+    )
+}
+
+/// `addRawEventListener` / `addRawEventHandler`: the handler gets the msgpack bytes and the source.
+fn add_raw_listener_function<'js>(
+    ctx: &Ctx<'js>,
+    weak: &Weak<JsRuntime>,
+) -> rquickjs::Result<Function<'js>> {
+    let weak = weak.clone();
+    Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>, name: String, func: Function<'js>| -> rquickjs::Result<Object<'js>> {
+            let rt = JsRuntime::upgrade(&ctx, &weak)?;
+            let key = rt.add_handler(&ctx, &name, func, true);
+            handle_object(&ctx, &name, key)
+        },
+    )
+}
+
 fn install_listeners<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::Result<()> {
     let globals = ctx.globals();
 
-    let add_handler = {
-        let weak = weak.clone();
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'js>,
-                  name: String,
-                  func: Function<'js>|
-                  -> rquickjs::Result<Object<'js>> {
-                let rt = JsRuntime::upgrade(&ctx, &weak)?;
-                let key = rt.add_handler(&ctx, &name, func);
-                handle_object(&ctx, &name, key)
-            },
-        )?
-    };
+    let add_handler = add_handler_function(ctx, weak)?;
+    let add_event_listener = add_event_listener_function(ctx, weak)?;
+    let add_raw_event_listener = add_raw_listener_function(ctx, weak)?;
     let remove_handler = {
         let weak = weak.clone();
         Function::new(
@@ -101,7 +148,7 @@ fn install_listeners<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::R
                 let rt = JsRuntime::upgrade(&ctx, &weak)?;
                 rt.mark_net_event(&name);
                 if let Some(func) = func.0.flatten() {
-                    let key = rt.add_handler(&ctx, &name, func);
+                    let key = rt.add_handler(&ctx, &name, func, false);
                     return handle_object(&ctx, &name, key).map(Object::into_value);
                 }
                 Ok(JsValue::new_undefined(ctx))
@@ -112,11 +159,15 @@ fn install_listeners<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::R
     for (name, func) in [
         ("on", add_handler.clone()),
         ("AddEventHandler", add_handler),
+        ("addEventListener", add_event_listener),
         ("RemoveEventHandler", remove_handler),
         ("removeEventListener", remove_listener),
         ("onNet", register_net_event.clone()),
         ("RegisterNetEvent", register_net_event.clone()),
+        ("addNetEventListener", register_net_event.clone()),
         ("RegisterServerEvent", register_net_event),
+        ("addRawEventListener", add_raw_event_listener.clone()),
+        ("addRawEventHandler", add_raw_event_listener),
     ] {
         globals.set(name, func)?;
     }
@@ -192,7 +243,7 @@ fn handle_object<'js>(ctx: &Ctx<'js>, event: &str, key: i64) -> rquickjs::Result
 }
 
 impl JsRuntime {
-    fn add_handler<'js>(&self, ctx: &Ctx<'js>, event: &str, func: Function<'js>) -> i64 {
+    fn add_handler<'js>(&self, ctx: &Ctx<'js>, event: &str, func: Function<'js>, raw: bool) -> i64 {
         let mut events = self.events.borrow_mut();
         events.last_key += 1;
         let key = events.last_key;
@@ -203,6 +254,7 @@ impl JsRuntime {
             .push(Handler {
                 key,
                 func: Persistent::save(ctx, func),
+                raw,
             });
         key
     }
@@ -296,16 +348,32 @@ impl JsRuntime {
             );
             return;
         }
-        let handlers: Vec<Persistent<Function<'static>>> = self
+        let handlers: Vec<(Persistent<Function<'static>>, bool)> = self
             .events
             .borrow()
             .handlers
             .get(event)
-            .map(|list| list.iter().map(|h| h.func.clone()).collect())
+            .map(|list| list.iter().map(|h| (h.func.clone(), h.raw)).collect())
             .unwrap_or_default();
         if handlers.is_empty() {
             return;
         }
+        // The msgpack array of the arguments, packed once for all raw handlers.
+        let raw_payload = if handlers.iter().any(|(_, raw)| *raw) {
+            match sixm_core::msgpack::pack(&Value::Array(args.to_vec())) {
+                Ok(bytes) => Some(bytes),
+                Err(err) => {
+                    tracing::error!(
+                        target: "sixm::script",
+                        "[{}] raw event `{event}`: {err}",
+                        self.resource
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let outer_source = self.current_source.replace(source);
         let outer_invoker = std::mem::replace(
@@ -317,7 +385,12 @@ impl JsRuntime {
             .cancel_flags
             .push(ctx.is_canceled());
 
-        for handler in handlers {
+        for (handler, raw) in handlers {
+            let raw_bytes = match (raw, &raw_payload) {
+                (false, _) => None,
+                (true, Some(bytes)) => Some(bytes),
+                (true, None) => continue,
+            };
             let _budget = self.enter_budget(CALLBACK_BUDGET);
             let outcome = (|| -> Result<(), sixm_core::ScriptError> {
                 Self::set_source_global(js_ctx, source)
@@ -325,7 +398,19 @@ impl JsRuntime {
                 let func = handler
                     .restore(js_ctx)
                     .map_err(|err| crate::runtime::js_err(js_ctx, err))?;
-                let js_args = self.values_to_js(js_ctx, args)?;
+                let js_args = match raw_bytes {
+                    Some(bytes) => {
+                        let payload = TypedArray::<u8>::new_copy(js_ctx.clone(), bytes)
+                            .map(TypedArray::into_value)
+                            .map_err(|err| crate::runtime::js_err(js_ctx, err))?;
+                        let source_value = js_ctx
+                            .globals()
+                            .get::<_, JsValue>("source")
+                            .map_err(|err| crate::runtime::js_err(js_ctx, err))?;
+                        vec![payload, source_value]
+                    }
+                    None => self.values_to_js(js_ctx, args)?,
+                };
                 let mut call_args = rquickjs::function::Args::new(js_ctx.clone(), js_args.len());
                 call_args
                     .push_args(js_args)

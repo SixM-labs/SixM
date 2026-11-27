@@ -43,6 +43,7 @@ pub(crate) fn install(runtime: &Rc<LuaRuntime>, helpers: &Helpers) -> mlua::Resu
     globals.raw_set("source", "")?;
     install_scheduling(lua, weak, &globals, helpers)?;
     let citizen: Table = globals.raw_get("Citizen")?;
+    citizen.raw_set("Trace", trace_function(lua, runtime.resource.clone())?)?;
     crate::promise::install(runtime, &globals, &citizen)?;
     install_events(lua, weak, &globals)?;
     install_host(lua, weak, &globals, runtime.side)?;
@@ -364,6 +365,21 @@ fn print_function(
             parts.push(String::from_utf8_lossy(&text.as_bytes()).into_owned());
         }
         tracing::info!(target: "sixm::script", "[{resource}] {}", parts.join("\t"));
+        Ok(())
+    })
+}
+
+/// `Citizen.Trace`: logs one text argument like `print`, without joining tabs. One
+/// trailing newline (with a `\r` before it) is dropped, so the log has no blank line.
+fn trace_function(lua: &Lua, resource: sixm_core::ResourceName) -> mlua::Result<Function> {
+    lua.create_function(move |_, text: LuaString| {
+        let bytes = text.as_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        let line = match text.strip_suffix('\n') {
+            Some(rest) => rest.strip_suffix('\r').unwrap_or(rest),
+            None => &*text,
+        };
+        tracing::info!(target: "sixm::script", "[{resource}] {line}");
         Ok(())
     })
 }

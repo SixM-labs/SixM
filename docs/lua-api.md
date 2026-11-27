@@ -23,6 +23,7 @@ Sources: `crates/sixm-lua/src/` (`natives.rs`, `client.rs`, `players.rs`,
 | `SetTimeout` / `Citizen.SetTimeout` | both | `SetTimeout(ms, fn)`. Runs `fn` once after `ms`. Returns an integer id. |
 | `ClearTimeout` / `Citizen.ClearTimeout` | both | `ClearTimeout(id)`. Cancels a timeout that has not run yet. |
 | `GetGameTimer` | both | `GetGameTimer()`. Returns milliseconds since the process first asked for the timer, as an integer. |
+| `Citizen.Trace` | both | `Citizen.Trace(text)`. Logs `text` like `print`, without tab joining. |
 
 Frames run at `sixm_tickRate` (see [server.md](server.md) and
 [client.md](client.md)). A `Wait(ms)` with a positive delay resumes when its
@@ -701,6 +702,13 @@ worker. A callback whose resource has stopped by the time the response arrives i
 dropped, and requests of a stopped resource that have not begun never run.
 Requests run on a small pool of worker threads (`sixm_httpWorkers`), so they
 never block a frame.
+
+`PerformHttpRequestAwait(url, method, data, headers, options)` takes the same
+arguments without a callback and returns `status, body, headers, errorData`. It
+parks the current thread until the response arrives. It works in a thread
+(`CreateThread`) and in a script's main chunk (which runs as a task), like
+`Await`; in a context that cannot yield, such as an export or a plain callback,
+it raises an error.
 
 The client does not have `PerformHttpRequest`. A request from a player's
 machine would expose the player's address and could reach hosts the server

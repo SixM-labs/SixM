@@ -210,6 +210,10 @@ function Citizen.SetTimeout(ms, fn) end
 ---@param id integer
 function Citizen.ClearTimeout(id) end
 
+--- Logs `text` like `print`, without joining tabs. One trailing newline is dropped.
+---@param text string
+function Citizen.Trace(text) end
+
 --- Parks the current thread until `p` settles and returns its value or raises its reason.
 ---@param p SixMPromise
 ---@return any
@@ -1265,6 +1269,18 @@ function GetRoutingBucketEntityLockdownMode(bucket) end
 ---@param headers? table<string, string | number>
 ---@param options? SixMHttpRequestOptions
 function PerformHttpRequest(url, callback, method, data, headers, options) end
+
+--- Starts an HTTP request and parks the current thread until it finishes. Works in a thread or a script's main chunk, not in a context that cannot yield. (Server only)
+---@param url string
+---@param method? string
+---@param data? string
+---@param headers? table<string, string | number>
+---@param options? SixMHttpRequestOptions
+---@return integer status
+---@return string body
+---@return table headers
+---@return string errorData
+function PerformHttpRequestAwait(url, method, data, headers, options) end
 
 --- Registers the resource's HTTP handler for `/<resource>` and `/<resource>/...`. (Server only)
 ---@param handler fun(req: SixMHttpRequest, res: SixMHttpResponse)

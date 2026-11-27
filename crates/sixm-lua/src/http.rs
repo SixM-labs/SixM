@@ -1,4 +1,4 @@
-//! `PerformHttpRequest`, which only a server has.
+//! `PerformHttpRequest` and `PerformHttpRequestAwait`, which only a server has.
 
 use std::rc::Weak;
 use std::time::Duration;
@@ -8,7 +8,27 @@ use sixm_core::{FuncRef, HttpRequest};
 
 use crate::runtime::{LuaRuntime, bind_fn, lua_err};
 
-/// Installs `PerformHttpRequest(url, callback, method, data, headers, options)`.
+/// `PerformHttpRequestAwait`: starts the request with a promise as its callback, then
+/// awaits the promise. The chunk receives `perform`, `promise.new` and `Await` as `...`.
+const AWAIT_REQUEST_SOURCE: &str = r"
+local perform, new, await = ...
+local isyieldable, error = coroutine.isyieldable, error
+return function(url, method, data, headers, options)
+	if not isyieldable() then
+		error('PerformHttpRequestAwait can only be called from a thread (Citizen.CreateThread)', 2)
+	end
+	local p = new()
+	perform(url, function(status, body, responseHeaders, errorData)
+		p:resolve({ status, body, responseHeaders, errorData })
+	end, method, data, headers, options)
+	local r = await(p)
+	return r[1], r[2], r[3], r[4]
+end
+";
+
+/// Installs `PerformHttpRequest(url, callback, method, data, headers, options)` and
+/// `PerformHttpRequestAwait(url, method, data, headers, options)`. The second one
+/// needs the `promise` table and `Await`, so it runs after `promise::install`.
 ///
 /// `callback` receives `(statusCode, body, headers, errorData)`. A request
 /// that fails on the network has status `0` and its message as `errorData`.
@@ -42,7 +62,14 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
                 .map_err(lua_err)
         },
     )?;
-    globals.raw_set("PerformHttpRequest", perform)
+    let new: Function = globals.get::<Table>("promise")?.raw_get("new")?;
+    let await_fn: Function = globals.raw_get("Await")?;
+    let await_request = lua
+        .load(AWAIT_REQUEST_SOURCE)
+        .set_name("=sixm http await")
+        .call::<Function>((perform.clone(), new, await_fn))?;
+    globals.raw_set("PerformHttpRequest", perform)?;
+    globals.raw_set("PerformHttpRequestAwait", await_request)
 }
 
 /// Reads a headers table. Both names and values must be strings or numbers.

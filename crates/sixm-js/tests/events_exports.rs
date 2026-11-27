@@ -193,3 +193,104 @@ fn cross_resource_exports_manifest_fallback_and_funcref_gc_work() {
     assert!(!host.released.borrow().is_empty() || provider.instance() > 0);
     let _ = first;
 }
+
+#[test]
+fn event_listener_aliases_match_on_and_on_net() {
+    let host = new_host();
+    let srv = start(
+        &host,
+        "aliases",
+        &["local", "drop"],
+        &[(
+            "index.js",
+            r#"
+            const got = [];
+            addEventListener("a", (v) => got.push("a:" + v));
+            addEventListener("b", (v) => got.push("b:" + v), true);
+            addEventListener("c", (v) => got.push("c:" + v));
+            addNetEventListener("d", (v) => got.push("d:" + v));
+            const handle = addEventListener("e", (v) => got.push("e:" + v));
+            exports("local", () => {
+                emit("a", 1);
+                return got.join("|");
+            });
+            exports("drop", () => {
+                emit("e", 1);
+                RemoveEventHandler(handle);
+                emit("e", 2);
+                return got.join("|");
+            });
+            "#,
+        )],
+    );
+
+    let ctx = EventContext::default();
+    assert_eq!(text(&srv, "local"), "a:1");
+    srv.deliver_event("b", EventSource::Net(7), &[Value::Int(2)], &ctx)
+        .expect("deliver b");
+    srv.deliver_event("c", EventSource::Net(7), &[Value::Int(3)], &ctx)
+        .expect("deliver c");
+    srv.deliver_event("d", EventSource::Net(7), &[Value::Int(4)], &ctx)
+        .expect("deliver d");
+    assert_eq!(text(&srv, "drop"), "a:1|b:2|d:4|e:1");
+}
+
+#[test]
+fn raw_event_listeners_receive_msgpack_bytes_and_source() {
+    let host = new_host();
+    let srv = start(
+        &host,
+        "raw",
+        &["local", "seen", "unlisten"],
+        &[(
+            "index.js",
+            r#"
+            const seen = [];
+            const rawFn = (data, src) => {
+                seen.push(data instanceof Uint8Array);
+                seen.push(JSON.stringify(msgpack.unpack(data)));
+                seen.push(src);
+            };
+            addRawEventListener("r", rawFn);
+            onNet("rn");
+            addRawEventHandler("rn", (data, src) => {
+                seen.push(JSON.stringify(msgpack.unpack(data)));
+                seen.push(src);
+            });
+            exports("local", () => {
+                emit("r", 1, "a");
+                return seen;
+            });
+            exports("seen", () => seen);
+            exports("unlisten", () => {
+                removeEventListener("r", rawFn);
+                emit("r", 9);
+                return seen;
+            });
+            "#,
+        )],
+    );
+
+    let ctx = EventContext::default();
+    assert_eq!(
+        call(&srv, "local", &[]),
+        vec![Value::Array(vec![
+            Value::Bool(true),
+            Value::from("[1,\"a\"]"),
+            Value::from(""),
+        ])]
+    );
+    srv.deliver_event("r", EventSource::Net(7), &[Value::from("y")], &ctx)
+        .expect("drop unregistered net event");
+    srv.deliver_event("rn", EventSource::Net(7), &[Value::from("x")], &ctx)
+        .expect("deliver rn");
+    let expected = Value::Array(vec![
+        Value::Bool(true),
+        Value::from("[1,\"a\"]"),
+        Value::from(""),
+        Value::from("[\"x\"]"),
+        Value::Int(7),
+    ]);
+    assert_eq!(call(&srv, "seen", &[]), vec![expected.clone()]);
+    assert_eq!(call(&srv, "unlisten", &[]), vec![expected]);
+}

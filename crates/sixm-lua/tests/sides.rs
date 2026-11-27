@@ -274,3 +274,23 @@ fn server_event_reaches_only_net_event_handlers_and_sees_source_65535() {
     assert_eq!(first(&rt, "net"), Value::from("hello"));
     assert_eq!(first(&rt, "seen"), Value::Int(65_535));
 }
+
+#[test]
+fn citizen_trace_accepts_text_on_both_sides() {
+    for host in [new_host(), new_client_host(1)] {
+        let runtime = start(
+            &host,
+            "tracer",
+            &["kind", "raises"],
+            &[(
+                "main.lua",
+                "Citizen.Trace('hello\\n')\n\
+                 exports('kind', function() return type(Citizen.Trace) end)\n\
+                 exports('raises', function() return pcall(Citizen.Trace, {}) end)\n",
+            )],
+        );
+
+        assert_eq!(first(&runtime, "kind"), Value::from("function"));
+        assert_eq!(first(&runtime, "raises"), Value::Bool(false));
+    }
+}

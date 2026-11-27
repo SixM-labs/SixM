@@ -155,6 +155,40 @@ declare function RemoveEventHandler(handle: EventHandlerHandle): void;
 declare function removeEventListener(name: string, fn: (...args: any[]) => void): void;
 
 /**
+ * Alias for `on`. With `netSafe` true, `name` is also marked as a network-safe event.
+ */
+declare function addEventListener(
+    name: string,
+    fn: (...args: any[]) => void | Promise<void>,
+    netSafe?: boolean
+): EventHandlerHandle;
+
+/**
+ * Alias for `onNet`. Marks `name` as a network-safe event and attaches `fn`.
+ */
+declare function addNetEventListener(
+    name: string,
+    fn: (...args: any[]) => void | Promise<void>
+): EventHandlerHandle;
+
+/**
+ * Registers a raw handler for `name`. `fn` receives the msgpack bytes of the arguments and the source.
+ * Network events still need `onNet` / `RegisterNetEvent`.
+ */
+declare function addRawEventListener(
+    name: string,
+    fn: (payload: Uint8Array, source: number | string) => void | Promise<void>
+): EventHandlerHandle;
+
+/**
+ * Alias for `addRawEventListener`.
+ */
+declare function addRawEventHandler(
+    name: string,
+    fn: (payload: Uint8Array, source: number | string) => void | Promise<void>
+): EventHandlerHandle;
+
+/**
  * Marks `name` as a network-safe event and attaches `fn`.
  */
 declare function onNet(

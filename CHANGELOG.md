@@ -9,6 +9,8 @@ may change the protocol and the API.
 
 ### Added
 
+- Lua `Citizen.Trace` and `PerformHttpRequestAwait`; JS `addEventListener`,
+  `addNetEventListener`, `addRawEventListener` and `addRawEventHandler`.
 - Manifest `provide` / `provides` virtual resource alias directives, resolved
   across dependencies, `@alias/...` manifest references, `exports`, file/state/metadata
   natives, and resource lifecycle commands and natives (with duplicate

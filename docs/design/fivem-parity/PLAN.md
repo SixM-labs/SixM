@@ -287,7 +287,7 @@ equivalent / no effect / absent".
 | ID | Status | By | Commit (find with) |
 |---|---|---|---|
 | A1 | done | Claude (Haiku impl, Sonnet review) | `git log --grep "^A1:"` |
-| A2 | todo | | |
+| A2 | done | Claude (Haiku impl, Sonnet review) | `git log --grep "^A2:"` |
 | A3 | todo | | |
 | A4 | todo | | |
 | A5 | todo | | |

@@ -70,6 +70,9 @@ for synchronous continuations and across event/timer boundaries.
 | `RemoveEventHandler` | both | `RemoveEventHandler(handle)`. Removes the listener returned by `on` / `AddEventHandler`. |
 | `onNet` | both | `onNet(name, fn)`. Marks `name` as a network event and attaches `fn`. |
 | `RegisterNetEvent` / `RegisterServerEvent` | both | `RegisterNetEvent(name [, fn])`. Allows `name` to arrive over the network, optionally registering `fn`. |
+| `addEventListener` | both | `addEventListener(name, fn, netSafe?)`. Same as `on`. With `netSafe` true, `name` also becomes a network event, as with `onNet`. Returns `{ key, name }`. |
+| `addNetEventListener` | both | `addNetEventListener(name, fn)`. Same as `onNet`. |
+| `addRawEventListener` / `addRawEventHandler` | both | `addRawEventListener(name, fn)`. `fn` receives `(payload, source)`, where `payload` is a `Uint8Array` of the msgpack array of the arguments. Network events still need `onNet` / `RegisterNetEvent`. |
 | `emit` / `TriggerEvent` | both | `emit(name, ...args)`. Triggers every local handler of `name` synchronously. |
 | `emitNet` / `TriggerClientEvent` | server | `emitNet(name, target, ...args)`. Sends an event to a player id (`number` or decimal string), an array of player ids (e.g. `[1, 2]`; `[]` sends to nobody, and `-1` is not allowed inside an array), or `-1` for all players. Functions cannot be sent. |
 | `emitNet` / `TriggerServerEvent` | client | `emitNet(name, ...args)`. Sends an event to the server. Functions cannot be sent. |
