@@ -10,17 +10,69 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::time::Instant;
+use std::fmt;
+use std::net::IpAddr;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
+use ring::digest::{SHA256, digest};
 use serde_json::{Map, Value as Json, json};
 use sixm_core::{FuncRef, Host, ResourceName, ScriptError, WebReply, WebRequest, WebResponse};
 use sixm_net::{WebExchange, WebResponder};
-use tracing::warn;
+use subtle::ConstantTimeEq;
+use tracing::field::{Field, Visit};
+use tracing::{Event, Subscriber, warn};
+use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 
+use crate::commands::{self, CommandContext, CommandSource};
 use crate::manager::ResourceManager;
 
 /// Largest response body a handler may build. Beyond it the response fails with `500`.
 const MAX_RESPONSE: usize = 16 * 1024 * 1024;
+/// Most consecutive failed RCON authentication attempts per TCP peer address.
+const MAX_RCON_FAILURES: u32 = 5;
+const RCON_LOCKOUT: Duration = Duration::from_secs(30);
+const MAX_RCON_TRACKED_ADDRESSES: usize = 4096;
+
+/// Tracks failed `POST /rcon` attempts to slow password guessing.
+#[derive(Debug, Default)]
+struct RconGuard {
+    attempts: HashMap<IpAddr, RconAttempts>,
+}
+
+#[derive(Debug)]
+struct RconAttempts {
+    failures: u32,
+    expires: Instant,
+}
+
+impl RconGuard {
+    fn is_locked(&mut self, ip: IpAddr, now: Instant) -> bool {
+        if let Some(attempts) = self.attempts.get(&ip) {
+            if now < attempts.expires {
+                return attempts.failures >= MAX_RCON_FAILURES;
+            }
+            self.attempts.remove(&ip);
+        }
+        if self.attempts.len() < MAX_RCON_TRACKED_ADDRESSES {
+            return false;
+        }
+        self.attempts.retain(|_, attempts| now < attempts.expires);
+        self.attempts.len() >= MAX_RCON_TRACKED_ADDRESSES
+    }
+
+    fn record_failure(&mut self, ip: IpAddr, now: Instant) {
+        let attempts = self.attempts.entry(ip).or_insert_with(|| RconAttempts {
+            failures: 0,
+            expires: now + RCON_LOCKOUT,
+        });
+        attempts.failures += 1;
+    }
+
+    fn reset(&mut self, ip: IpAddr) {
+        self.attempts.remove(&ip);
+    }
+}
 
 /// The HTTP state of the server: the handlers and the open requests.
 #[derive(Debug, Default)]
@@ -31,6 +83,8 @@ pub(crate) struct WebState {
     pending: RefCell<HashMap<u64, Pending>>,
     /// The id of the last request handed to a handler.
     last_id: Cell<u64>,
+    /// Consecutive failed `/rcon` authentication attempts.
+    rcon_guard: RefCell<RconGuard>,
 }
 
 /// A request a handler is answering.
@@ -89,6 +143,11 @@ impl ResourceManager {
     /// Answers one request from the listener.
     pub(crate) fn handle_web(&self, exchange: WebExchange) {
         let WebExchange { request, responder } = exchange;
+        if request.path == "/rcon" {
+            let response = self.handle_rcon(&request, responder.peer_ip());
+            responder.respond(response);
+            return;
+        }
         if let Some(response) = self.builtin_route(&request) {
             responder.respond(response);
             return;
@@ -296,6 +355,130 @@ impl ResourceManager {
             "maxclients": max_clients,
         })
     }
+
+    /// `POST /rcon`: authenticates with `rcon_password` and runs one console command.
+    fn handle_rcon(&self, request: &WebRequest, peer_ip: IpAddr) -> WebResponse {
+        if request.method != "POST" {
+            return WebResponse {
+                status: 405,
+                headers: vec![
+                    ("allow".to_owned(), "POST".to_owned()),
+                    (
+                        "content-type".to_owned(),
+                        "text/plain; charset=utf-8".to_owned(),
+                    ),
+                ],
+                body: b"Method Not Allowed".to_vec(),
+            };
+        }
+        let convars = self.convars.borrow();
+        let Some(expected) = convars.rcon_password() else {
+            return text(403, "RCON is disabled");
+        };
+        let now = Instant::now();
+        if self.web.rcon_guard.borrow_mut().is_locked(peer_ip, now) {
+            return text(429, "Too many failed RCON attempts");
+        }
+        let Some((supplied, command)) = parse_rcon_payload(request) else {
+            return text(
+                400,
+                "Expected JSON {command, password} or auth header + command",
+            );
+        };
+        let supplied = digest(&SHA256, supplied.as_bytes());
+        if !bool::from(expected.as_ref().ct_eq(supplied.as_ref())) {
+            self.web
+                .rcon_guard
+                .borrow_mut()
+                .record_failure(peer_ip, now);
+            return text(401, "Unauthorized");
+        }
+        drop(convars);
+        self.web.rcon_guard.borrow_mut().reset(peer_ip);
+
+        let output = capture_logs(|| {
+            commands::run_line(self, &command, &CommandContext::new(CommandSource::Console));
+            commands::drain_queued(self);
+        });
+        let body = serde_json::to_vec(&json!({ "ok": true, "output": output })).unwrap_or_default();
+        WebResponse {
+            status: 200,
+            headers: vec![
+                ("content-type".to_owned(), "application/json".to_owned()),
+                ("cache-control".to_owned(), "no-store".to_owned()),
+            ],
+            body,
+        }
+    }
+}
+
+fn parse_rcon_payload(request: &WebRequest) -> Option<(String, String)> {
+    let header_pw = request
+        .headers
+        .iter()
+        .find_map(|(k, v)| match k.as_str() {
+            "x-rcon-password" => Some(v.as_str()),
+            "authorization" => v
+                .strip_prefix("Bearer ")
+                .or_else(|| v.strip_prefix("bearer ")),
+            _ => None,
+        })
+        .map(str::to_owned);
+
+    if let Ok(Json::Object(map)) = serde_json::from_slice::<Json>(&request.body) {
+        let command = map.get("command").and_then(Json::as_str)?.trim().to_owned();
+        let password = map
+            .get("password")
+            .and_then(Json::as_str)
+            .map(str::to_owned)
+            .or(header_pw)?;
+        return (!command.is_empty()).then_some((password, command));
+    }
+
+    let password = header_pw?;
+    let command = std::str::from_utf8(&request.body).ok()?.trim().to_owned();
+    (!command.is_empty()).then_some((password, command))
+}
+
+struct LogCollector(Arc<Mutex<Vec<String>>>);
+
+impl<S: Subscriber> Layer<S> for LogCollector {
+    fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
+        let mut visitor = MessageVisitor::default();
+        event.record(&mut visitor);
+        if !visitor.message.is_empty() {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(visitor.message);
+        }
+    }
+}
+
+#[derive(Default)]
+struct MessageVisitor {
+    message: String,
+}
+
+impl Visit for MessageVisitor {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" {
+            value.clone_into(&mut self.message);
+        }
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        if field.name() == "message" {
+            self.message = format!("{value:?}");
+        }
+    }
+}
+
+fn capture_logs(run: impl FnOnce()) -> Vec<String> {
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(LogCollector(Arc::clone(&lines)));
+    tracing::subscriber::with_default(subscriber, run);
+    std::mem::take(&mut *lines.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
 /// The resource a path names: `res` for `/res` and `/res/...`.
@@ -321,6 +504,21 @@ fn text(status: u16, message: &str) -> WebResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rcon_lockout_is_per_address_and_expires() {
+        let mut guard = RconGuard::default();
+        let now = Instant::now();
+        let first = IpAddr::from([192, 0, 2, 1]);
+        let second = IpAddr::from([192, 0, 2, 2]);
+        for _ in 0..MAX_RCON_FAILURES {
+            assert!(!guard.is_locked(first, now));
+            guard.record_failure(first, now);
+        }
+        assert!(guard.is_locked(first, now));
+        assert!(!guard.is_locked(second, now));
+        assert!(!guard.is_locked(first, now + RCON_LOCKOUT));
+    }
 
     #[test]
     fn the_resource_is_the_first_path_segment() {

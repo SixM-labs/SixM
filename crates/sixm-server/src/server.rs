@@ -7,14 +7,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use sixm_net::{NetError, NetEvent, WebExchange};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::commands::{self, CommandContext, CommandSource};
 use crate::manager::ResourceManager;
-
-/// Most queued commands that run in one drain. Beyond this, scripts are
-/// assumed to be looping and the rest of the queue is dropped.
-const MAX_QUEUED_COMMANDS: usize = 1000;
 
 /// Input for the server loop.
 #[derive(Debug)]
@@ -88,7 +84,18 @@ impl Server {
         self.manager.expire_deferrals(now);
         self.manager.flush_entities();
         self.manager.flush_kvp_due(now);
-        self.manager.frames.borrow_mut().record(started.elapsed());
+        let elapsed = started.elapsed();
+        self.manager.frames.borrow_mut().record(elapsed);
+        if self.manager.profiler_active.get() {
+            let keep_going = self
+                .manager
+                .profiler
+                .borrow_mut()
+                .finish_frame(started, elapsed);
+            if !keep_going {
+                self.manager.profiler_active.set(false);
+            }
+        }
     }
 
     /// Binds the listening socket and sends its events to `input`, the sending
@@ -190,23 +197,9 @@ impl Server {
     }
 
     /// Runs queued commands, applies queued kicks and deferral calls until
-    /// the queues are empty, up to [`MAX_QUEUED_COMMANDS`] commands.
+    /// the queues are empty or the command drain limit is reached.
     fn drain_commands(&self) {
-        let mut ran = 0;
-        loop {
-            self.manager.apply_deferral_calls();
-            self.manager.apply_drops();
-            let Some((line, source)) = self.manager.pop_command() else {
-                return;
-            };
-            if ran == MAX_QUEUED_COMMANDS {
-                let dropped = self.manager.discard_commands() + 1;
-                warn!("more than {MAX_QUEUED_COMMANDS} commands queued at once; dropped {dropped}");
-                return;
-            }
-            ran += 1;
-            commands::run_line(&self.manager, &line, &CommandContext::new(source));
-        }
+        commands::drain_queued(&self.manager);
     }
 }
 

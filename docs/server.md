@@ -83,6 +83,7 @@ same name is never reached.
 | `endpoint_add_udp <ip:port>` | Stores the listen address in `endpoint_add_udp`. It applies at the next start. The address must parse. |
 | `endpoint_add_tcp <ip:port>` | The same as `endpoint_add_udp`: TCP (HTTP) and UDP (the game) share one address, so this sets both. |
 | `perf` | Prints the frame times of the last 1200 frames: count, average, p50, p99 and max, in milliseconds. Then the tick rate and the budget per frame, the players, entities and running resources, and the network rate in KiB/s and frames/s since the previous `perf` call, or since the server started. See [Load testing](#load-testing). |
+| `profiler <record [frames] \| stop \| status \| saveJSON <path>>` | Captures `ServerTick` and per-resource tick durations. See [Frame profiling](#frame-profiling). |
 | `players` | Lists connected players with their id, name, `license` identifier and endpoint. |
 | `entities` | Lists every entity with its id, kind, model hash, position and heading. |
 | `state [bag]` | Without a name, lists the state bags. With a name, prints the bag's keys and values. Replicated keys are marked. |
@@ -222,6 +223,7 @@ Convar names are case-insensitive. Scripts read them with `GetConvar` and
 | `sv_httpEnabled` | `true` | Whether the HTTP listener runs. `false` or `0` turns it off. Read when the network starts. |
 | `sixm_httpHandlerTimeout` | `25` | Seconds a `SetHttpHandler` handler may take to complete its response before the client gets `504`, clamped to 1 to 120. A value that is not a number gives 25. |
 | `sv_exposePlayerIdentifiers` | `false` | Whether `/players.json` lists each player's identifiers. Only `true` turns it on. See [HTTP endpoints](#http-endpoints). |
+| `rcon_password` | empty | Console-only credential for [`POST /rcon`](#remote-console). Set with `set rcon_password "<password>"`. |
 | `sv_maxclients` | `32` | Player limit, clamped to 1 to 1024. A value that is not a number gives 32. |
 | `sixm_deferralTimeout` | `120` | Seconds a connection that `playerConnecting` deferred may wait for `done`, clamped to 1 to 3600. A deferral that runs longer is refused with `connection timed out`. A value that is not a number gives 120. |
 | `sixm_httpTimeout` | `30` | Seconds an HTTP request from `PerformHttpRequest` may take, clamped to 1 to 600, unless its `options.timeout` gives another. A value that is not a number gives 30. See [HTTP](lua-api.md#http-server-only). |
@@ -306,6 +308,7 @@ connection carries one request and is closed after its answer.
 | `/info.json` | JSON: `server`, the running `resources`, and `vars`, the server-info convars (`sets`). |
 | `/players.json` | JSON array of `{id, name, ping}` per player. `identifiers` is added only with `sv_exposePlayerIdentifiers true`. |
 | `/dynamic.json` | JSON: `hostname`, `clients`, `maxclients` and `server`. |
+| `/rcon` | [`POST /rcon`](#remote-console) executes one authenticated console command and returns its output as JSON. |
 | `/<resource>/...` | The `SetHttpHandler` function of that resource, if it has one. See [HTTP handlers](lua-api.md#http-handlers-server-only). |
 
 A request is routed by the first segment of its raw path. It is not decoded or
@@ -323,6 +326,27 @@ its response within `sixm_httpHandlerTimeout` (25 seconds) gets `504`; a request
 The listener speaks plain HTTP. Put a reverse proxy with TLS in front of it when
 the endpoints must be reached over the internet, and open the TCP port in the
 firewall with the UDP port.
+
+### Remote console
+
+Set `rcon_password` in `server.cfg` or from the server console. An empty or
+unset password disables the endpoint. The credential is available only to the
+console configuration and is excluded from script APIs and public convars.
+Authenticated requests run with full console permissions. The listener uses
+plain HTTP, so use a private connection or put a TLS reverse proxy in front of
+it and restrict direct access to the HTTP listener.
+
+Send `POST /rcon` with a JSON body such as `{"command":"help","password":"<password>"}`.
+`Authorization: Bearer <password>` and
+`X-Rcon-Password: <password>` also accept either a JSON body with `command` or
+a plain-text command body. A `200` response has the shape
+`{"ok":true,"output":["..."]}`. Command errors appear in `output`.
+
+The endpoint returns `400` for an invalid request, `401` for a bad password,
+`403` when disabled and `405` for other methods. After five consecutive
+failures from the same TCP peer IP, it returns `429` until 30 seconds have
+elapsed since the first failure. Clients sharing a reverse proxy's connection
+address share that limit.
 
 ## Players
 
@@ -344,6 +368,16 @@ firewall with the UDP port.
 
 The `quit` command and Ctrl+C both set the quit flag. The loop checks the flag
 on each pass and then shuts down.
+
+## Frame profiling
+
+Use `profiler record 120` to capture the next 120 server ticks, or
+`profiler record` to keep recording until `profiler stop`. `profiler status`
+shows the frame and event counts and reports whether the capture reached its
+250,000-event limit. `profiler saveJSON profiles/capture.json` saves the current
+capture relative to the server's working directory. Open the file in a Chrome
+Trace Event viewer such as Perfetto to inspect each `ServerTick` and its
+resource spans. When recording is idle, ticks skip timestamping resource spans.
 
 ## Load testing
 

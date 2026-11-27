@@ -67,12 +67,20 @@ pub struct WebExchange {
 /// Sends the answer to one request. Consumed by the send, so one request is
 /// answered at most once.
 #[derive(Debug)]
-pub struct WebResponder(oneshot::Sender<WebResponse>);
+pub struct WebResponder {
+    sender: oneshot::Sender<WebResponse>,
+    peer_ip: IpAddr,
+}
 
 impl WebResponder {
+    /// The TCP peer's address, as observed by the listener.
+    pub fn peer_ip(&self) -> IpAddr {
+        self.peer_ip
+    }
+
     /// Sends `response`. Does nothing when the client has already gone.
     pub fn respond(self, response: WebResponse) {
-        let _ = self.0.send(response);
+        let _ = self.sender.send(response);
     }
 }
 
@@ -269,7 +277,10 @@ async fn answer(
     let (sender, receiver) = oneshot::channel();
     on_request(WebExchange {
         request,
-        responder: WebResponder(sender),
+        responder: WebResponder {
+            sender,
+            peer_ip: ip,
+        },
     });
     match receiver.await {
         Ok(response) => into_response(response),

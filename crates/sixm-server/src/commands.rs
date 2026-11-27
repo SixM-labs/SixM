@@ -7,24 +7,27 @@
 //! when its access control entries allow `command.<name>`. A player or a
 //! resource never reaches a convar through its bare name.
 
-use std::fs;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::time::Instant;
+use std::{fs, io};
 
-use sixm_core::{ConvarKind, Host, ResourceName, Value};
+use sixm_core::{ConvarKind, Host, ResourceName, Value, normalize_resource_path};
 use tracing::{debug, error, info, warn};
 
 use crate::access::Permission;
 use crate::config::tokenize;
-use crate::convars::ENDPOINT;
+use crate::convars::{ENDPOINT, RCON_PASSWORD};
 use crate::manager::{ManagerError, ResourceManager};
 use crate::perf::{format_millis, per_second};
 
 /// Deepest `exec` nesting. A file that includes itself stops here.
 const MAX_EXEC_DEPTH: usize = 16;
+/// Maximum commands drained per console line, input, or frame.
+const MAX_QUEUED_COMMANDS: usize = 1000;
 
 /// Built-in command names, as listed by `help`.
-pub(crate) const BUILT_IN: [&str; 24] = [
+pub(crate) const BUILT_IN: [&str; 25] = [
     "add_ace",
     "add_principal",
     "endpoint_add_tcp",
@@ -37,6 +40,7 @@ pub(crate) const BUILT_IN: [&str; 24] = [
     "list_principals",
     "perf",
     "players",
+    "profiler",
     "quit",
     "refresh",
     "remove_ace",
@@ -118,9 +122,21 @@ pub(crate) fn run_words(
         return;
     }
     match lower.as_str() {
-        "set" => set_convar(manager, "set", args, ConvarKind::Plain),
-        "sets" => set_convar(manager, "sets", args, ConvarKind::ServerInfo),
-        "setr" => set_convar(manager, "setr", args, ConvarKind::Replicated),
+        "set" => set_convar(manager, "set", args, ConvarKind::Plain, &context.source),
+        "sets" => set_convar(
+            manager,
+            "sets",
+            args,
+            ConvarKind::ServerInfo,
+            &context.source,
+        ),
+        "setr" => set_convar(
+            manager,
+            "setr",
+            args,
+            ConvarKind::Replicated,
+            &context.source,
+        ),
         "start" => resource_command(args, "start <resource>", |resource| manager.start(resource)),
         "stop" => resource_command(args, "stop <resource>", |resource| manager.stop(resource)),
         "restart" => resource_command(args, "restart <resource>", |resource| {
@@ -133,6 +149,7 @@ pub(crate) fn run_words(
         "endpoint_add_udp" => endpoint(manager, args, false),
         "endpoint_add_tcp" => endpoint(manager, args, true),
         "perf" => perf(manager, args),
+        "profiler" => profiler(manager, args),
         "players" => players(manager),
         "entities" => entities(manager),
         "state" => state(manager, args),
@@ -241,11 +258,21 @@ fn run_script_or_convar(
 /// `set`, `sets` and `setr`: store a convar with `kind`. The value is the rest
 /// of the line, joined by single spaces. `command` names the command in the
 /// usage line.
-fn set_convar(manager: &ResourceManager, command: &str, args: &[String], kind: ConvarKind) {
+fn set_convar(
+    manager: &ResourceManager,
+    command: &str,
+    args: &[String],
+    kind: ConvarKind,
+    source: &CommandSource,
+) {
     let Some((name, value)) = args.split_first() else {
         warn!("usage: {command} <name> <value>");
         return;
     };
+    if name.eq_ignore_ascii_case(RCON_PASSWORD) && !matches!(source, CommandSource::Console) {
+        warn!("rcon_password is console-only");
+        return;
+    }
     store_convar(manager, name, &value.join(" "), kind);
 }
 
@@ -383,6 +410,114 @@ fn perf(manager: &ResourceManager, args: &[String]) {
             millis
         ),
     );
+}
+
+/// Drains queued script commands, applying deferrals and drops.
+pub(crate) fn drain_queued(manager: &ResourceManager) {
+    let mut ran = 0;
+    loop {
+        manager.apply_deferral_calls();
+        manager.apply_drops();
+        let Some((line, source)) = manager.pop_command() else {
+            return;
+        };
+        if ran == MAX_QUEUED_COMMANDS {
+            let dropped = manager.discard_commands() + 1;
+            warn!("more than {MAX_QUEUED_COMMANDS} commands queued at once; dropped {dropped}");
+            return;
+        }
+        ran += 1;
+        run_line(manager, &line, &CommandContext::new(source));
+    }
+}
+
+/// `profiler <record [frames] | stop | status | saveJSON <path>>`
+fn profiler(manager: &ResourceManager, args: &[String]) {
+    let Some((sub, rest)) = args.split_first() else {
+        warn!("usage: profiler <record [frames] | stop | status | saveJSON <path>>");
+        return;
+    };
+    match sub.to_ascii_lowercase().as_str() {
+        "record" => {
+            let max_frames = match rest {
+                [] => None,
+                [count] => match count.parse::<u32>() {
+                    Ok(n) if n > 0 => Some(n),
+                    _ => {
+                        warn!("usage: profiler record [positive-frame-count]");
+                        return;
+                    }
+                },
+                _ => {
+                    warn!("usage: profiler record [frames]");
+                    return;
+                }
+            };
+            manager.profiler.borrow_mut().start(max_frames);
+            manager.profiler_active.set(true);
+            if let Some(n) = max_frames {
+                info!("profiler recording next {n} frames");
+            } else {
+                info!("profiler recording until stopped");
+            }
+        }
+        "stop" => {
+            if !rest.is_empty() {
+                warn!("usage: profiler stop");
+                return;
+            }
+            let frames = manager.profiler.borrow_mut().stop();
+            manager.profiler_active.set(false);
+            info!("profiler stopped ({frames} frames recorded)");
+        }
+        "status" => {
+            if !rest.is_empty() {
+                warn!("usage: profiler status");
+                return;
+            }
+            let status = manager.profiler.borrow().status();
+            let state = if status.recording {
+                match status.frames_remaining {
+                    Some(left) => format!("recording ({left} frames remaining)"),
+                    None => "recording".to_owned(),
+                }
+            } else {
+                "stopped".to_owned()
+            };
+            info!(
+                "profiler: {state}, {} frames, {} events{}",
+                status.recorded_frames,
+                status.event_count,
+                if status.truncated { " (truncated)" } else { "" }
+            );
+        }
+        "savejson" => {
+            let [path] = rest else {
+                warn!("usage: profiler saveJSON <relative-path>");
+                return;
+            };
+            let Some(rel) = normalize_resource_path(path) else {
+                error!("profiler saveJSON: invalid relative path `{path}`");
+                return;
+            };
+            let bytes = manager.profiler.borrow().to_chrome_trace_json();
+            if let Err(err) = write_relative_file(Path::new(&rel), &bytes) {
+                error!("profiler saveJSON `{rel}` failed: {err}");
+                return;
+            }
+            info!("profiler trace written to {rel} ({} bytes)", bytes.len());
+        }
+        _ => warn!("usage: profiler <record [frames] | stop | status | saveJSON <path>>"),
+    }
+}
+
+fn write_relative_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, bytes)
 }
 
 /// `entities`: lists every entity with its id, kind, model in hex, position and

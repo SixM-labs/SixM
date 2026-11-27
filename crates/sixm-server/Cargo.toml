@@ -19,6 +19,7 @@ sixm-lua.workspace = true
 sixm-js.workspace = true
 sixm-net.workspace = true
 ring.workspace = true
+subtle.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

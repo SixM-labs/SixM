@@ -31,6 +31,7 @@ quinn = { version = "0.11.12", default-features = false, features = ["runtime-to
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rcgen = "0.14.10"
 ring = "0.17.14"
+subtle = "2.6.1"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "fs", "io-util"] }
 postcard = { version = "1.2.0", features = ["use-std"] }
 serde = { version = "1.0.229", features = ["derive"] }

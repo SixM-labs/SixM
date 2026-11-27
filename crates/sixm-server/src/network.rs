@@ -262,12 +262,24 @@ impl ResourceManager {
                 "endpoint_add_udp `{endpoint}` is not an ip:port address"
             ))
         })?;
-        // TCP first, so that a port of 0 resolves to the same port for UDP. A
-        // TCP port in use must not stop the game: the server runs without HTTP.
+        let config = ServerConfig {
+            bind,
+            server_name,
+            identity,
+            ..ServerConfig::default()
+        };
+        let net_input = input.clone();
+        let server = NetServer::bind(config, move |event| {
+            // The loop is gone once the receiver is dropped; events are then moot.
+            let _ = net_input.send(Input::Net(event));
+        })?;
+        let addr = server.local_addr();
+
+        // A port selected by TCP may be unavailable to UDP. Bind the game
+        // socket first and let HTTP use its address when TCP can bind it.
         let web = if http_enabled {
-            let web_input = input.clone();
-            match WebServer::bind(bind, move |exchange| {
-                let _ = web_input.send(Input::Web(exchange));
+            match WebServer::bind(addr, move |exchange| {
+                let _ = input.send(Input::Web(exchange));
             }) {
                 Ok(web) => Some(web),
                 Err(err) => {
@@ -279,17 +291,6 @@ impl ResourceManager {
             info!("HTTP is off: sv_httpEnabled is false");
             None
         };
-        let config = ServerConfig {
-            bind: web.as_ref().map_or(bind, WebServer::local_addr),
-            server_name,
-            identity,
-            ..ServerConfig::default()
-        };
-        let server = NetServer::bind(config, move |event| {
-            // The loop is gone once the receiver is dropped; events are then moot.
-            let _ = input.send(Input::Net(event));
-        })?;
-        let addr = server.local_addr();
         *self.network.web.borrow_mut() = web;
         *self.network.server.borrow_mut() = Some(server);
         self.publish_advertised();
