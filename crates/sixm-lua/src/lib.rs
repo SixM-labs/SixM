@@ -14,6 +14,7 @@ mod json;
 mod natives;
 mod players;
 mod refs;
+mod resources;
 mod runtime;
 mod sandbox;
 mod scheduler;

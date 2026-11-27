@@ -26,7 +26,8 @@ use crate::entities::EntityEntry;
 use crate::error::NetError;
 use crate::files::{
     FILE_KIND_FILE, FileEntry, FileHash, MAX_EXPORT_NAME_LEN, MAX_EXPORTS, MAX_FILE_NAME_LEN,
-    MAX_FILE_SIZE, MAX_RESOURCE_NAME_LEN, ResourceEntry,
+    MAX_FILE_SIZE, MAX_METADATA, MAX_METADATA_KEY_LEN, MAX_METADATA_VALUE_LEN,
+    MAX_RESOURCE_NAME_LEN, ResourceEntry,
 };
 use crate::protocol::{
     ClientMessage, MAX_DECODED_VALUES, MAX_EVENT_NAME_LEN, MAX_VALUE_DEPTH, ServerMessage,
@@ -240,13 +241,14 @@ pub(crate) fn encode_state_snapshot(
 }
 
 /// The part of a [`ResourceEntry`] that one snapshot chunk carries: a name, a
-/// run of its files and, in the first part only, its exports. Its encoding is
-/// the encoding of a `ResourceEntry`.
+/// run of its files and, in the first part only, its exports and metadata. Its
+/// encoding is the encoding of a `ResourceEntry`.
 #[derive(Serialize)]
 struct EntryPart<'a> {
     name: &'a str,
     files: &'a [FileEntry],
     exports: &'a [String],
+    metadata: &'a [(String, String)],
 }
 
 /// Encodes the client files of `entries` as the frames of a `Resources`
@@ -268,17 +270,19 @@ pub(crate) fn encode_resources_snapshot(
             entry.files.chunks(MAX_FILES_PER_ENTRY).collect()
         };
         for (index, files) in parts.into_iter().enumerate() {
-            // The exports travel once, with the first part of the entry.
+            // The exports and metadata travel once, with the first part of the entry.
             let exports: &[String] = if index == 0 { &entry.exports } else { &[] };
+            let metadata: &[(String, String)] = if index == 0 { &entry.metadata } else { &[] };
             let part = EntryPart {
                 name: &entry.name,
                 files,
                 exports,
+                metadata,
             };
             let encoded = postcard::to_extend(&part, Vec::<u8>::new())
                 .map_err(|err| NetError::Protocol(format!("cannot encode message: {err}")))?;
-            // The entry itself, each file and each export count as one decoded value.
-            let units = 1 + files.len() + exports.len();
+            // The entry itself, each file, export and metadata pair count as one decoded value.
+            let units = 1 + files.len() + exports.len() + metadata.len();
             if !chunk.is_empty() && !chunk.accepts(encoded.len(), units, max_frame) {
                 frames.push(chunk.seal(max_frame)?);
                 chunk = SnapshotChunk::new(ServerMessage::RESOURCES_TAG);
@@ -1062,8 +1066,8 @@ impl<'de> Visitor<'de> for ResourcesVisitor<'_> {
     }
 }
 
-/// Decodes one resource entry, `(name, files, exports)`. The entry costs one
-/// unit of the budget, each file costs one more and each export one more.
+/// Decodes one resource entry, `(name, files, exports, metadata)`. The entry
+/// costs one unit of the budget, and each file, export and metadata pair one more.
 #[derive(Clone, Copy)]
 struct ResourceEntrySeed<'a> {
     budget: &'a ValueBudget,
@@ -1075,7 +1079,7 @@ impl<'de> DeserializeSeed<'de> for ResourceEntrySeed<'_> {
     fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<ResourceEntry, D::Error> {
         self.budget.spend::<D::Error>()?;
         deserializer.deserialize_tuple(
-            3,
+            4,
             ResourceEntryVisitor {
                 budget: self.budget,
             },
@@ -1091,7 +1095,7 @@ impl<'de> Visitor<'de> for ResourceEntryVisitor<'_> {
     type Value = ResourceEntry;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a resource name, its files and its exports")
+        formatter.write_str("a resource name, its files, its exports and its metadata")
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<ResourceEntry, A::Error> {
@@ -1109,11 +1113,68 @@ impl<'de> Visitor<'de> for ResourceEntryVisitor<'_> {
                 budget: self.budget,
             })?
             .ok_or_else(|| de::Error::invalid_length(2, &"a list of exports"))?;
+        let metadata = seq
+            .next_element_seed(MetadataSeed {
+                budget: self.budget,
+            })?
+            .ok_or_else(|| de::Error::invalid_length(3, &"a list of metadata pairs"))?;
         Ok(ResourceEntry {
             name,
             files,
             exports,
+            metadata,
         })
+    }
+}
+
+/// Decodes a list of metadata pairs, each of which costs one unit of the budget.
+#[derive(Clone, Copy)]
+struct MetadataSeed<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> DeserializeSeed<'de> for MetadataSeed<'_> {
+    type Value = Vec<(String, String)>;
+
+    fn deserialize<D: Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Vec<(String, String)>, D::Error> {
+        deserializer.deserialize_seq(MetadataVisitor {
+            budget: self.budget,
+        })
+    }
+}
+
+struct MetadataVisitor<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> Visitor<'de> for MetadataVisitor<'_> {
+    type Value = Vec<(String, String)>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a list of metadata pairs")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<(String, String)>, A::Error> {
+        let mut metadata = Vec::new();
+        while let Some((key, value)) = seq.next_element::<(String, String)>()? {
+            self.budget.spend::<A::Error>()?;
+            if metadata.len() == MAX_METADATA {
+                return Err(de::Error::custom(format!(
+                    "a resource declares more than {MAX_METADATA} metadata pairs"
+                )));
+            }
+            let key = checked_name::<A::Error>(key, MAX_METADATA_KEY_LEN)?;
+            if value.len() > MAX_METADATA_VALUE_LEN {
+                return Err(de::Error::custom(format!(
+                    "a metadata value is longer than {MAX_METADATA_VALUE_LEN} bytes"
+                )));
+            }
+            metadata.push((key, value));
+        }
+        Ok(metadata)
     }
 }
 
@@ -1913,6 +1974,7 @@ mod tests {
             name: "hello".to_owned(),
             files: vec![file("client/main.lua", FILE_KIND_CLIENT, 1)],
             exports: Vec::new(),
+            metadata: Vec::new(),
         };
         let started = ServerMessage::ResourceStarted {
             entry: entry.clone(),
@@ -1948,6 +2010,7 @@ mod tests {
             name: "bad".to_owned(),
             files: vec![file("x.lua", 9, 1)],
             exports: Vec::new(),
+            metadata: Vec::new(),
         };
         let payload = payload_of(&ServerMessage::ResourceStarted { entry });
         assert!(matches!(
@@ -1962,6 +2025,7 @@ mod tests {
             name: "provider".to_owned(),
             files: vec![file("client/main.lua", FILE_KIND_CLIENT, 1)],
             exports: vec!["greet".to_owned(), "notDeclared".to_owned()],
+            metadata: Vec::new(),
         };
         let payload = payload_of(&ServerMessage::ResourceStarted {
             entry: entry.clone(),
@@ -1978,6 +2042,7 @@ mod tests {
             name: "provider".to_owned(),
             files: Vec::new(),
             exports: vec!["x".repeat(MAX_EXPORT_NAME_LEN + 1)],
+            metadata: Vec::new(),
         };
         let payload = payload_of(&ServerMessage::ResourceStarted { entry });
         assert!(matches!(
@@ -1992,6 +2057,7 @@ mod tests {
             name: "provider".to_owned(),
             files: Vec::new(),
             exports: (0..=MAX_EXPORTS).map(|i| format!("export{i}")).collect(),
+            metadata: Vec::new(),
         };
         let payload = payload_of(&ServerMessage::ResourceStarted { entry });
         assert!(matches!(
@@ -2022,6 +2088,7 @@ mod tests {
                     Some(last) if last.name == entry.name => {
                         last.files.extend(entry.files);
                         last.exports.extend(entry.exports);
+                        last.metadata.extend(entry.metadata);
                     }
                     _ => merged.push(entry),
                 }
@@ -2045,16 +2112,19 @@ mod tests {
                 name: "empty".to_owned(),
                 files: Vec::new(),
                 exports: Vec::new(),
+                metadata: Vec::new(),
             },
             ResourceEntry {
                 name: "big".to_owned(),
                 files: many,
                 exports: Vec::new(),
+                metadata: Vec::new(),
             },
             ResourceEntry {
                 name: "after".to_owned(),
                 files: vec![file("a.lua", FILE_KIND_SHARED, 3)],
                 exports: Vec::new(),
+                metadata: Vec::new(),
             },
         ];
         let frames = encode_resources_snapshot(&resources, MAX).expect("snapshot encodes");
@@ -2075,6 +2145,83 @@ mod tests {
             name: "provider".to_owned(),
             files: many,
             exports: vec!["greet".to_owned(), "bye".to_owned(), "sum".to_owned()],
+            metadata: Vec::new(),
+        }];
+        let frames = encode_resources_snapshot(&resources, MAX).expect("snapshot encodes");
+        assert!(frames.len() > 2, "the snapshot must span several frames");
+        assert_eq!(decode_resources_snapshot(&frames, MAX), resources);
+    }
+
+    #[test]
+    fn resource_started_with_metadata_round_trips() {
+        let entry = ResourceEntry {
+            name: "provider".to_owned(),
+            files: Vec::new(),
+            exports: Vec::new(),
+            metadata: vec![
+                ("version".to_owned(), "1.2.0".to_owned()),
+                ("author".to_owned(), String::new()),
+            ],
+        };
+        let payload = payload_of(&ServerMessage::ResourceStarted {
+            entry: entry.clone(),
+        });
+        assert!(matches!(
+            decode_server_message(&payload),
+            Ok(ServerMessage::ResourceStarted { entry: got }) if got == entry
+        ));
+    }
+
+    #[test]
+    fn metadata_over_its_limits_is_rejected() {
+        let entries = [
+            ResourceEntry {
+                name: "meta".to_owned(),
+                files: Vec::new(),
+                exports: Vec::new(),
+                metadata: vec![("k".repeat(MAX_METADATA_KEY_LEN + 1), "v".to_owned())],
+            },
+            ResourceEntry {
+                name: "meta".to_owned(),
+                files: Vec::new(),
+                exports: Vec::new(),
+                metadata: vec![("k".to_owned(), "v".repeat(MAX_METADATA_VALUE_LEN + 1))],
+            },
+            ResourceEntry {
+                name: "meta".to_owned(),
+                files: Vec::new(),
+                exports: Vec::new(),
+                metadata: (0..=MAX_METADATA)
+                    .map(|i| (format!("key{i}"), String::new()))
+                    .collect(),
+            },
+        ];
+        for entry in entries {
+            let payload = payload_of(&ServerMessage::ResourceStarted { entry });
+            assert!(matches!(
+                decode_server_message(&payload),
+                Err(NetError::Protocol(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn snapshot_carries_the_metadata_once_per_resource() {
+        const MAX: usize = 16 * 1024;
+        let many: Vec<FileEntry> = (0..600)
+            .map(|i| {
+                let byte = u8::try_from(i % 200).expect("fits a byte");
+                file(&format!("file{i}.lua"), FILE_KIND_FILE, byte)
+            })
+            .collect();
+        let resources = vec![ResourceEntry {
+            name: "provider".to_owned(),
+            files: many,
+            exports: Vec::new(),
+            metadata: vec![
+                ("version".to_owned(), "1.2.0".to_owned()),
+                ("author".to_owned(), "someone".to_owned()),
+            ],
         }];
         let frames = encode_resources_snapshot(&resources, MAX).expect("snapshot encodes");
         assert!(frames.len() > 2, "the snapshot must span several frames");
@@ -2100,6 +2247,7 @@ mod tests {
                 name: format!("res{i}"),
                 files: (0..256).map(|_| file("f", FILE_KIND_CLIENT, 0)).collect(),
                 exports: Vec::new(),
+                metadata: Vec::new(),
             })
             .collect();
         let frames = encode_resources_snapshot(&resources, MAX_FRAME).expect("snapshot encodes");

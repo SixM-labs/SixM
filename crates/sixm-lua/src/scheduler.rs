@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use mlua::thread::ThreadStatus;
 use mlua::{Function, MultiValue, Thread, Value as LuaValue};
-use sixm_core::EventSource;
+use sixm_core::{EventSource, ResourceName};
 
 use crate::runtime::LuaRuntime;
 
@@ -21,6 +21,8 @@ const SERVER_SOURCE: i64 = 65_535;
 struct Task {
     thread: Thread,
     source: EventSource,
+    /// The resource whose script started the task, seen as `GetInvokingResource()`.
+    invoker: Option<ResourceName>,
     /// Unique per task; timers carry it so a recycled slot cannot be woken by a stale entry.
     seq: u64,
     /// The handler, passed as the first resume argument to the task wrapper.
@@ -57,10 +59,12 @@ impl Sched {
 
 impl LuaRuntime {
     /// Creates a task that will call `handler` and returns its slot and sequence number.
+    /// `invoker` is what the task sees as `GetInvokingResource()`.
     pub(crate) fn spawn(
         &self,
         handler: Function,
         source: EventSource,
+        invoker: Option<ResourceName>,
     ) -> mlua::Result<(usize, u64)> {
         let idle = self.sched.borrow_mut().idle_threads.pop();
         let thread = match idle {
@@ -73,6 +77,7 @@ impl LuaRuntime {
         let task = Task {
             thread,
             source,
+            invoker,
             seq,
             pending: Some(handler),
         };
@@ -93,7 +98,7 @@ impl LuaRuntime {
 
     /// Creates a `SetTimeout` task that starts after `delay` and returns its id.
     pub(crate) fn set_timeout(&self, delay: Duration, handler: Function) -> mlua::Result<u64> {
-        let (slot, seq) = self.spawn(handler, self.current_source.get())?;
+        let (slot, seq) = self.spawn(handler, self.current_source.get(), self.current_invoker())?;
         let deadline = Instant::now()
             .checked_add(delay)
             .unwrap_or_else(Instant::now);
@@ -153,6 +158,12 @@ impl LuaRuntime {
         None
     }
 
+    /// The invoker of the task that is running now, or `None` outside a task
+    /// that a resource started. Tasks created now inherit it.
+    pub(crate) fn current_invoker(&self) -> Option<ResourceName> {
+        self.current_invoker.borrow().clone()
+    }
+
     /// Makes the `source` global match `source`, the way FiveM exposes it to handlers.
     pub(crate) fn set_source(&self, source: EventSource) -> mlua::Result<()> {
         let value = match source {
@@ -175,9 +186,16 @@ impl LuaRuntime {
                 .tasks
                 .get_mut(slot)
                 .and_then(Option::as_mut)
-                .map(|task| (task.thread.clone(), task.source, task.pending.take()))
+                .map(|task| {
+                    (
+                        task.thread.clone(),
+                        task.source,
+                        task.invoker.clone(),
+                        task.pending.take(),
+                    )
+                })
         };
-        let Some((thread, source, pending)) = taken else {
+        let Some((thread, source, invoker, pending)) = taken else {
             return;
         };
         let resume_args = match pending {
@@ -191,7 +209,9 @@ impl LuaRuntime {
         };
 
         let outer = self.current_source.replace(source);
+        let outer_invoker = std::mem::replace(&mut *self.current_invoker.borrow_mut(), invoker);
         let result = self.step(slot, thread, source, now, resume_args);
+        *self.current_invoker.borrow_mut() = outer_invoker;
         self.current_source.set(outer);
         if let Err(err) = result {
             tracing::error!(target: "sixm::script", "[{}] {err}", self.resource);

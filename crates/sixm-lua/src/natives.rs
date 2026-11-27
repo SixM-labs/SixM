@@ -14,6 +14,7 @@ use crate::events::handle_table;
 use crate::exports;
 use crate::json;
 use crate::players;
+use crate::resources;
 use crate::runtime::{LuaRuntime, Side, bind_fn, lua_err};
 use crate::sandbox::Helpers;
 use crate::scheduler::delay_from_value;
@@ -53,6 +54,7 @@ pub(crate) fn install(runtime: &Rc<LuaRuntime>, helpers: &Helpers) -> mlua::Resu
         }
     }
     state::install(lua, weak, &globals)?;
+    resources::install(lua, weak, &globals)?;
     vector::install(lua, &globals, helpers.type_fn.clone())?;
     globals.raw_set("exports", exports::table(runtime)?)?;
     Ok(())
@@ -66,12 +68,12 @@ fn install_scheduling(
     helpers: &Helpers,
 ) -> mlua::Result<()> {
     let create_thread = bind_fn(lua, weak, |rt, func: Function| {
-        let (slot, seq) = rt.spawn(func, rt.current_source.get())?;
+        let (slot, seq) = rt.spawn(func, rt.current_source.get(), rt.current_invoker())?;
         rt.schedule_next_frame(slot, seq);
         Ok(())
     })?;
     let create_thread_now = bind_fn(lua, weak, |rt, func: Function| {
-        let (slot, _) = rt.spawn(func, rt.current_source.get())?;
+        let (slot, _) = rt.spawn(func, rt.current_source.get(), rt.current_invoker())?;
         rt.run(slot, Instant::now(), MultiValue::new());
         Ok(())
     })?;
@@ -125,7 +127,7 @@ fn install_events(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::
         let values = rt.multi_to_values(args).map_err(lua_err)?;
         let host = rt.host()?;
         let saved: LuaValue = rt.lua.globals().raw_get("source")?;
-        let outcome = host.trigger_event(&name, EventSource::Local, &values);
+        let outcome = host.trigger_event(&name, EventSource::Local, &values, Some(&rt.resource));
         rt.lua.globals().raw_set("source", saved)?;
         outcome.map(|_| ()).map_err(lua_err)
     })?;

@@ -149,7 +149,7 @@ fn writing_to_the_bag_of_an_unknown_player_is_an_error() {
     );
 
     let err = rt
-        .call_export("write", &[])
+        .call_export("write", &[], None)
         .expect_err("player 9 is not connected");
     assert!(
         err.to_string()
@@ -157,7 +157,7 @@ fn writing_to_the_bag_of_an_unknown_player_is_an_error() {
         "error: {err}"
     );
     let err = rt
-        .call_export("bad_id", &[])
+        .call_export("bad_id", &[], None)
         .expect_err("a non-numeric id is refused");
     assert!(
         err.to_string().contains("expected a player id"),
@@ -182,7 +182,7 @@ fn functions_cannot_be_stored_in_state() {
 
     for export in ["direct", "nested"] {
         let err = rt
-            .call_export(export, &[])
+            .call_export(export, &[], None)
             .expect_err("a function cannot be stored");
         assert!(
             err.to_string()
@@ -346,7 +346,7 @@ fn a_write_inside_a_handler_keeps_that_handlers_source() {
         )],
     );
 
-    host.trigger_event("probe", EventSource::Player(7), &[])
+    host.trigger_event("probe", EventSource::Player(7), &[], None)
         .expect("the event is delivered");
     assert_eq!(first(&rt, "last"), Value::Int(7));
 }

@@ -9,10 +9,13 @@ use std::time::Instant;
 
 use sixm_core::{
     ClientHost, ClientTarget, EntityInfo, EntityKind, EventContext, EventSource, FuncRef, Host,
-    PlayerInfo, ResourceName, ScriptError, ScriptRuntime, ServerHost, Value,
+    PlayerInfo, ResourceName, ResourceState, ScriptError, ScriptRuntime, ServerHost, Value,
 };
 use sixm_lua::LuaRuntime;
-use sixm_net::{MAX_EXPORT_NAME_LEN, MAX_EXPORTS, PublishedResource};
+use sixm_net::{
+    MAX_EXPORT_NAME_LEN, MAX_EXPORTS, MAX_METADATA, MAX_METADATA_KEY_LEN, MAX_METADATA_VALUE_LEN,
+    PublishedResource,
+};
 use sixm_resources::{Catalog, DependencyError, ResourceError, ScanIssue};
 use tracing::{error, info, warn};
 
@@ -97,6 +100,9 @@ pub struct ResourceManager {
     advertised: RefCell<Vec<PublishedResource>>,
     /// Hashes of the client files, so that restarts do not read them again.
     hashes: RefCell<FileHashes>,
+    /// Lifecycle states that override the running state while a resource
+    /// starts or stops, oldest first.
+    transitions: RefCell<Vec<(ResourceName, ResourceState)>>,
 }
 
 impl ResourceManager {
@@ -121,6 +127,7 @@ impl ResourceManager {
             host_functions: RefCell::default(),
             advertised: RefCell::default(),
             hashes: RefCell::default(),
+            transitions: RefCell::default(),
         })
     }
 
@@ -341,8 +348,22 @@ impl ResourceManager {
     /// Delivers `event` to every running runtime that handles it, in start
     /// order. Returns whether a handler canceled it.
     pub(crate) fn dispatch(&self, event: &str, source: EventSource, args: &[Value]) -> bool {
+        self.dispatch_from(event, source, args, None)
+    }
+
+    /// Like [`dispatch`](Self::dispatch), for an event that a resource started.
+    /// `invoker` is what the handlers see as `GetInvokingResource()`.
+    pub(crate) fn dispatch_from(
+        &self,
+        event: &str,
+        source: EventSource,
+        args: &[Value],
+        invoker: Option<&ResourceName>,
+    ) -> bool {
         let snapshot = self.snapshot();
-        let ctx = EventContext::new();
+        let ctx = invoker.map_or_else(EventContext::new, |name| {
+            EventContext::invoked_by(name.clone())
+        });
         for runtime in snapshot.iter() {
             if runtime.handles_event(event) {
                 if let Err(err) = runtime.deliver_event(event, source, args, &ctx) {
@@ -377,11 +398,13 @@ impl ResourceManager {
         self.rebuild_snapshot();
         self.advertise(name);
 
+        self.set_transition(name, ResourceState::Starting);
         for file in &files {
             if let Err(err) = runtime.load_script(file) {
                 error!("[{name}] cannot load {}: {err}", file.display());
             }
         }
+        self.clear_transition(name);
 
         self.dispatch_local("onResourceStart", name);
         self.dispatch_local("onServerResourceStart", name);
@@ -430,20 +453,22 @@ impl ResourceManager {
     /// The client files of `name`, hashed and ready to advertise.
     fn client_resource(&self, name: &ResourceName) -> PublishedResource {
         let catalog = self.catalog.borrow();
-        let (files, exports) = match catalog.get(name) {
+        let (files, exports, metadata) = match catalog.get(name) {
             Some(info) => (
                 info.client_files(|dependency| {
                     catalog.get(dependency).map(|other| other.root.clone())
                 }),
                 info.manifest.exports.clone(),
+                info.manifest.metadata.clone(),
             ),
-            None => (Ok(Vec::new()), Vec::new()),
+            None => (Ok(Vec::new()), Vec::new(), Vec::new()),
         };
         let files = files.unwrap_or_else(|err| {
             error!("[{name}] cannot expand its client files, none are sent: {err}");
             Vec::new()
         });
         let exports = advertisable_exports(name, exports);
+        let metadata = advertisable_metadata(name, metadata);
         let mut hashes = self.hashes.borrow_mut();
         PublishedResource {
             name: name.to_string(),
@@ -452,6 +477,7 @@ impl ResourceManager {
                 .filter_map(|file| hashes.publish(file))
                 .collect(),
             exports,
+            metadata,
         }
     }
 
@@ -502,6 +528,7 @@ impl ResourceManager {
     /// Fires the stop events, removes the runtime and its commands, and shuts it down.
     fn stop_runtime(&self, runtime: &Rc<LuaRuntime>) {
         let name = runtime.resource().clone();
+        self.set_transition(&name, ResourceState::Stopping);
         self.dispatch_local("onResourceStop", &name);
         self.dispatch_local("onServerResourceStop", &name);
         self.release_commands_of(&name);
@@ -509,9 +536,26 @@ impl ResourceManager {
             .borrow_mut()
             .retain(|candidate| !Rc::ptr_eq(candidate, runtime));
         self.rebuild_snapshot();
+        self.clear_transition(&name);
         self.withdraw(&name);
         runtime.shutdown();
         info!("Stopping resource {name}");
+    }
+
+    /// Records that `name` is in `state` until [`clear_transition`](Self::clear_transition).
+    fn set_transition(&self, name: &ResourceName, state: ResourceState) {
+        self.transitions.borrow_mut().push((name.clone(), state));
+    }
+
+    /// Removes the newest transition of `name`, if it has one.
+    fn clear_transition(&self, name: &str) {
+        let mut transitions = self.transitions.borrow_mut();
+        if let Some(index) = transitions
+            .iter()
+            .rposition(|(owner, _)| owner.as_ref() == name)
+        {
+            transitions.remove(index);
+        }
     }
 
     /// Removes the script commands that `owner` registered, releasing their handlers
@@ -555,6 +599,39 @@ fn advertisable_exports(name: &ResourceName, exports: Vec<String>) -> Vec<String
     exports
 }
 
+/// The metadata of `name` if clients can receive it: at most [`MAX_METADATA`]
+/// pairs, keys of 1 to [`MAX_METADATA_KEY_LEN`] bytes and values of at most
+/// [`MAX_METADATA_VALUE_LEN`] bytes. Otherwise the error is logged and no
+/// metadata is sent.
+fn advertisable_metadata(
+    name: &ResourceName,
+    metadata: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    if metadata.len() > MAX_METADATA {
+        error!(
+            "[{name}] declares {} metadata pairs, more than the {MAX_METADATA} limit, none are sent",
+            metadata.len()
+        );
+        return Vec::new();
+    }
+    for (key, value) in &metadata {
+        if key.is_empty() || key.len() > MAX_METADATA_KEY_LEN {
+            error!(
+                "[{name}] declares metadata key `{key}`, which is not 1 to {MAX_METADATA_KEY_LEN} bytes, none are sent"
+            );
+            return Vec::new();
+        }
+        if value.len() > MAX_METADATA_VALUE_LEN {
+            error!(
+                "[{name}] declares metadata `{key}` of {} bytes, more than {MAX_METADATA_VALUE_LEN}, none are sent",
+                value.len()
+            );
+            return Vec::new();
+        }
+    }
+    metadata
+}
+
 impl Host for ResourceManager {
     fn server(&self) -> Option<&dyn ServerHost> {
         Some(self)
@@ -569,8 +646,9 @@ impl Host for ResourceManager {
         event: &str,
         source: EventSource,
         args: &[Value],
+        invoker: Option<&ResourceName>,
     ) -> Result<bool, ScriptError> {
-        Ok(self.dispatch(event, source, args))
+        Ok(self.dispatch_from(event, source, args, invoker))
     }
 
     fn call_export(
@@ -578,11 +656,57 @@ impl Host for ResourceManager {
         resource: &str,
         export: &str,
         args: &[Value],
+        invoker: Option<&ResourceName>,
     ) -> Result<Vec<Value>, ScriptError> {
         let runtime = self
             .running_runtime(resource)
             .ok_or_else(|| ScriptError::ResourceNotRunning(resource.to_owned()))?;
-        runtime.call_export(export, args)
+        runtime.call_export(export, args, invoker)
+    }
+
+    /// A transition or a running runtime wins over the catalog, so a running
+    /// resource that a `refresh` dropped from the catalog is still `started`.
+    fn resource_state(&self, resource: &str) -> ResourceState {
+        let transitional = self
+            .transitions
+            .borrow()
+            .iter()
+            .rev()
+            .find(|(owner, _)| owner.as_ref() == resource)
+            .map(|(_, state)| *state);
+        if let Some(state) = transitional {
+            return state;
+        }
+        if self.is_running(resource) {
+            ResourceState::Started
+        } else if self.catalog.borrow().get(resource).is_some() {
+            ResourceState::Stopped
+        } else {
+            ResourceState::Missing
+        }
+    }
+
+    fn resource_names(&self) -> Vec<ResourceName> {
+        self.catalog
+            .borrow()
+            .iter()
+            .map(|info| info.name.clone())
+            .collect()
+    }
+
+    fn resource_metadata(&self, resource: &str, key: &str) -> Vec<String> {
+        self.catalog
+            .borrow()
+            .get(resource)
+            .map(|info| {
+                info.manifest
+                    .metadata
+                    .iter()
+                    .filter(|(name, _)| name == key)
+                    .map(|(_, value)| value.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn call_ref(&self, func: &FuncRef, args: &[Value]) -> Result<Vec<Value>, ScriptError> {

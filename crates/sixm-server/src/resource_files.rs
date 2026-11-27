@@ -115,6 +115,7 @@ pub(crate) fn listing(resource: &PublishedResource) -> ResourceEntry {
             .map(|file| file.entry.clone())
             .collect(),
         exports: resource.exports.clone(),
+        metadata: resource.metadata.clone(),
     }
 }
 
