@@ -7,6 +7,13 @@ may change the protocol and the API.
 
 ## [Unreleased]
 
+## [0.1.0]
+
+First release. There is no GTA VI game client yet (waiting on a PC release);
+the dedicated server, Lua 5.4 and JavaScript scripting runtimes, HTTP/JSON
+endpoints, networking, persistence, routing buckets, and headless/simulated
+client (`SimAdapter`) are complete.
+
 ### Added
 
 - Game adapter contract (`sixm-core::adapter`: `GameAdapter`, `MirrorChange`,
@@ -64,13 +71,6 @@ may change the protocol and the API.
   settings. A player holds only the entities, transforms and entity state of its
   own bucket, and its ped moves with it. Bucket 0 costs nothing extra.
 
-## [0.1.0]
-
-First release. There is no game adapter yet: the server, the scripting runtime
-and the headless client are complete, and a game client is planned.
-
-### Added
-
 - Game-independent core contract (`sixm-core`): script values, the `Host`,
   `ServerHost` and `ClientHost` traits, the `ScriptRuntime` trait, entities
   and access control.
@@ -108,7 +108,8 @@ and the headless client are complete, and a game client is planned.
 
 ### Known gaps
 
-- There is no game adapter. The client is headless.
+- There is no GTA VI game adapter yet; `sixm-client` runs headless by default
+  or with the built-in simulated adapter (`--sim`).
 - `LoadResourceFile` on the client only sees the resource's own data folder.
 
 [Unreleased]: https://github.com/SixM-labs/SixM/compare/v0.1.0...HEAD

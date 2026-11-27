@@ -44,20 +44,23 @@ separate adapters, starting with GTA VI once a PC version is released.
 | State bags (`sixm-server`, `sixm-lua`, `sixm-net`) | ✅ done |
 | Entity sync and player peds | ✅ done (server-owned entities and client-moved peds, no game yet) |
 | Resource key-value storage (`sixm-kvp`) | ✅ done |
-| Headless client: resource sync, client scripts (`sixm-client`) | ✅ done |
+| Headless & simulated client (`sixm-client`, `SimAdapter`) | ✅ done |
+| Game adapter contract (`GameAdapter` / `NativeRegistry`) | ✅ done (Phase 1) |
 | GTA VI game adapter | ⏳ planned (needs a PC release) |
 
 ## Layout
 
 ```
 crates/
-├── sixm-core/        Shared types: script values, the Host and ScriptRuntime traits
+├── sixm-core/        Shared types: script values, Host, ScriptRuntime, and GameAdapter traits
 ├── sixm-resources/   Resource discovery, fxmanifest.lua parsing, dependency order
 ├── sixm-kvp/         Persistent per-resource key-value storage, written by a background thread
 ├── sixm-lua/         Lua 5.4 runtime: scheduler, events, exports, sandbox
 ├── sixm-js/          JavaScript (QuickJS) runtime: timers, Promises, events, exports, sandbox
+├── sixm-net/         QUIC transport and versioned binary protocol
+├── sixm-client/      Headless / simulated client: resource sync, client scripts, SimAdapter
 └── sixm-server/      Server binary: server.cfg, console, resource manager, main loop
-examples/server-data/ A runnable example server with two resources
+examples/server-data/ A runnable example server
 ```
 
 Like FiveM, the split between game-independent and game-specific code is the
