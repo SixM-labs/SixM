@@ -1,7 +1,24 @@
 # SixM documentation
 
-Reference pages for SixM. Each page describes what the code does today. Where
-the code and a page disagree, the code is right.
+Guides and reference pages for SixM. Each page describes what the code does
+today. Where the code and a page disagree, the code is right.
+
+## Guides
+
+- [guides/first-resource.md](guides/first-resource.md): step-by-step guide to
+  creating a resource (`fxmanifest.lua`, shared/server/client scripts, events,
+  and state bags) and testing it with `sixm-server` and `sixm-client`.
+- [guides/from-fivem.md](guides/from-fivem.md): migration and comparison guide
+  for FiveM developers — what works the same, key differences, and what is
+  missing without a game adapter.
+- [guides/permissions.md](guides/permissions.md): ACE permissions with
+  `add_ace`, `add_principal`, `resource.<name>` for `ExecuteCommand`,
+  restricted commands, `IsPlayerAceAllowed`, and `test_ace`.
+- [guides/deployment.md](guides/deployment.md): production deployment with
+  `server.cfg`, identity key and fingerprint pinning, systemd on Linux, Windows
+  service notes, TLS reverse proxy for HTTP, and firewall rules.
+
+## Reference
 
 - [manifest.md](manifest.md): every `fxmanifest.lua` directive, how globs and
   `@other/` references work, dependencies, exports, and the limits that keep a
