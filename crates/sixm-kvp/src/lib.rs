@@ -513,15 +513,15 @@ mod tests {
         let start = Instant::now();
         assert!(store.set("res", "a", b"1"));
         store.flush_due(start);
-        assert!(store.resources["res"].pending.is_empty());
+        assert_eq!(store.resources["res"].pending.len(), 0);
 
         assert!(store.set("res", "b", b"2"));
         store.flush_due(start + FLUSH_INTERVAL / 2);
-        assert!(!store.resources["res"].pending.is_empty());
+        assert_ne!(store.resources["res"].pending.len(), 0);
         assert!(store.dirty);
 
         store.flush_due(start + FLUSH_INTERVAL);
-        assert!(store.resources["res"].pending.is_empty());
+        assert_eq!(store.resources["res"].pending.len(), 0);
         assert!(!store.dirty);
         store.shutdown();
 
