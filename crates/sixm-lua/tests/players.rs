@@ -461,3 +461,132 @@ fn ace_checks_are_server_only() {
         vec![Value::from("nil"), Value::from("nil")]
     );
 }
+
+#[test]
+fn does_player_exist_checks_connected_players_and_is_server_only() {
+    let host = new_host();
+    let rt = start(
+        &host,
+        "exists",
+        &["check"],
+        &[(
+            "main.lua",
+            "exports('check', function(p) return DoesPlayerExist(p) end)\n",
+        )],
+    );
+    join(&host, &[(7, "alice")]);
+
+    for valid in [Value::Int(7), Value::from("7"), Value::Float(7.0)] {
+        assert_eq!(call(&rt, "check", &[valid]), vec![Value::Bool(true)]);
+    }
+    for absent in [
+        Value::Int(9),
+        Value::Int(-1),
+        Value::from("nobody"),
+        Value::Float(7.5),
+        Value::Nil,
+    ] {
+        assert_eq!(call(&rt, "check", &[absent]), vec![Value::Bool(false)]);
+    }
+
+    let client = new_client_host(7);
+    let client_rt = start(
+        &client,
+        "clientside",
+        &["probe"],
+        &[(
+            "main.lua",
+            "exports('probe', function() return type(DoesPlayerExist) end)\n",
+        )],
+    );
+    assert_eq!(first(&client_rt, "probe"), Value::from("nil"));
+}
+
+#[test]
+fn trigger_client_and_latent_events_accept_batch_target_arrays_and_reject_invalid_entries() {
+    let host = new_host();
+    let rt = start(
+        &host,
+        "batch",
+        &["send", "send_latent", "bad", "bad_latent"],
+        &[(
+            "main.lua",
+            "exports('send', function(targets) TriggerClientEvent('ev', targets, 'hi', 42) end)\n\
+             exports('send_latent', function(targets) TriggerLatentClientEvent('lev', targets, 5000, 'data') end)\n\
+             exports('bad', function(targets) return pcall(TriggerClientEvent, 'ev', targets, 'hi') end)\n\
+             exports('bad_latent', function(targets) return pcall(TriggerLatentClientEvent, 'lev', targets, 5000, 'data') end)\n",
+        )],
+    );
+
+    call(
+        &rt,
+        "send",
+        &[Value::Array(vec![Value::Int(1), Value::from("2")])],
+    );
+    call(&rt, "send", &[Value::Array(Vec::new())]);
+    assert_eq!(
+        *host.client_events.borrow(),
+        vec![
+            (
+                "ev".to_owned(),
+                ClientTarget::Player(1),
+                vec![Value::from("hi"), Value::Int(42)],
+            ),
+            (
+                "ev".to_owned(),
+                ClientTarget::Player(2),
+                vec![Value::from("hi"), Value::Int(42)],
+            ),
+        ]
+    );
+
+    call(
+        &rt,
+        "send_latent",
+        &[Value::Array(vec![Value::from("3"), Value::Int(4)])],
+    );
+    call(&rt, "send_latent", &[Value::Array(Vec::new())]);
+    assert_eq!(
+        *host.latent_client_events.borrow(),
+        vec![
+            (
+                "lev".to_owned(),
+                ClientTarget::Player(3),
+                vec![Value::from("data")],
+                5000,
+            ),
+            (
+                "lev".to_owned(),
+                ClientTarget::Player(4),
+                vec![Value::from("data")],
+                5000,
+            ),
+        ]
+    );
+
+    host.client_events.borrow_mut().clear();
+    host.latent_client_events.borrow_mut().clear();
+
+    let bad_targets = [
+        Value::Array(vec![Value::Int(1), Value::Int(-1)]),
+        Value::Array(vec![Value::Int(-2)]),
+        Value::Array(vec![Value::Int(1), Value::from("abc")]),
+        Value::Map(vec![(Value::from("a"), Value::Int(1))]),
+        Value::Map(vec![
+            (Value::Int(1), Value::Int(1)),
+            (Value::Int(3), Value::Int(2)),
+        ]),
+    ];
+    for target in bad_targets {
+        let out = call(&rt, "bad", std::slice::from_ref(&target));
+        assert_eq!(out[0], Value::Bool(false));
+        assert!(error_text(&out[1]).contains("expected a player id"));
+
+        let latent_out = call(&rt, "bad_latent", &[target]);
+        assert_eq!(latent_out[0], Value::Bool(false));
+        assert!(error_text(&latent_out[1]).contains("expected a player id"));
+    }
+
+    assert!(host.client_events.borrow().is_empty());
+    assert!(host.latent_client_events.borrow().is_empty());
+}

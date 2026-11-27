@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SixM Server Admin</title>
+<style>
+  :root {
+    --bg: #0f131a;
+    --panel: #171d27;
+    --border: #283244;
+    --text: #e6edf5;
+    --muted: #8b9bb4;
+    --accent: #4c9aff;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --danger: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.45;
+  }
+  header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  h1 { margin: 0; font-size: 18px; font-weight: 600; }
+  .subtitle { color: var(--muted); font-size: 13px; }
+  main {
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: 20px 24px 40px;
+    display: grid;
+    gap: 18px;
+  }
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 14px;
+  }
+  .card, .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .card-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .card-value { font-size: 24px; font-weight: 600; margin-top: 4px; }
+  .grid-2 {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 18px;
+  }
+  h2 { margin: 0 0 12px; font-size: 15px; font-weight: 600; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  input, button {
+    font: inherit;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    padding: 8px 10px;
+    background: var(--bg);
+    color: var(--text);
+  }
+  input { flex: 1 1 180px; min-width: 0; }
+  button {
+    background: #212b3a;
+    cursor: pointer;
+    font-weight: 500;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: #1f4e8c; border-color: #2f6fc2; }
+  button.small { padding: 4px 8px; font-size: 12px; }
+  pre.console {
+    margin: 12px 0 0;
+    padding: 12px;
+    background: #0a0d12;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    max-height: 240px;
+    overflow: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; }
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+    background: #1d2b1f;
+    color: var(--ok);
+    border: 1px solid #2b4a30;
+  }
+  .pill.err { background: #2d181a; color: var(--danger); border-color: #5b262a; }
+  .list { display: flex; flex-direction: column; gap: 8px; max-height: 300px; overflow: auto; }
+  .res-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .muted { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1 id="hostname">SixM Server</h1>
+    <div class="subtitle" id="server-version">Connecting...</div>
+  </div>
+  <div class="row">
+    <span class="pill" id="status-pill">Live</span>
+    <button id="refresh-btn" type="button">Refresh Now</button>
+  </div>
+</header>
+
+<main>
+  <section class="cards">
+    <div class="card">
+      <div class="card-label">Players</div>
+      <div class="card-value" id="players-count">0 / 0</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Running Resources</div>
+      <div class="card-value" id="resources-count">0</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Health</div>
+      <div class="card-value" id="health-status">Checking</div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Remote Console (RCON)</h2>
+    <form id="rcon-form" class="row">
+      <input id="rcon-password" type="password" autocomplete="current-password" placeholder="RCON password" required>
+      <input id="rcon-command" type="text" placeholder="Command (e.g. perf, players, restart myres)" required>
+      <button class="primary" type="submit">Run Command</button>
+    </form>
+    <div class="row" style="margin-top: 10px;">
+      <button class="small" type="button" data-cmd="perf">perf</button>
+      <button class="small" type="button" data-cmd="players">players</button>
+      <button class="small" type="button" data-cmd="entities">entities</button>
+      <button class="small" type="button" data-cmd="refresh">refresh</button>
+      <button class="small" type="button" data-cmd="help">help</button>
+    </div>
+    <pre class="console" id="rcon-output">Enter RCON password and run a command.</pre>
+  </section>
+
+  <section class="grid-2">
+    <div class="panel">
+      <h2>Connected Players</h2>
+      <table>
+        <thead>
+          <tr><th>ID</th><th>Name</th><th>Ping</th><th>Identifiers</th></tr>
+        </thead>
+        <tbody id="players-body">
+          <tr><td colspan="4" class="muted">No players connected.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <h2>Running Resources</h2>
+      <div class="list" id="resources-list">
+        <div class="muted">No running resources.</div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+(function () {
+  const el = (id) => document.getElementById(id);
+  const consoleOut = el("rcon-output");
+
+  function appendOutput(text) {
+    const stamp = new Date().toLocaleTimeString();
+    consoleOut.textContent = "[" + stamp + "] " + text + "\n" + consoleOut.textContent;
+  }
+
+  async function runRcon(command) {
+    const password = el("rcon-password").value;
+    if (!password) {
+      appendOutput("Error: enter the RCON password first.");
+      return;
+    }
+    try {
+      const res = await fetch("/rcon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password, command }),
+      });
+      if (!res.ok) {
+        const msg = await res.text();
+        appendOutput("RCON " + res.status + ": " + msg);
+        return;
+      }
+      const data = await res.json();
+      const lines = Array.isArray(data.output) && data.output.length
+        ? data.output.join("\n")
+        : "(ok, no output)";
+      appendOutput("> " + command + "\n" + lines);
+      await refreshAll();
+    } catch (err) {
+      appendOutput("Request failed: " + err);
+    }
+  }
+
+  function renderPlayers(players) {
+    const tbody = el("players-body");
+    tbody.replaceChildren();
+    if (!Array.isArray(players) || players.length === 0) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 4;
+      td.className = "muted";
+      td.textContent = "No players connected.";
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+      return;
+    }
+    for (const p of players) {
+      const tr = document.createElement("tr");
+      const idTd = document.createElement("td");
+      idTd.textContent = String(p.id);
+      const nameTd = document.createElement("td");
+      nameTd.textContent = p.name || "";
+      const pingTd = document.createElement("td");
+      pingTd.textContent = p.ping == null ? "-" : p.ping + " ms";
+      const idsTd = document.createElement("td");
+      idsTd.textContent = Array.isArray(p.identifiers) ? p.identifiers.join(", ") : "hidden";
+      tr.append(idTd, nameTd, pingTd, idsTd);
+      tbody.appendChild(tr);
+    }
+  }
+
+  function renderResources(resources) {
+    const list = el("resources-list");
+    list.replaceChildren();
+    if (!Array.isArray(resources) || resources.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "muted";
+      empty.textContent = "No running resources.";
+      list.appendChild(empty);
+      return;
+    }
+    for (const name of resources) {
+      const item = document.createElement("div");
+      item.className = "res-item";
+      const label = document.createElement("span");
+      label.textContent = name;
+      const actions = document.createElement("div");
+      actions.className = "row";
+
+      const restartBtn = document.createElement("button");
+      restartBtn.type = "button";
+      restartBtn.className = "small";
+      restartBtn.textContent = "Restart";
+      restartBtn.addEventListener("click", () => runRcon("restart " + name));
+
+      const stopBtn = document.createElement("button");
+      stopBtn.type = "button";
+      stopBtn.className = "small";
+      stopBtn.textContent = "Stop";
+      stopBtn.addEventListener("click", () => runRcon("stop " + name));
+
+      actions.append(restartBtn, stopBtn);
+      item.append(label, actions);
+      list.appendChild(item);
+    }
+  }
+
+  async function refreshAll() {
+    const pill = el("status-pill");
+    try {
+      const [infoRes, dynRes, playersRes, healthRes] = await Promise.all([
+        fetch("/info.json"),
+        fetch("/dynamic.json"),
+        fetch("/players.json"),
+        fetch("/healthz"),
+      ]);
+      if (!infoRes.ok || !dynRes.ok || !playersRes.ok) {
+        throw new Error("HTTP error");
+      }
+      const [info, dyn, players, health] = await Promise.all([
+        infoRes.json(),
+        dynRes.json(),
+        playersRes.json(),
+        healthRes.ok ? healthRes.json() : Promise.resolve({ ok: false }),
+      ]);
+      el("hostname").textContent = dyn.hostname || "SixM Server";
+      el("server-version").textContent = info.server || "SixM";
+      el("players-count").textContent = (dyn.clients ?? 0) + " / " + (dyn.maxclients ?? 0);
+      const resources = Array.isArray(info.resources) ? info.resources : [];
+      el("resources-count").textContent = String(resources.length);
+      el("health-status").textContent = health.ok ? "OK" : "Degraded";
+      renderPlayers(players);
+      renderResources(resources);
+      pill.textContent = "Live";
+      pill.className = "pill";
+    } catch (_) {
+      pill.textContent = "Offline";
+      pill.className = "pill err";
+      el("health-status").textContent = "Unreachable";
+    }
+  }
+
+  el("rcon-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const cmd = el("rcon-command").value.trim();
+    if (cmd) {
+      runRcon(cmd);
+    }
+  });
+  for (const btn of document.querySelectorAll("button[data-cmd]")) {
+    btn.addEventListener("click", () => runRcon(btn.getAttribute("data-cmd")));
+  }
+  el("refresh-btn").addEventListener("click", refreshAll);
+
+  refreshAll();
+  setInterval(refreshAll, 5000);
+})();
+</script>
+</body>
+</html>

@@ -573,6 +573,11 @@ pub trait ServerHost {
         false
     }
 
+    /// Restarts `resource` on behalf of caller resource `caller` (`command.restart`).
+    fn restart_resource(&self, _caller: &str, _resource: &str) -> bool {
+        false
+    }
+
     /// Server player id of the client that first created `entity`, if any.
     fn entity_first_owner(&self, _entity: u32) -> Option<u32> {
         None

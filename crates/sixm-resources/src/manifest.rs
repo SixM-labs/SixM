@@ -41,11 +41,12 @@ const BLOCKED_GLOBALS: [&str; 13] = [
 ];
 /// Directive names that take a list. Their entries are normalised to the
 /// singular even when given a plain string.
-const PLURAL_DIRECTIVES: [&str; 8] = [
+const PLURAL_DIRECTIVES: [&str; 9] = [
     "dependencies",
     "exports",
     "files",
     "games",
+    "provides",
     "server_exports",
     "server_scripts",
     "client_scripts",
@@ -70,6 +71,9 @@ pub struct Manifest {
     /// Resources that must start before this one. Entries starting with `/`
     /// are server or game constraints and are kept here unchanged.
     pub dependencies: Vec<String>,
+    /// Virtual resource names this resource provides as aliases (e.g.
+    /// `provide 'mysql-async'`).
+    pub provides: Vec<String>,
     /// Exports registered by server scripts.
     pub server_exports: Vec<String>,
     /// Exports registered by client scripts.
@@ -110,7 +114,7 @@ pub fn parse_manifest(source: &str, chunk_name: &str) -> Result<Manifest, Manife
         });
     }
     outcome.map_err(lua_error)?;
-    Ok(build(sink.entries.take()))
+    build(sink.entries.take())
 }
 
 /// Entries recorded while the manifest runs, in declaration order.
@@ -262,7 +266,7 @@ fn directive_key(name: &str, is_table: bool) -> String {
 
 /// Sorts recorded entries into the manifest fields. Anything else becomes
 /// metadata.
-fn build(entries: Vec<(String, String)>) -> Manifest {
+fn build(entries: Vec<(String, String)>) -> Result<Manifest, ManifestError> {
     let mut manifest = Manifest::default();
     for (key, value) in entries {
         match key.as_str() {
@@ -273,13 +277,19 @@ fn build(entries: Vec<(String, String)>) -> Manifest {
             "shared_script" => manifest.shared_scripts.push(value),
             "file" => manifest.files.push(value),
             "dependency" => manifest.dependencies.push(value),
+            "provide" => {
+                if !sixm_core::is_resource_component(&value) {
+                    return Err(ManifestError::InvalidProvide { name: value });
+                }
+                manifest.provides.push(value);
+            }
             "server_export" => manifest.server_exports.push(value),
             "export" => manifest.exports.push(value),
             "lua54" => manifest.lua54 = value == "yes",
             _ => manifest.metadata.push((key, value)),
         }
     }
-    manifest
+    Ok(manifest)
 }
 
 /// Converts a Lua error into a [`ManifestError`], keeping the Lua message
@@ -495,5 +505,37 @@ mod tests {
         let manifest = parse("author 'me'\ndescription 'x'\nauthor 'you'");
         let keys: Vec<&str> = manifest.metadata.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(keys, ["author", "description", "author"]);
+    }
+
+    #[test]
+    fn provide_and_provides_populate_provides_field() {
+        let manifest = parse(
+            "provide 'mysql-async'\nprovides { 'ghmattimysql', 'db-core' }\nprovides 'legacy-sql'",
+        );
+        assert_eq!(
+            manifest.provides,
+            ["mysql-async", "ghmattimysql", "db-core", "legacy-sql"]
+        );
+        assert_eq!(manifest.metadata, Vec::<(String, String)>::new());
+    }
+
+    #[test]
+    fn invalid_provide_names_are_rejected() {
+        for bad in [
+            "", "a/b", "a\\\\b", "../evil", "..", "foo.", "foo ", "CON", "bad:name",
+        ] {
+            let source = format!("provide '{bad}'");
+            let error = parse_manifest(&source, "@t/fxmanifest.lua").unwrap_err();
+            assert!(
+                matches!(error, ManifestError::InvalidProvide { .. }),
+                "expected InvalidProvide for {bad:?}, got {error}"
+            );
+        }
+        let table_error =
+            parse_manifest("provides { 'valid', '' }", "@t/fxmanifest.lua").unwrap_err();
+        assert!(matches!(
+            table_error,
+            ManifestError::InvalidProvide { ref name } if name.is_empty()
+        ));
     }
 }

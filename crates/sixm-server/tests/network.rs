@@ -47,6 +47,15 @@ RegisterNetEvent('net:ping', function(text)
     TriggerClientEvent('net:pong', source, 'pong: ' .. text)
 end)
 
+HITS = 0
+RegisterNetEvent('flood:hit', function()
+    HITS = HITS + 1
+end)
+
+function hits()
+    return HITS
+end
+
 function log()
     return table.concat(LOG, ' ')
 end
@@ -100,6 +109,7 @@ fn harness() -> Loopback {
             "kick",
             "bad_send",
             "late",
+            "hits",
         ],
     }])
 }
@@ -282,4 +292,60 @@ fn an_invalid_endpoint_is_reported_without_starting_the_network() {
         .start_network(sender)
         .expect_err("the endpoint is not an address");
     assert!(err.to_string().contains("not-an-address"), "error: {err}");
+}
+
+#[test]
+fn player_event_rate_limit_drops_flood_and_zero_disables() {
+    use sixm_core::Host;
+    use std::thread;
+    use std::time::Duration;
+
+    let h = harness();
+    h.fx.server.execute("set sv_playerEventRateLimit 3"); // burst = 6
+    let alice = h.connect("Alice").expect("Alice is admitted");
+
+    for _ in 0..15 {
+        alice
+            .send_event("flood:hit", &[])
+            .expect("send flood event");
+    }
+    // Drain the 15 flood events over loopback (< 1 token refills at 3/s during 50 ms),
+    // then wait >334 ms for 1 token to refill before sending the net:ping barrier.
+    thread::sleep(Duration::from_millis(50));
+    h.pump();
+    thread::sleep(Duration::from_millis(400));
+    alice
+        .send_event("net:ping", &[Value::from("after-flood")])
+        .expect("send sync ping");
+    assert_eq!(
+        h.expect_event(&alice, "net:pong"),
+        vec![Value::from("pong: after-flood")]
+    );
+
+    let after_burst =
+        h.fx.manager()
+            .call_export("net", "hits", &[], None)
+            .expect("hits");
+    assert_eq!(after_burst, vec![Value::Int(6)]);
+
+    // Setting limit to 0 disables rate limiting so all 15 events arrive.
+    h.fx.server.execute("set sv_playerEventRateLimit 0");
+    for _ in 0..15 {
+        alice
+            .send_event("flood:hit", &[])
+            .expect("send unthrottled event");
+    }
+    alice
+        .send_event("net:ping", &[Value::from("unthrottled")])
+        .expect("send sync ping");
+    assert_eq!(
+        h.expect_event(&alice, "net:pong"),
+        vec![Value::from("pong: unthrottled")]
+    );
+
+    let after_disabled =
+        h.fx.manager()
+            .call_export("net", "hits", &[], None)
+            .expect("hits");
+    assert_eq!(after_disabled, vec![Value::Int(21)]);
 }

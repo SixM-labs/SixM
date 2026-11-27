@@ -74,6 +74,11 @@ impl ResourceInfo {
         })
     }
 
+    /// Virtual resource names this resource provides as aliases.
+    pub fn provides(&self) -> &[String] {
+        &self.manifest.provides
+    }
+
     /// Server-side script files in load order: `shared_scripts` first, then
     /// `server_scripts`.
     ///
@@ -354,7 +359,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::ResourceInfo;
-    use crate::error::ResourceError;
+    use crate::catalog::Catalog;
+    use crate::error::{ManifestError, ResourceError};
 
     fn write(path: &Path, contents: &str) {
         fs::create_dir_all(path.parent().expect("parent")).expect("create dirs");
@@ -665,5 +671,59 @@ mod tests {
         let info = ResourceInfo::load(&root).expect("load");
         let error = info.client_files(no_resolver).unwrap_err();
         assert!(matches!(error, ResourceError::PathEscape { .. }));
+    }
+
+    #[test]
+    fn provides_returns_declared_aliases() {
+        let (_dir, root) = resource("provide 'mysql-async'\nprovides { 'db-a', 'db-b' }", &[]);
+        let info = ResourceInfo::load(&root).expect("load");
+        assert_eq!(info.provides(), ["mysql-async", "db-a", "db-b"]);
+    }
+
+    #[test]
+    fn invalid_provide_in_manifest_fails_resource_load() {
+        let (_dir, root) = resource("provide '../escape'", &[]);
+        let error = ResourceInfo::load(&root).unwrap_err();
+        assert!(matches!(
+            error,
+            ResourceError::Manifest {
+                source: ManifestError::InvalidProvide { ref name },
+                ..
+            } if name == "../escape"
+        ));
+    }
+
+    #[test]
+    fn at_reference_resolves_through_catalog_alias() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let provider = dir.path().join("oxmysql");
+        write(&provider.join("fxmanifest.lua"), "provide 'mysql-async'");
+        write(&provider.join("lib/MySQL.lua"), "");
+        write(&provider.join("lib/extra.lua"), "");
+
+        let consumer = dir.path().join("my_res");
+        write(
+            &consumer.join("fxmanifest.lua"),
+            "server_scripts { '@mysql-async/lib/MySQL.lua', '@mysql-async/lib/*.lua' }\n\
+             client_scripts { '@mysql-async/lib/MySQL.lua' }",
+        );
+
+        let (catalog, issues) = Catalog::scan(&[dir.path().to_path_buf()]);
+        assert!(issues.is_empty(), "{issues:?}");
+
+        let info = catalog.get("my_res").expect("consumer loaded");
+        let resolve = |name: &str| catalog.get(name).map(|res| res.root.clone());
+
+        let server_files = info.server_script_files(resolve).expect("server files");
+        assert_eq!(
+            server_files,
+            [
+                provider.join("lib/MySQL.lua"),
+                provider.join("lib/extra.lua")
+            ]
+        );
+
+        let client_files = client_names(info, resolve);
+        assert_eq!(client_files, ["ClientScript:@mysql-async/lib/MySQL.lua"]);
     }
 }

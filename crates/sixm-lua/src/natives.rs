@@ -16,6 +16,7 @@ use crate::exports;
 use crate::http;
 use crate::json;
 use crate::kvp;
+use crate::msgpack;
 use crate::players;
 use crate::resources;
 use crate::runtime::{LuaRuntime, Side, bind_fn, lua_err};
@@ -25,7 +26,7 @@ use crate::state;
 use crate::vector;
 use crate::web;
 
-/// Installs every global function, the `Citizen` table, `exports` and `json`.
+/// Installs every global function, the `Citizen` table, `exports`, `json` and `msgpack`.
 ///
 /// The common globals are installed on both sides. The player and entity
 /// creation functions are server-only, and the connection and game pool
@@ -162,7 +163,7 @@ fn install_events(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::
     Ok(())
 }
 
-/// Installs the resource, file, convar, command and timer functions, plus `json`.
+/// Installs the resource, file, convar, command and timer functions, plus `json` and `msgpack`.
 fn install_host(
     lua: &Lua,
     weak: &Weak<LuaRuntime>,
@@ -200,31 +201,6 @@ fn install_host(
                 .save_resource_file(&resource, &path, data.as_bytes().as_ref()))
         },
     )?;
-    let get_convar = bind_fn(
-        lua,
-        weak,
-        |rt, (name, default): (String, LuaValue)| match rt
-            .host()?
-            .get_resource_convar(&rt.resource, &name)
-        {
-            Some(value) => Ok(LuaValue::String(rt.lua.create_string(&value)?)),
-            None => Ok(default),
-        },
-    )?;
-    let get_convar_int = bind_fn(lua, weak, |rt, (name, default): (String, i64)| {
-        let parsed = rt
-            .host()?
-            .get_resource_convar(&rt.resource, &name)
-            .and_then(|value| value.trim().parse::<i64>().ok());
-        Ok(parsed.unwrap_or(default))
-    })?;
-    let get_convar_bool = bind_fn(lua, weak, |rt, (name, default): (String, bool)| {
-        let parsed = rt
-            .host()?
-            .get_resource_convar(&rt.resource, &name)
-            .and_then(|value| parse_bool(&value));
-        Ok(parsed.unwrap_or(default))
-    })?;
     let execute_command = bind_fn(lua, weak, |rt, (line,): (String,)| {
         rt.host()?.execute_command(&line, Some(&rt.resource));
         Ok(())
@@ -247,9 +223,6 @@ fn install_host(
         ("GetResourcePath", resource_path),
         ("LoadResourceFile", load_resource_file),
         ("SaveResourceFile", save_resource_file),
-        ("GetConvar", get_convar),
-        ("GetConvarInt", get_convar_int),
-        ("GetConvarBool", get_convar_bool),
         ("ExecuteCommand", execute_command),
         ("RegisterCommand", register_command),
         ("GetGameTimer", get_game_timer),
@@ -259,8 +232,55 @@ fn install_host(
     for (name, function) in host_functions {
         globals.raw_set(name, function)?;
     }
+    install_convars(lua, weak, globals)?;
     install_convar_listeners(lua, weak, globals)?;
     globals.raw_set("json", json::table(lua)?)?;
+    globals.raw_set("msgpack", msgpack::table(lua)?)?;
+    Ok(())
+}
+
+fn install_convars(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::Result<()> {
+    let get_convar = bind_fn(
+        lua,
+        weak,
+        |rt, (name, default): (String, LuaValue)| match rt
+            .host()?
+            .get_resource_convar(&rt.resource, &name)
+        {
+            Some(value) => Ok(LuaValue::String(rt.lua.create_string(&value)?)),
+            None => Ok(default),
+        },
+    )?;
+    let get_convar_int = bind_fn(lua, weak, |rt, (name, default): (String, i64)| {
+        let parsed = rt
+            .host()?
+            .get_resource_convar(&rt.resource, &name)
+            .and_then(|value| value.trim().parse::<i64>().ok());
+        Ok(parsed.unwrap_or(default))
+    })?;
+    let get_convar_float = bind_fn(lua, weak, |rt, (name, default): (String, f64)| {
+        let parsed = rt
+            .host()?
+            .get_resource_convar(&rt.resource, &name)
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .filter(|value| value.is_finite());
+        Ok(parsed.unwrap_or(default))
+    })?;
+    let get_convar_bool = bind_fn(lua, weak, |rt, (name, default): (String, bool)| {
+        let parsed = rt
+            .host()?
+            .get_resource_convar(&rt.resource, &name)
+            .and_then(|value| parse_bool(&value));
+        Ok(parsed.unwrap_or(default))
+    })?;
+    for (name, function) in [
+        ("GetConvar", get_convar),
+        ("GetConvarInt", get_convar_int),
+        ("GetConvarFloat", get_convar_float),
+        ("GetConvarBool", get_convar_bool),
+    ] {
+        globals.raw_set(name, function)?;
+    }
     Ok(())
 }
 

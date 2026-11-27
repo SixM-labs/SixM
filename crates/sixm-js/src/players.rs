@@ -1,7 +1,7 @@
 //! Server-only player functions: `emitNet` / `TriggerClientEvent`,
 //! `TriggerLatentClientEvent`, `getPlayers` / `GetPlayers`, `GetNumPlayerIndices`,
-//! `GetPlayerName`, `GetPlayerPing`, `GetPlayerPed`, `GetPlayerEndpoint`,
-//! identifier natives, `DropPlayer`, ACE checks, and `Player(id)`.
+//! `DoesPlayerExist`, `GetPlayerName`, `GetPlayerPing`, `GetPlayerPed`,
+//! `GetPlayerEndpoint`, identifier natives, `DropPlayer`, ACE checks, and `Player(id)`.
 
 use std::rc::Weak;
 
@@ -95,10 +95,24 @@ fn install_roster<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::Resu
             },
         )?
     };
+    let does_player_exist = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, player: JsValue<'js>| -> rquickjs::Result<bool> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                let Some(id) = player_id(&player) else {
+                    return Ok(false);
+                };
+                Ok(server(&ctx, &*rt.host(&ctx)?)?.player_info(id).is_some())
+            },
+        )?
+    };
     for (name, func) in [
         ("getPlayers", get_players.clone()),
         ("GetPlayers", get_players),
         ("GetNumPlayerIndices", get_num_player_indices),
+        ("DoesPlayerExist", does_player_exist),
         ("GetPlayerName", get_player_name),
         ("GetPlayerPing", get_player_ping),
         ("GetPlayerPed", get_player_ped),
@@ -319,14 +333,17 @@ fn install_event_senders<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickj
                   args: Rest<JsValue<'js>>|
                   -> rquickjs::Result<()> {
                 let rt = JsRuntime::upgrade(&ctx, &weak)?;
-                let target = client_target(&ctx, &target)?;
+                let targets = client_targets(&ctx, &target, "TriggerClientEvent")?;
                 let values = rt
                     .to_network_values(&ctx, &args.0)
                     .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))?;
                 let host = rt.host(&ctx)?;
-                server(&ctx, &*host)?
-                    .trigger_client_event(&name, target, &values)
-                    .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))
+                let srv = server(&ctx, &*host)?;
+                for target in targets {
+                    srv.trigger_client_event(&name, target, &values)
+                        .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))?;
+                }
+                Ok(())
             },
         )?
     };
@@ -342,15 +359,18 @@ fn install_event_senders<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickj
                   args: Rest<JsValue<'js>>|
                   -> rquickjs::Result<()> {
                 let rt = JsRuntime::upgrade(&ctx, &weak)?;
-                let target = client_target(&ctx, &target)?;
+                let targets = client_targets(&ctx, &target, "TriggerLatentClientEvent")?;
                 let bps = latent_bps(&ctx, &bps)?;
                 let values = rt
                     .to_network_values(&ctx, &args.0)
                     .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))?;
                 let host = rt.host(&ctx)?;
-                server(&ctx, &*host)?
-                    .trigger_latent_client_event(&name, target, &values, bps)
-                    .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))
+                let srv = server(&ctx, &*host)?;
+                for target in targets {
+                    srv.trigger_latent_client_event(&name, target, &values, bps)
+                        .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))?;
+                }
+                Ok(())
             },
         )?
     };
@@ -395,13 +415,26 @@ fn identifier_kind(identifier: &str) -> Option<&str> {
     identifier.split_once(':').map(|(kind, _)| kind)
 }
 
-fn client_target(ctx: &Ctx<'_>, value: &JsValue<'_>) -> rquickjs::Result<ClientTarget> {
+fn client_targets(
+    ctx: &Ctx<'_>,
+    value: &JsValue<'_>,
+    function: &str,
+) -> rquickjs::Result<Vec<ClientTarget>> {
+    if let Some(arr) = value.as_array() {
+        let mut targets = Vec::with_capacity(arr.len());
+        for index in 0..arr.len() {
+            let item: JsValue<'_> = arr.get(index)?;
+            let id = player_id(&item).ok_or_else(|| invalid_player(ctx, function))?;
+            targets.push(ClientTarget::Player(id));
+        }
+        return Ok(targets);
+    }
     match whole_number(value) {
-        Some(-1) => Ok(ClientTarget::All),
+        Some(-1) => Ok(vec![ClientTarget::All]),
         number => number
             .and_then(|n| u32::try_from(n).ok())
-            .map(ClientTarget::Player)
-            .ok_or_else(|| invalid_player(ctx, "TriggerClientEvent")),
+            .map(|id| vec![ClientTarget::Player(id)])
+            .ok_or_else(|| invalid_player(ctx, function)),
     }
 }
 

@@ -57,7 +57,8 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
     Ok(())
 }
 
-/// Installs server-only resource lifecycle natives: `StartResource`, `StopResource`.
+/// Installs server-only resource lifecycle natives: `StartResource`, `StopResource`,
+/// `RestartResource`.
 pub(crate) fn install_server(
     lua: &Lua,
     weak: &Weak<LuaRuntime>,
@@ -69,8 +70,12 @@ pub(crate) fn install_server(
     let stop_resource = bind_fn(lua, weak, |rt, (name,): (String,)| {
         Ok(server(&*rt.host()?)?.stop_resource(rt.resource.as_ref(), &name))
     })?;
+    let restart_resource = bind_fn(lua, weak, |rt, (name,): (String,)| {
+        Ok(server(&*rt.host()?)?.restart_resource(rt.resource.as_ref(), &name))
+    })?;
     globals.raw_set("StartResource", start_resource)?;
     globals.raw_set("StopResource", stop_resource)?;
+    globals.raw_set("RestartResource", restart_resource)?;
     Ok(())
 }
 

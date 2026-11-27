@@ -22,9 +22,12 @@ mod resource_files;
 mod scope;
 mod server;
 mod state;
+mod watch;
 mod web;
 
-pub use config::{ArgError, Invocation, TokenError, parse_args, tokenize};
+pub use config::{
+    ArgError, CliInvocation, CliOptions, Invocation, TokenError, parse_args, parse_cli, tokenize,
+};
 pub use console::spawn_stdin_reader;
 pub use manager::{ManagerError, ResourceManager};
 pub use server::{Input, Server};

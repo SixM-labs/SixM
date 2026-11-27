@@ -10,8 +10,8 @@ Each entry says where it exists:
 - **client**: client scripts only
 
 Sources: `crates/sixm-lua/src/` (`natives.rs`, `client.rs`, `players.rs`,
-`state.rs`, `exports.rs`, `events.rs`, `json.rs`, `sandbox.rs`,
-`scheduler.rs`). Behaviour checks are in `crates/sixm-lua/tests/`.
+`state.rs`, `exports.rs`, `events.rs`, `json.rs`, `msgpack.rs`, `resources.rs`,
+`sandbox.rs`, `scheduler.rs`). Behaviour checks are in `crates/sixm-lua/tests/`.
 
 ## Scheduling
 
@@ -83,9 +83,9 @@ local v = Citizen.Await(p)
 | `CancelEvent` | both | `CancelEvent()`. Marks the current dispatch as canceled. |
 | `WasEventCanceled` | both | `WasEventCanceled()`. Returns whether the current dispatch was canceled. Handlers in other resources see the flag too. |
 | `TriggerServerEvent` | client | `TriggerServerEvent(name, ...)`. Sends an event to the server. Function values cannot be sent. |
-| `TriggerClientEvent` | server | `TriggerClientEvent(name, target, ...)`. Sends an event to one player id, or to every player with `-1`. Function values cannot be sent. |
+| `TriggerClientEvent` | server | `TriggerClientEvent(name, target, ...)`. Sends an event to one player id, a sequence table of player ids (for example `{ 1, 2 }`; an empty table sends to nobody), or `-1` for every player (`-1` is not allowed inside a table). Function values cannot be sent. |
 | `TriggerLatentServerEvent` | client | `TriggerLatentServerEvent(name, bytesPerSecond, ...)`. Sends an event to the server paced at the requested byte rate. Nonpositive rates select 25,000 bytes per second. Positive rates are clamped to 1 KiB/s through 100 MiB/s. Function values cannot be sent. |
-| `TriggerLatentClientEvent` | server | `TriggerLatentClientEvent(name, target, bytesPerSecond, ...)`. Sends an event to one player id, or to every player with `-1`, paced at the requested byte rate. Nonpositive rates select 25,000 bytes per second. Positive rates are clamped to 1 KiB/s through 100 MiB/s. Function values cannot be sent. |
+| `TriggerLatentClientEvent` | server | `TriggerLatentClientEvent(name, target, bytesPerSecond, ...)`. Sends an event to one player id, a sequence table of player ids, or `-1` for every player, paced at the requested byte rate. Nonpositive rates select 25,000 bytes per second. Positive rates are clamped to 1 KiB/s through 100 MiB/s. Function values cannot be sent. |
 | `GetPlayerPing` | server | `GetPlayerPing(player)`. Returns round-trip latency in milliseconds, or `-1` when the player or ping is unknown. |
 
 ### The `source` global
@@ -230,6 +230,7 @@ The rules that follow from these:
 | `GetNumResourceMetadata` | both | `GetNumResourceMetadata(resource, key)`. Returns how many values the metadata `key` of `resource` has. |
 | `StartResource` | server | `StartResource(name)`. Starts `name` if allowed (`command.start` ACE permission for `resource.<caller>`), returning whether it was started. |
 | `StopResource` | server | `StopResource(name)`. Stops `name` if allowed (`command.stop` ACE permission for `resource.<caller>`), returning whether it was stopped. |
+| `RestartResource` | server | `RestartResource(name)`. Restarts `name` (and any running dependents, in dependency order; starts `name` if stopped) if allowed (`command.restart` ACE permission for `resource.<caller>`), returning a boolean. Resolves `provide` aliases. |
 
 `path` is relative to a resource folder. Backslashes are accepted as
 separators. The host refuses parent-directory components, symbolic links,
@@ -346,6 +347,7 @@ plain names, because every write is batched (see below).
 |---|---|---|
 | `GetConvar` | both | `GetConvar(name, default)`. Returns the convar's text, or `default` when it is not set. On a client, a replicated value comes first. |
 | `GetConvarInt` | both | `GetConvarInt(name, default)`. Returns the convar parsed as an integer, or `default` when it is not set or does not parse. |
+| `GetConvarFloat` | both | `GetConvarFloat(name, default)`. Returns the convar parsed as a finite floating-point number, or `default` when it is not set, does not parse, or is non-finite (`NaN` / infinity). |
 | `GetConvarBool` | both | `GetConvarBool(name, default)`. Returns `true` for `true`, `1`, `yes` and `on`, and `false` for `false`, `0`, `no` and `off`, in any letter case and ignoring spaces at the ends. Any other text, and an unset convar, give `default`. |
 | `SetConvar` | server | `SetConvar(name, value)`. Stores a plain convar, which only the server keeps. |
 | `SetConvarReplicated` | server | `SetConvarReplicated(name, value)`. Stores a replicated convar. Every connected player gets it at once, and players who join later get it too. Fails, and changes nothing, when the name is longer than 256 bytes or the value longer than 4096 bytes. |
@@ -385,6 +387,7 @@ plain names, because every write is batched (see below).
 |---|---|
 | `GetPlayers` | `GetPlayers()`. Returns an array of player ids as strings, in join order. |
 | `GetNumPlayerIndices` | `GetNumPlayerIndices()`. Returns the number of connected players as an integer. |
+| `DoesPlayerExist` | `DoesPlayerExist(player)`. Returns `true` when `player` (integer or numeric string) is currently connected (admitted), and `false` otherwise. |
 | `GetPlayerName` | `GetPlayerName(player)`. Returns the name, or `nil` when the id is not connected. Accepts an id as a number or a string. |
 | `GetPlayerPed` | `GetPlayerPed(player)`. Returns the id of the player's ped, or `0` for a player without one. See [Entities](#entities). |
 | `GetPlayerEndpoint` | `GetPlayerEndpoint(player)`. Returns the remote address (`ip:port`), or `nil`. |
@@ -736,6 +739,22 @@ end)
   objects. Number keys become strings.
 - A vector encodes as an object of its components, such as
   `{"x":1.0,"y":2.0,"z":3.0}`. Decoding gives a table, not a vector.
+
+## MessagePack (`msgpack`)
+
+| Name | Side | Signature and result |
+|---|---|---|
+| `msgpack.pack` | both | `msgpack.pack(value)`. Encodes `value` into a binary Lua string. Raises an error for functions, userdata other than vectors/quaternions, cyclic tables, nesting deeper than 32 levels, or payloads exceeding 4 MiB. |
+| `msgpack.unpack` | both | `msgpack.unpack(bytes)`. Decodes a MessagePack Lua string back into a Lua value. Raises an error on malformed, truncated, or trailing-byte payloads, nesting deeper than 32 levels, or payloads exceeding 4 MiB. |
+
+- A table whose keys are `1..n` encodes as a MessagePack array; other tables
+  encode as maps.
+- Valid UTF-8 strings encode as MessagePack `str`; binary strings encode as
+  `bin` and decode back to Lua strings.
+- `vector2`, `vector3`, `vector4`, and `quat` round-trip as SixM vector and
+  quaternion userdata (32-bit float components via SixM extension types).
+- Maximum payload size is 4 MiB (`MAX_MSGPACK_BYTES`) and maximum container
+  nesting depth is 32 levels.
 
 ## Other globals
 

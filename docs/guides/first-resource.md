@@ -42,6 +42,12 @@ my-server/
 `sixm-server` looks for `server.cfg` and `resources/` relative to the current
 working directory unless configured otherwise (`sixm_resourcesPath`).
 
+> [!TIP]
+> For IDE autocomplete, diagnostics, and type checking when writing Lua or
+> JavaScript/TypeScript resources, add `types/sixm.lua` (Lua Language Server)
+> or `types/sixm.d.ts` (TypeScript/JavaScript) from the repository to your
+> workspace configuration.
+
 ## 2. Write `fxmanifest.lua`
 
 Every resource is a folder containing an `fxmanifest.lua`. Its folder name
@@ -309,6 +315,11 @@ When you edit an existing script in `resources/notes/`:
 1. Type `ensure notes` (or `restart notes`) in the server console.
 2. If you added a new resource or changed `fxmanifest.lua`, run `refresh` first,
    then `ensure notes`.
+3. To reload automatically on file changes, start the server with `--watch`
+   (`sixm-server --watch`) or run `watch_resources on` in the server console
+   (`watch_resources off` disables it). While enabled, SixM polls running
+   resource folders every 500 ms for manifest and `.lua`/`.js` script changes
+   and runs `refresh` and `restart` automatically.
 
 Connected `sixm-client` instances automatically receive `ResourceStopped` and
 `ResourceStarted`, download any changed files by SHA-256 hash, and reload the

@@ -13,6 +13,7 @@ mod exports;
 mod http;
 mod json;
 mod kvp;
+mod msgpack;
 mod natives;
 mod players;
 mod preprocess;

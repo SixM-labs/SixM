@@ -15,6 +15,7 @@ use crate::events;
 use crate::exports;
 use crate::http;
 use crate::kvp;
+use crate::msgpack;
 use crate::players::{self, server};
 use crate::resources;
 use crate::runtime::{CALLBACK_BUDGET, JsRuntime, Side};
@@ -53,6 +54,7 @@ pub(crate) fn install(runtime: &Rc<JsRuntime>) -> Result<(), sixm_core::ScriptEr
         state::install(&ctx, weak)?;
         resources::install(&ctx, weak)?;
         vector::install(&ctx)?;
+        msgpack::install(&ctx, weak)?;
         exports::install(&ctx, weak)?;
         Ok::<(), rquickjs::Error>(())
     });
@@ -61,7 +63,8 @@ pub(crate) fn install(runtime: &Rc<JsRuntime>) -> Result<(), sixm_core::ScriptEr
 
 fn install_host(ctx: &Ctx<'_>, weak: &Weak<JsRuntime>, side: Side) -> rquickjs::Result<()> {
     install_resource_files(ctx, weak)?;
-    install_convars_and_commands(ctx, weak)?;
+    install_convars(ctx, weak)?;
+    install_commands(ctx, weak)?;
     install_convar_listeners(ctx, weak)?;
     install_misc(ctx, weak, side)?;
     Ok(())
@@ -148,10 +151,7 @@ fn install_resource_files<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquick
     Ok(())
 }
 
-fn install_convars_and_commands<'js>(
-    ctx: &Ctx<'js>,
-    weak: &Weak<JsRuntime>,
-) -> rquickjs::Result<()> {
+fn install_convars<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::Result<()> {
     let globals = ctx.globals();
     {
         let weak = weak.clone();
@@ -193,6 +193,24 @@ fn install_convars_and_commands<'js>(
     {
         let weak = weak.clone();
         globals.set(
+            "GetConvarFloat",
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'js>, name: String, default: f64| -> rquickjs::Result<f64> {
+                    let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                    let parsed = rt
+                        .host(&ctx)?
+                        .get_resource_convar(&rt.resource, &name)
+                        .and_then(|value| value.trim().parse::<f64>().ok())
+                        .filter(|value| value.is_finite());
+                    Ok(parsed.unwrap_or(default))
+                },
+            )?,
+        )?;
+    }
+    {
+        let weak = weak.clone();
+        globals.set(
             "GetConvarBool",
             Function::new(
                 ctx.clone(),
@@ -207,6 +225,11 @@ fn install_convars_and_commands<'js>(
             )?,
         )?;
     }
+    Ok(())
+}
+
+fn install_commands<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::Result<()> {
+    let globals = ctx.globals();
     {
         let weak = weak.clone();
         globals.set(

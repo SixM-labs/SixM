@@ -19,13 +19,16 @@ not implemented yet. For exact function signatures, see
 - Manifests use `fxmanifest.lua` (with `__resource.lua` fallback).
 - Supported functional directives: `shared_script` / `shared_scripts`,
   `server_script` / `server_scripts`, `client_script` / `client_scripts`,
-  `file` / `files`, `dependency` / `dependencies`, `export` / `exports`, and
-  `server_export` / `server_exports`.
-- Globs (`*`, `**`), cross-resource `@other/path` script/file references,
-  `LoadResourceFile`, `SaveResourceFile`, `GetCurrentResourceName`,
-  `GetResourcePath`, `GetInvokingResource`, `GetResourceState`,
-  `GetNumResources`, `GetResourceByFindIndex`, `GetResourceMetadata`, and
-  `GetNumResourceMetadata` follow FiveM conventions.
+  `file` / `files`, `dependency` / `dependencies`, `provide` / `provides`,
+  `export` / `exports`, and `server_export` / `server_exports`.
+- Globs (`*`, `**`), cross-resource `@other/path` (including `@alias/...`)
+  script/file references, `LoadResourceFile`, `SaveResourceFile`,
+  `GetCurrentResourceName`, `GetResourcePath`, `GetInvokingResource`,
+  `GetResourceState`, `GetNumResources`, `GetResourceByFindIndex`,
+  `GetResourceMetadata`, `GetNumResourceMetadata`, `StartResource`,
+  `StopResource`, and `RestartResource` follow FiveM conventions (with
+  `provide` aliases resolved across dependencies, exports, files, metadata, and
+  lifecycle calls).
 
 See [manifest.md](../manifest.md) for all manifest rules.
 
@@ -33,10 +36,11 @@ See [manifest.md](../manifest.md) for all manifest rules.
 
 - Local and network events use `AddEventHandler`, `RemoveEventHandler`,
   `RegisterNetEvent` (and `RegisterServerEvent` alias), `TriggerEvent`,
-  `TriggerClientEvent` (`-1` or player ID), `TriggerServerEvent`,
-  `CancelEvent`, and `WasEventCanceled`.
-- Latent transfers use `TriggerLatentClientEvent` and
-  `TriggerLatentServerEvent` with pacing in bytes per second.
+  `TriggerClientEvent` / `emitNet` (`-1`, a player ID, or an array of player
+  IDs), `TriggerServerEvent`, `CancelEvent`, and `WasEventCanceled`.
+- Latent transfers use `TriggerLatentClientEvent` (single player ID, array of
+  player IDs, or `-1`) and `TriggerLatentServerEvent` with pacing in bytes per
+  second.
 - Standard lifecycle events work as expected:
   - Server: `onResourceStarting` (cancellable), `onResourceStart`,
     `onServerResourceStart`, `onResourceStop`, `onServerResourceStop`,
@@ -104,19 +108,26 @@ See [manifest.md](../manifest.md) for all manifest rules.
   `SetHttpHandler(function(req, res) ... end)` serves `/<resource>/...` on the
   TCP game port using `req.method`, `req.path`, `req.query`, `req.headers`,
   `req.setDataHandler`, and `res.writeHead` / `res.write` / `res.send`.
-- **Built-in JSON endpoints:** `/info.json`, `/players.json`, and
-  `/dynamic.json` are served on the TCP port of `endpoint_add_udp` (unless
-  `sv_httpEnabled` is `false`).
+- **Built-in HTTP endpoints:** `/info.json`, `/players.json`, `/dynamic.json`,
+  `/healthz`, `/metrics` (when `sv_metricsEnabled` is enabled), and `/admin`
+  (self-contained web admin UI when `sv_adminUiEnabled` is enabled and
+  `rcon_password` is configured) are served on the TCP port of
+  `endpoint_add_udp` (unless `sv_httpEnabled` is `false`).
+- **Optional discovery heartbeats:** Setting `sv_masterUrl` sends periodic JSON
+  heartbeats (`info` and `dynamic`) every `sv_heartbeatInterval` seconds.
 
-### Threads, timers, promises, and JSON
+### Threads, timers, promises, JSON, and MessagePack
 
 - `CreateThread`, `CreateThreadNow`, `Wait`, `SetTimeout`, `ClearTimeout`,
   `GetGameTimer`, and the `Citizen.*` aliases.
 - `promise.new`, `promise.all`, `promise.first`, `Await` / `Citizen.Await`,
   with `:resolve`, `:reject`, and `:next`.
-- `json.encode` and `json.decode`, `GetHashKey`, `RegisterCommand`,
-  `GetConvar` / `GetConvarInt` / `GetConvarBool`, and `SetConvar` /
-  `SetConvarReplicated` / `SetConvarServerInfo`.
+- `json.encode` and `json.decode`, `msgpack.pack` and `msgpack.unpack`
+  (preserving `vector2`/`vector3`/`vector4`/`quat`, capped at 4 MiB and 32
+  nesting levels), `GetHashKey`, `RegisterCommand`, `DoesPlayerExist`,
+  `IsPrincipalAceAllowed`, `GetConvar` / `GetConvarInt` / `GetConvarFloat` /
+  `GetConvarBool`, and `SetConvar` / `SetConvarReplicated` /
+  `SetConvarServerInfo`.
 
 ### Client-created entities and ownership
 
@@ -266,12 +277,19 @@ following FiveM areas are missing:
   weather/time, world queries, blips, markers, audio) do not exist yet.
 - **No UI / NUI:** There is no embedded browser, `SendNUIMessage`,
   `RegisterNUICallback`, DUI, or scaleform/HUD API.
-- **Default resources:** The example server includes a console-only `chat`
-  resource with a `say` command. `spawnmanager`, `sessionmanager`, and
+- **Default resources:** The example server includes clean-room
+  `[system]` resources `sessionmanager` (session ready handshake via
+  `sixm_session:ready`, `Player(src).state.sessionActive`, `isPlayerActive`,
+  `getPlayerSession`, `isSessionReady`) and `baseevents` (registers
+  `baseevents:onPlayerEnteredVehicle`, `baseevents:onPlayerLeftVehicle`, and
+  `baseevents:onPlayerDied` channels for future GameAdapter integrations), plus
+  a console-only `chat` resource with a `say` command. `spawnmanager` and
   `mapmanager` are not bundled.
-- **No server browser / master list:** `sets` / `SetConvarServerInfo` marks
-  convars as server info (exposed on `/info.json`), but nothing publishes them
-  to a master list yet.
+- **No public server browser UI:** `sets` / `SetConvarServerInfo` marks convars
+  as server info (exposed on `/info.json`), and `sv_masterUrl` /
+  `sv_heartbeatInterval` optionally send periodic JSON heartbeats to a
+  configured master endpoint, but there is no built-in Cfx.re server list or
+  in-client server browser yet.
 - **Minor API stubs/ignored parameters:**
   - `CreateVehicleServerSetter` ignores its `type` argument.
   - `GetEntityRotation` ignores its `order` argument.

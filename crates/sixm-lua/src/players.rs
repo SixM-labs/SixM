@@ -6,6 +6,7 @@ use std::rc::Weak;
 use mlua::{Function, Lua, MultiValue, Table, Value as LuaValue};
 use sixm_core::{ClientTarget, Host, PlayerInfo, ServerHost, player_bag};
 
+use crate::convert::sequence_len;
 use crate::runtime::{LuaRuntime, bind_fn, lua_err};
 use crate::state::state_bag;
 
@@ -15,7 +16,7 @@ const DEFAULT_DROP_REASON: &str = "Dropped by server";
 /// Largest magnitude below which every whole `f64` is exact, so casting it to `i64` loses nothing.
 const EXACT_FLOAT_LIMIT: f64 = 9_007_199_254_740_992.0;
 
-/// Installs `TriggerClientEvent`, `GetPlayers`, `GetNumPlayerIndices`,
+/// Installs `TriggerClientEvent`, `GetPlayers`, `GetNumPlayerIndices`, `DoesPlayerExist`,
 /// `GetPlayerName`, `GetPlayerPed`, `GetPlayerEndpoint`, the identifier functions, `DropPlayer`,
 /// `IsPlayerAceAllowed`, `IsPrincipalAceAllowed` and `Player`. Only server
 /// runtimes call this.
@@ -28,6 +29,12 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
     let get_num_player_indices = bind_fn(lua, weak, |rt, (): ()| {
         let count = server(&*rt.host()?)?.players().len();
         i64::try_from(count).map_err(mlua::Error::runtime)
+    })?;
+    let does_player_exist = bind_fn(lua, weak, |rt, (player,): (LuaValue,)| {
+        let Some(id) = player_id(&player) else {
+            return Ok(false);
+        };
+        Ok(server(&*rt.host()?)?.player_info(id).is_some())
     })?;
     let get_player_ped = player_ped_function(lua, weak)?;
     let get_player_name = bind_fn(lua, weak, |rt, (player,): (LuaValue,)| {
@@ -75,6 +82,36 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
             Ok(())
         },
     )?;
+    let player = bind_fn(lua, weak, |rt, (id,): (LuaValue,)| {
+        let id = player_id(&id).ok_or_else(|| invalid_player("Player"))?;
+        let object = rt.lua.create_table()?;
+        object.raw_set("state", state_bag(rt, &player_bag(id))?)?;
+        Ok(object)
+    })?;
+
+    let functions = [
+        ("GetPlayers", get_players),
+        ("GetNumPlayerIndices", get_num_player_indices),
+        ("DoesPlayerExist", does_player_exist),
+        ("GetPlayerName", get_player_name),
+        ("GetPlayerPing", get_player_ping),
+        ("GetPlayerPed", get_player_ped),
+        ("GetPlayerEndpoint", get_player_endpoint),
+        ("GetPlayerIdentifiers", get_player_identifiers),
+        ("GetNumPlayerIdentifiers", get_num_player_identifiers),
+        ("GetPlayerIdentifier", get_player_identifier),
+        ("GetPlayerIdentifierByType", get_player_identifier_by_type),
+        ("DropPlayer", drop_player),
+        ("Player", player),
+    ];
+    for (name, function) in functions {
+        globals.raw_set(name, function)?;
+    }
+    install_ace(lua, weak, globals)?;
+    install_tokens_and_last_msg(lua, weak, globals)
+}
+
+fn install_ace(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::Result<()> {
     let is_player_ace_allowed = bind_fn(lua, weak, |rt, (player, object): (LuaValue, String)| {
         let Some(id) = player_id(&player) else {
             return Ok(false);
@@ -90,33 +127,8 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
         bind_fn(lua, weak, |rt, (principal, object): (String, String)| {
             Ok(server(&*rt.host()?)?.is_ace_allowed(&principal, &object))
         })?;
-    let player = bind_fn(lua, weak, |rt, (id,): (LuaValue,)| {
-        let id = player_id(&id).ok_or_else(|| invalid_player("Player"))?;
-        let object = rt.lua.create_table()?;
-        object.raw_set("state", state_bag(rt, &player_bag(id))?)?;
-        Ok(object)
-    })?;
-
-    let functions = [
-        ("GetPlayers", get_players),
-        ("GetNumPlayerIndices", get_num_player_indices),
-        ("GetPlayerName", get_player_name),
-        ("GetPlayerPing", get_player_ping),
-        ("GetPlayerPed", get_player_ped),
-        ("GetPlayerEndpoint", get_player_endpoint),
-        ("GetPlayerIdentifiers", get_player_identifiers),
-        ("GetNumPlayerIdentifiers", get_num_player_identifiers),
-        ("GetPlayerIdentifier", get_player_identifier),
-        ("GetPlayerIdentifierByType", get_player_identifier_by_type),
-        ("DropPlayer", drop_player),
-        ("IsPlayerAceAllowed", is_player_ace_allowed),
-        ("IsPrincipalAceAllowed", is_principal_ace_allowed),
-        ("Player", player),
-    ];
-    for (name, function) in functions {
-        globals.raw_set(name, function)?;
-    }
-    install_tokens_and_last_msg(lua, weak, globals)
+    globals.raw_set("IsPlayerAceAllowed", is_player_ace_allowed)?;
+    globals.raw_set("IsPrincipalAceAllowed", is_principal_ace_allowed)
 }
 
 fn install_tokens_and_last_msg(
@@ -159,25 +171,31 @@ fn install_event_senders(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) ->
         lua,
         weak,
         |rt, (name, target, args): (String, LuaValue, MultiValue)| {
-            let target = client_target(&target)?;
+            let targets = client_targets("TriggerClientEvent", &target)?;
             let values = rt.to_network_values(&args.into_vec()).map_err(lua_err)?;
             let host = rt.host()?;
-            server(&*host)?
-                .trigger_client_event(&name, target, &values)
-                .map_err(lua_err)
+            let srv = server(&*host)?;
+            for target in targets {
+                srv.trigger_client_event(&name, target, &values)
+                    .map_err(lua_err)?;
+            }
+            Ok(())
         },
     )?;
     let trigger_latent_client_event = bind_fn(
         lua,
         weak,
         |rt, (name, target, bps, args): (String, LuaValue, LuaValue, MultiValue)| {
-            let target = client_target(&target)?;
+            let targets = client_targets("TriggerLatentClientEvent", &target)?;
             let bps = crate::client::latent_bps(&bps)?;
             let values = rt.to_network_values(&args.into_vec()).map_err(lua_err)?;
             let host = rt.host()?;
-            server(&*host)?
-                .trigger_latent_client_event(&name, target, &values, bps)
-                .map_err(lua_err)
+            let srv = server(&*host)?;
+            for target in targets {
+                srv.trigger_latent_client_event(&name, target, &values, bps)
+                    .map_err(lua_err)?;
+            }
+            Ok(())
         },
     )?;
     globals.raw_set("TriggerClientEvent", trigger_client_event)?;
@@ -225,14 +243,40 @@ fn identifier_kind(identifier: &str) -> Option<&str> {
     identifier.split_once(':').map(|(kind, _)| kind)
 }
 
+/// Resolves a single target or sequence table of player ids for client events.
+fn client_targets(function: &str, value: &LuaValue) -> mlua::Result<Vec<ClientTarget>> {
+    let LuaValue::Table(table) = value else {
+        return Ok(vec![client_target(function, value)?]);
+    };
+    let entries = table
+        .pairs::<LuaValue, LuaValue>()
+        .collect::<mlua::Result<Vec<_>>>()?;
+    let Some(len) = sequence_len(&entries) else {
+        return Err(invalid_player(function));
+    };
+    let mut targets = vec![ClientTarget::Player(0); len];
+    for (key, entry) in &entries {
+        let LuaValue::Integer(index) = key else {
+            return Err(invalid_player(function));
+        };
+        let slot = usize::try_from(*index - 1)
+            .ok()
+            .and_then(|idx| targets.get_mut(idx))
+            .ok_or_else(|| invalid_player(function))?;
+        let id = player_id(entry).ok_or_else(|| invalid_player(function))?;
+        *slot = ClientTarget::Player(id);
+    }
+    Ok(targets)
+}
+
 /// Target of `TriggerClientEvent`: `-1` addresses every player.
-fn client_target(value: &LuaValue) -> mlua::Result<ClientTarget> {
+fn client_target(function: &str, value: &LuaValue) -> mlua::Result<ClientTarget> {
     match whole_number(value) {
         Some(-1) => Ok(ClientTarget::All),
         number => number
             .and_then(|number| u32::try_from(number).ok())
             .map(ClientTarget::Player)
-            .ok_or_else(|| invalid_player("TriggerClientEvent")),
+            .ok_or_else(|| invalid_player(function)),
     }
 }
 

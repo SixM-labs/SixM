@@ -193,3 +193,28 @@ fn rcon_enforces_password_rate_limit_and_returns_command_output() {
     let (disabled, _) = send_rcon(&lb2, "X-Rcon-Password: super-secret-pw\r\n", "help");
     assert_eq!(disabled, 403);
 }
+
+#[test]
+fn watch_resources_is_off_by_default_and_console_only() {
+    let fx = Fixture::new();
+    fx.add_resource(
+        "helper",
+        &manifest(&["server.lua"], &[], &[]),
+        &[("server.lua", "ExecuteCommand('watch_resources on')\n")],
+    );
+    fx.server
+        .execute("add_ace resource.helper command.watch_resources allow");
+
+    assert!(!fx.manager().watch_enabled());
+    fx.server.execute("ensure helper");
+    assert!(
+        !fx.manager().watch_enabled(),
+        "resources must not be able to toggle watch_resources"
+    );
+
+    fx.server.execute("watch_resources on");
+    assert!(fx.manager().watch_enabled());
+
+    fx.server.execute("watch_resources off");
+    assert!(!fx.manager().watch_enabled());
+}

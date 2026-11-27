@@ -1,10 +1,12 @@
 //! Resource natives: `GetInvokingResource`, `GetResourceState`,
 //! `GetNumResources`, `GetResourceByFindIndex`, `GetResourceMetadata`,
-//! and `GetNumResourceMetadata`.
+//! `GetNumResourceMetadata`, `StartResource`, `StopResource`, and
+//! `RestartResource`.
 
 use std::rc::Weak;
 
-use rquickjs::{Ctx, Exception, Function, IntoJs, Value as JsValue};
+use rquickjs::{Ctx, Exception, Function, IntoJs, Object, Value as JsValue};
+use sixm_core::ServerHost;
 
 use crate::players::server;
 use crate::runtime::JsRuntime;
@@ -108,35 +110,42 @@ pub(crate) fn install<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::
     Ok(())
 }
 
-pub(crate) fn install_server<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::Result<()> {
+pub(crate) fn install_server(ctx: &Ctx<'_>, weak: &Weak<JsRuntime>) -> rquickjs::Result<()> {
     let globals = ctx.globals();
-    {
-        let weak = weak.clone();
-        globals.set(
-            "StartResource",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'js>, name: String| -> rquickjs::Result<bool> {
-                    let rt = JsRuntime::upgrade(&ctx, &weak)?;
-                    Ok(server(&ctx, &*rt.host(&ctx)?)?.start_resource(rt.resource.as_ref(), &name))
-                },
-            )?,
-        )?;
-    }
-    {
-        let weak = weak.clone();
-        globals.set(
-            "StopResource",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'js>, name: String| -> rquickjs::Result<bool> {
-                    let rt = JsRuntime::upgrade(&ctx, &weak)?;
-                    Ok(server(&ctx, &*rt.host(&ctx)?)?.stop_resource(rt.resource.as_ref(), &name))
-                },
-            )?,
-        )?;
-    }
+    install_lifecycle_native(&globals, ctx, weak, "StartResource", |s, c, r| {
+        s.start_resource(c, r)
+    })?;
+    install_lifecycle_native(&globals, ctx, weak, "StopResource", |s, c, r| {
+        s.stop_resource(c, r)
+    })?;
+    install_lifecycle_native(&globals, ctx, weak, "RestartResource", |s, c, r| {
+        s.restart_resource(c, r)
+    })?;
     Ok(())
+}
+
+fn install_lifecycle_native<'js>(
+    globals: &Object<'js>,
+    ctx: &Ctx<'js>,
+    weak: &Weak<JsRuntime>,
+    fn_name: &str,
+    action: fn(&dyn ServerHost, &str, &str) -> bool,
+) -> rquickjs::Result<()> {
+    let weak = weak.clone();
+    globals.set(
+        fn_name,
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, name: String| -> rquickjs::Result<bool> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                Ok(action(
+                    server(&ctx, &*rt.host(&ctx)?)?,
+                    rt.resource.as_ref(),
+                    &name,
+                ))
+            },
+        )?,
+    )
 }
 
 fn nth<T>(items: Vec<T>, index: i64) -> Option<T> {

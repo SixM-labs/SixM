@@ -108,6 +108,8 @@ pub struct TestHost {
     /// Access grants as `(principal, object)` pairs. A principal has exactly the
     /// objects it is granted: the test host does not model inheritance.
     pub grants: RefCell<Vec<(String, String)>>,
+    /// Resource lifecycle calls recorded as `(action, caller, resource)`.
+    pub resource_actions: RefCell<Vec<(&'static str, String, String)>>,
 }
 
 impl TestHost {
@@ -717,6 +719,29 @@ impl ServerHost for TestHost {
             .get(&bucket)
             .cloned()
             .unwrap_or_else(|| "inactive".to_owned())
+    }
+
+    fn start_resource(&self, caller: &str, resource: &str) -> bool {
+        self.resource_actions
+            .borrow_mut()
+            .push(("start", caller.to_owned(), resource.to_owned()));
+        self.roots.borrow().contains_key(resource)
+    }
+
+    fn stop_resource(&self, caller: &str, resource: &str) -> bool {
+        self.resource_actions
+            .borrow_mut()
+            .push(("stop", caller.to_owned(), resource.to_owned()));
+        self.roots.borrow().contains_key(resource)
+    }
+
+    fn restart_resource(&self, caller: &str, resource: &str) -> bool {
+        self.resource_actions.borrow_mut().push((
+            "restart",
+            caller.to_owned(),
+            resource.to_owned(),
+        ));
+        self.roots.borrow().contains_key(resource)
     }
 }
 

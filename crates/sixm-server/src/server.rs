@@ -50,6 +50,11 @@ impl Server {
         &self.manager
     }
 
+    /// Enables or disables the development resource file watcher (`--watch`).
+    pub fn set_watch(&self, enabled: bool) {
+        self.manager.set_watch_enabled(enabled);
+    }
+
     /// Runs one console line, then every command it or the scripts queued.
     pub fn execute(&self, line: &str) {
         commands::run_line(
@@ -84,6 +89,7 @@ impl Server {
         self.manager.expire_deferrals(now);
         self.manager.flush_entities();
         self.manager.flush_kvp_due(now);
+        self.manager.tick_heartbeat(now);
         let elapsed = started.elapsed();
         self.manager.frames.borrow_mut().record(elapsed);
         if self.manager.profiler_active.get() {
@@ -159,6 +165,7 @@ impl Server {
             if now >= next_frame {
                 next_frame = advance(next_frame, now, frame_period(self.manager.tick_rate()));
                 self.tick(now);
+                self.manager.poll_watch(now);
             } else if self
                 .manager
                 .next_deadline()

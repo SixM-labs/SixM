@@ -5,7 +5,7 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use common::{first, new_host, start, tick};
+use common::{call, first, new_client_host, new_host, start, tick};
 use sixm_core::{EventSource, Host, ResourceState, Value};
 
 /// A resource that fires `thing:happened` when its `fire` export is called.
@@ -204,4 +204,47 @@ fn resource_functions_read_the_host() {
         first(&reader, "info"),
         Value::Array(expected.iter().map(|text| Value::from(*text)).collect())
     );
+}
+
+#[test]
+fn restart_resource_delegates_to_server_host_and_is_server_only() {
+    let host = new_host();
+    let _target = start(&host, "target", &[], &[("main.lua", "")]);
+    let controller = start(
+        &host,
+        "controller",
+        &["restart"],
+        &[(
+            "main.lua",
+            "exports('restart', function(name) return RestartResource(name) end)\n",
+        )],
+    );
+
+    assert_eq!(
+        call(&controller, "restart", &[Value::from("target")]),
+        vec![Value::Bool(true)]
+    );
+    assert_eq!(
+        call(&controller, "restart", &[Value::from("missing")]),
+        vec![Value::Bool(false)]
+    );
+    assert_eq!(
+        *host.restarted_resources.borrow(),
+        vec![
+            ("controller".to_owned(), "target".to_owned()),
+            ("controller".to_owned(), "missing".to_owned()),
+        ]
+    );
+
+    let client = new_client_host(1);
+    let client_rt = start(
+        &client,
+        "client",
+        &["probe"],
+        &[(
+            "main.lua",
+            "exports('probe', function() return type(RestartResource) end)\n",
+        )],
+    );
+    assert_eq!(first(&client_rt, "probe"), Value::from("nil"));
 }

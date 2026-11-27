@@ -60,7 +60,7 @@ the same way:
 | Written as | Stored as |
 |---|---|
 | `dependencies { ... }` or `dependency 'x'` | `dependency` |
-| `files`, `exports`, `server_exports`, `games`, `server_scripts`, `client_scripts`, `shared_scripts` | the name without the trailing `s` |
+| `files`, `exports`, `server_exports`, `games`, `provides`, `server_scripts`, `client_scripts`, `shared_scripts` | the name without the trailing `s` |
 
 Other table directives also lose one trailing `s`. So `this_is { 'x' }` is
 stored as `this_i`. A plain string with an unknown name keeps its spelling.
@@ -74,6 +74,7 @@ stored as `this_i`. A plain string with an unknown name keeps its spelling.
 | `shared_script` / `shared_scripts` | `shared_scripts` | Loaded on the server and sent to clients (`.lua` or `.js`). Globs allowed. |
 | `file` / `files` | `files` | Sent to clients as data files. Not loaded as scripts. Globs allowed. |
 | `dependency` / `dependencies` | `dependencies` | Resources that must start first. See below. |
+| `provide` / `provides` | `provides` | Virtual resource names this resource provides as aliases. See below. |
 | `export` / `exports` | `exports` | Client exports, sent to clients. See below. |
 | `server_export` / `server_exports` | `server_exports` | Server exports. See below. |
 | `fx_version` | `fx_version` | Stored only. The host does not read it. |
@@ -131,6 +132,8 @@ server_scripts { '@oxmysql/lib/MySQL.lua', '@oxmysql/lib/*.lua' }
 
 - The resource must be installed, running or not. Otherwise the resource
   fails with an unknown-resource error.
+- `@alias/...` also resolves through [`provide` aliases](#providing-aliases-provide--provides)
+  to the provider resource's folder.
 - The rest of the path follows the same rules, and must not escape `other`.
 - Files reached this way are named `@other/<path>` when sent to clients. The
   client keeps that name, so `LoadResourceFile('res', '@other/...')` can find
@@ -160,8 +163,44 @@ dependencies { 'a', 'b' }
 - Stopping a resource stops the running resources that depend on it first.
 - A dependency that is not installed is an error.
 - A dependency cycle is an error. The error lists the cycle.
+- Dependencies resolve `provide` aliases to the provider resource, and cycles
+  through aliases are detected as well.
 - Entries that start with `/` are kept but ignored. The code leaves them out
   of the start order, so they have no effect yet.
+
+## Providing aliases (`provide` / `provides`)
+
+A resource can declare virtual names it provides so existing resources that
+depend on or reference another resource name continue to work:
+
+```lua
+provide 'mysql-async'
+provides { 'ghmattimysql', 'db-core' }
+```
+
+- **Validation:** Each entry must be a valid resource name component (for
+  example, empty strings, path separators, `..`, and leading dots are rejected
+  when parsing the manifest).
+- **Resolution:** Aliases resolve to the canonical provider resource across:
+  - `dependency` / `dependencies` start order and dependent stop order
+  - `@alias/...` manifest script and file references
+  - `exports['alias']` / `exports.alias` calls
+  - Resource natives (`GetResourceState`, `GetResourceMetadata`,
+    `GetNumResourceMetadata`, `GetResourcePath`, `LoadResourceFile`,
+    `StartResource`, `StopResource`, `RestartResource`) and console commands
+    (`start`, `stop`, `restart`, `ensure`)
+  - `GetNumResources` and `GetResourceByFindIndex` continue to list canonical
+    installed resource names only.
+- **Duplicates and conflicts:**
+  - Duplicate `provide` entries within the same resource are deduplicated
+    without error.
+  - A canonical installed resource name always takes precedence over an alias.
+  - If a `provide` alias matches an installed resource's canonical name, that
+    alias is skipped and logged as a scan warning.
+  - If two resources declare the same `provide` alias, the first resource in
+    sorted scan order keeps the alias, and the conflicting alias on later
+    resources is skipped with a warning (non-conflicting aliases on those
+    resources are still registered).
 
 ## Exports
 

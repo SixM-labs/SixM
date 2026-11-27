@@ -30,6 +30,12 @@ pub enum ManifestError {
     /// The recorded directives exceeded the entry or byte limit.
     #[error("manifest directives exceeded the output limit")]
     OutputLimit,
+    /// A `provide` / `provides` entry is not a valid resource name component.
+    #[error("invalid `provide` resource name `{name}`")]
+    InvalidProvide {
+        /// The offending `provide` value.
+        name: String,
+    },
 }
 
 /// Why a resource folder could not be loaded, or why its scripts could not be
@@ -97,6 +103,17 @@ pub enum ResourceError {
         pattern: String,
         /// Why the pattern was rejected.
         message: String,
+    },
+    /// A `provide` alias conflicts with an installed resource or another
+    /// resource's alias.
+    #[error("`{resource}` cannot provide `{alias}`: conflicts with `{existing}`")]
+    AliasConflict {
+        /// The resource declaring the conflicting `provide` alias.
+        resource: ResourceName,
+        /// The conflicting alias.
+        alias: ResourceName,
+        /// The installed resource or provider that already owns `alias`.
+        existing: ResourceName,
     },
 }
 

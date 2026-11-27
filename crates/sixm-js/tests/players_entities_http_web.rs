@@ -1,7 +1,9 @@
 mod common;
 
 use common::{call, new_client_host, new_host, start};
-use sixm_core::{EntityInfo, EntityKind, PlayerInfo, ScriptRuntime, Value, WebReply, WebRequest};
+use sixm_core::{
+    ClientTarget, EntityInfo, EntityKind, PlayerInfo, ScriptRuntime, Value, WebReply, WebRequest,
+};
 
 #[test]
 fn players_entities_and_buckets_work_on_server() {
@@ -303,4 +305,158 @@ fn entity_state_natives_and_attachments_work() {
             Value::Bool(false),
         ])]
     );
+}
+
+#[test]
+fn does_player_exist_checks_connected_players_on_server_only() {
+    let srv_host = new_host();
+    srv_host.players.borrow_mut().push((
+        2,
+        PlayerInfo {
+            name: "Bob".to_owned(),
+            endpoint: "127.0.0.1:40002".to_owned(),
+        },
+    ));
+
+    let srv = start(
+        &srv_host,
+        "exist_srv",
+        &["check"],
+        &[(
+            "index.js",
+            r#"
+            exports("check", () => [
+                DoesPlayerExist(2),
+                DoesPlayerExist("2"),
+                DoesPlayerExist(99),
+                DoesPlayerExist(-1),
+                DoesPlayerExist(null),
+                DoesPlayerExist("nope"),
+            ]);
+            "#,
+        )],
+    );
+
+    assert_eq!(
+        call(&srv, "check", &[]),
+        vec![Value::Array(vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::Bool(false),
+        ])]
+    );
+
+    let cli_host = new_client_host(1);
+    let cli = start(
+        &cli_host,
+        "exist_cli",
+        &["check"],
+        &[(
+            "index.js",
+            r#"exports("check", () => typeof DoesPlayerExist);"#,
+        )],
+    );
+    assert_eq!(call(&cli, "check", &[]), vec![Value::from("undefined")]);
+}
+
+#[test]
+fn batch_client_event_targets_support_arrays_and_reject_invalid_entries() {
+    let srv_host = new_host();
+    let srv = start(
+        &srv_host,
+        "batch_srv",
+        &["send_valid", "send_invalid"],
+        &[(
+            "index.js",
+            r#"
+            exports("send_valid", () => {
+                emitNet("evt:all", -1, "hi");
+                emitNet("evt:one", 1, 10);
+                emitNet("evt:batch_num", [1, 2], "a", true);
+                TriggerClientEvent("evt:batch_str", ["1", "2"], 99);
+                TriggerClientEvent("evt:empty", [], "ignored");
+                TriggerLatentClientEvent("evt:latent_batch", [2, "1"], 50000, "payload");
+                return true;
+            });
+
+            exports("send_invalid", () => {
+                const fails = (fn) => {
+                    try { fn(); return false; } catch (e) { return true; }
+                };
+                return [
+                    fails(() => emitNet("evt:bad", [1, "bad"], 1)),
+                    fails(() => TriggerClientEvent("evt:bad", [1, -1], 1)),
+                    fails(() => TriggerClientEvent("evt:bad", [1, null], 1)),
+                    fails(() => TriggerLatentClientEvent("evt:bad", [1, 1.5], 5000, 1)),
+                ];
+            });
+            "#,
+        )],
+    );
+
+    assert_eq!(call(&srv, "send_valid", &[]), vec![Value::Bool(true)]);
+    assert_eq!(
+        *srv_host.client_events.borrow(),
+        vec![
+            (
+                "evt:all".to_owned(),
+                ClientTarget::All,
+                vec![Value::from("hi")]
+            ),
+            (
+                "evt:one".to_owned(),
+                ClientTarget::Player(1),
+                vec![Value::Int(10)]
+            ),
+            (
+                "evt:batch_num".to_owned(),
+                ClientTarget::Player(1),
+                vec![Value::from("a"), Value::Bool(true)]
+            ),
+            (
+                "evt:batch_num".to_owned(),
+                ClientTarget::Player(2),
+                vec![Value::from("a"), Value::Bool(true)]
+            ),
+            (
+                "evt:batch_str".to_owned(),
+                ClientTarget::Player(1),
+                vec![Value::Int(99)]
+            ),
+            (
+                "evt:batch_str".to_owned(),
+                ClientTarget::Player(2),
+                vec![Value::Int(99)]
+            ),
+        ]
+    );
+    assert_eq!(
+        *srv_host.latent_client_events.borrow(),
+        vec![
+            (
+                "evt:latent_batch".to_owned(),
+                ClientTarget::Player(2),
+                vec![Value::from("payload")],
+                50_000
+            ),
+            (
+                "evt:latent_batch".to_owned(),
+                ClientTarget::Player(1),
+                vec![Value::from("payload")],
+                50_000
+            ),
+        ]
+    );
+
+    let before_count = srv_host.client_events.borrow().len();
+    let before_latent = srv_host.latent_client_events.borrow().len();
+    assert_eq!(
+        call(&srv, "send_invalid", &[]),
+        vec![Value::Array(vec![Value::Bool(true); 4])]
+    );
+    assert_eq!(srv_host.client_events.borrow().len(), before_count);
+    assert_eq!(srv_host.latent_client_events.borrow().len(), before_latent);
 }

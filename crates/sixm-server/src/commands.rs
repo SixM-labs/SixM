@@ -27,7 +27,7 @@ const MAX_EXEC_DEPTH: usize = 16;
 const MAX_QUEUED_COMMANDS: usize = 1000;
 
 /// Built-in command names, as listed by `help`.
-pub(crate) const BUILT_IN: [&str; 28] = [
+pub(crate) const BUILT_IN: [&str; 29] = [
     "add_ace",
     "add_convar_permission",
     "add_principal",
@@ -56,6 +56,7 @@ pub(crate) const BUILT_IN: [&str; 28] = [
     "state",
     "stop",
     "test_ace",
+    "watch_resources",
 ];
 
 /// Who sent a command line.
@@ -169,6 +170,7 @@ pub(crate) fn run_words(
         "list_convar_permissions" => list_convar_permissions(manager, args, &context.source),
         "list_principals" => list_principals(manager, args),
         "test_ace" => test_ace(manager, args),
+        "watch_resources" => watch_resources(manager, args, &context.source),
         _ => run_script_or_convar(manager, name, &lower, args, raw, &context.source),
     }
 }
@@ -598,6 +600,29 @@ fn write_relative_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     fs::write(path, bytes)
+}
+
+/// `watch_resources [on|off]`: toggles or prints hot-reload watching for running resources.
+fn watch_resources(manager: &ResourceManager, args: &[String], source: &CommandSource) {
+    if !matches!(source, CommandSource::Console) {
+        warn!("watch_resources is console-only");
+        return;
+    }
+    match args {
+        [] => {
+            let state = if manager.watch_enabled() { "on" } else { "off" };
+            info!("watch_resources is {state}");
+        }
+        [arg] if arg.eq_ignore_ascii_case("on") => {
+            manager.set_watch_enabled(true);
+            info!("watch_resources enabled");
+        }
+        [arg] if arg.eq_ignore_ascii_case("off") => {
+            manager.set_watch_enabled(false);
+            info!("watch_resources disabled");
+        }
+        _ => warn!("usage: watch_resources [on|off]"),
+    }
 }
 
 /// `entities`: lists every entity with its id, kind, model in hex, position and
