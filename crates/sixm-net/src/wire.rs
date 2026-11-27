@@ -30,7 +30,8 @@ use crate::files::{
     MAX_RESOURCE_NAME_LEN, ResourceEntry,
 };
 use crate::protocol::{
-    ClientMessage, MAX_DECODED_VALUES, MAX_EVENT_NAME_LEN, MAX_VALUE_DEPTH, ServerMessage,
+    ClientMessage, MAX_COMMAND_LEN, MAX_DECODED_VALUES, MAX_EVENT_NAME_LEN, MAX_VALUE_DEPTH,
+    ServerMessage,
 };
 
 const FRAME_HEADER_LEN: usize = 4;
@@ -49,7 +50,7 @@ const TAG_VECTOR4: u32 = 9;
 const VALUE_VARIANTS: &[&str] = &[
     "Nil", "Bool", "Int", "Float", "String", "Array", "Map", "Vector2", "Vector3", "Vector4",
 ];
-const CLIENT_VARIANTS: &[&str] = &["Hello", "Event", "RequestFile"];
+const CLIENT_VARIANTS: &[&str] = &["Hello", "Event", "RequestFile", "Command"];
 const SERVER_VARIANTS: &[&str] = &[
     "Welcome",
     "Rejected",
@@ -441,6 +442,18 @@ pub(crate) fn encode_event(
     encode_frame(&EventFrame { tag, name, args }, max_frame)
 }
 
+/// Encodes a console line a client sends to the server. The line must be 1 to
+/// [`MAX_COMMAND_LEN`] bytes long.
+pub(crate) fn encode_command(line: &str, max_frame: usize) -> Result<Arc<[u8]>, NetError> {
+    validate_length("command line", line, MAX_COMMAND_LEN)?;
+    encode_frame(
+        &ClientMessage::Command {
+            line: line.to_owned(),
+        },
+        max_frame,
+    )
+}
+
 /// Encodes a message as a complete frame with its length prefix.
 pub(crate) fn encode_frame<T: Serialize>(
     message: &T,
@@ -699,6 +712,15 @@ impl<'de> Visitor<'de> for ClientMessageVisitor<'_> {
             ClientMessage::REQUEST_FILE_TAG => variant
                 .newtype_variant::<FileHash>()
                 .map(|hash| ClientMessage::RequestFile { hash }),
+            ClientMessage::COMMAND_TAG => {
+                let line: String = variant.newtype_variant()?;
+                if line.len() > MAX_COMMAND_LEN {
+                    return Err(de::Error::custom(format!(
+                        "command line is over {MAX_COMMAND_LEN} bytes"
+                    )));
+                }
+                Ok(ClientMessage::Command { line })
+            }
             other => Err(de::Error::unknown_variant(
                 &other.to_string(),
                 CLIENT_VARIANTS,
@@ -1957,6 +1979,35 @@ mod tests {
             hash: [byte; 32],
             size: u64::from(byte) * 100,
         }
+    }
+
+    #[test]
+    fn command_round_trips() {
+        let command = ClientMessage::Command {
+            line: "hello world".to_owned(),
+        };
+        assert!(matches!(
+            decode_client_message(&payload_of(&command)),
+            Ok(ClientMessage::Command { line }) if line == "hello world"
+        ));
+    }
+
+    #[test]
+    fn command_line_is_limited_to_the_maximum_length() {
+        let longest = "c".repeat(MAX_COMMAND_LEN);
+        let frame =
+            encode_command(&longest, MAX_FRAME).expect("a line of the maximum length encodes");
+        assert!(matches!(
+            decode_client_message(&frame[FRAME_HEADER_LEN..]),
+            Ok(ClientMessage::Command { line }) if line.len() == MAX_COMMAND_LEN
+        ));
+        assert!(encode_command(&"c".repeat(MAX_COMMAND_LEN + 1), MAX_FRAME).is_err());
+        assert!(encode_command("", MAX_FRAME).is_err());
+
+        let too_long = ClientMessage::Command {
+            line: "c".repeat(MAX_COMMAND_LEN + 1),
+        };
+        assert!(decode_client_message(&payload_of(&too_long)).is_err());
     }
 
     #[test]

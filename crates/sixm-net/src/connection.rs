@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use quinn::{Connection, Incoming, RecvStream, SendStream, VarInt};
 use rustls::pki_types::CertificateDer;
+use sixm_core::Value;
 use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 use tracing::{debug, warn};
@@ -189,7 +190,9 @@ async fn read_hello(connection: &Connection, max_frame: usize) -> Result<Hello, 
             protocol,
             name,
         }),
-        ClientMessage::Event { .. } | ClientMessage::RequestFile { .. } => Err(NetError::Protocol(
+        ClientMessage::Event { .. }
+        | ClientMessage::RequestFile { .. }
+        | ClientMessage::Command { .. } => Err(NetError::Protocol(
             "the first message must be Hello".to_owned(),
         )),
     }
@@ -337,8 +340,9 @@ fn join_writer(result: Result<String, tokio::task::JoinError>) -> String {
     result.unwrap_or_else(|err| format!("connection task failed: {err}"))
 }
 
-/// Receives events and file requests from the player until the stream ends or
-/// the player is kicked for breaking a limit.
+/// Receives events, commands and file requests from the player until the
+/// stream ends or the player is kicked for breaking a limit. Events and
+/// commands share one rate limit.
 async fn read_loop(
     shared: &Shared,
     player: u32,
@@ -352,8 +356,14 @@ async fn read_loop(
             Ok(None) | Err(NetError::Closed) => return Stop::Closed,
             Err(err) => return Stop::Protocol(err.to_string()),
         };
-        let (name, args) = match decode_client_message(&payload) {
-            Ok(ClientMessage::Event { name, args }) => (name, args),
+        let inbound = match decode_client_message(&payload) {
+            Ok(ClientMessage::Event { name, args }) => {
+                if let Err(err) = validate_event_name(&name) {
+                    return Stop::Protocol(err.to_string());
+                }
+                Inbound::Event { name, args: args.0 }
+            }
+            Ok(ClientMessage::Command { line }) => Inbound::Command { line },
             Ok(ClientMessage::RequestFile { hash }) => {
                 if let Err(reason) = requests.request(hash) {
                     return Stop::Kick(reason.to_owned());
@@ -365,15 +375,11 @@ async fn read_loop(
             }
             Err(err) => return Stop::Protocol(err.to_string()),
         };
-        if let Err(err) = validate_event_name(&name) {
-            return Stop::Protocol(err.to_string());
-        }
         let now = Instant::now();
         match limiter.admit(now) {
-            Verdict::Accept => (shared.on_event)(NetEvent::Event {
-                player,
-                name,
-                args: args.0,
+            Verdict::Accept => (shared.on_event)(match inbound {
+                Inbound::Event { name, args } => NetEvent::Event { player, name, args },
+                Inbound::Command { line } => NetEvent::Command { player, line },
             }),
             Verdict::Drop => {
                 if let Some(dropped) = limiter.take_drop_report(now) {
@@ -383,6 +389,12 @@ async fn read_loop(
             Verdict::Flood => return Stop::Kick(EVENT_FLOOD.to_owned()),
         }
     }
+}
+
+/// A decoded message from a player that is delivered if the rate limit admits it.
+enum Inbound {
+    Event { name: String, args: Vec<Value> },
+    Command { line: String },
 }
 
 /// Everything the writer task owns.

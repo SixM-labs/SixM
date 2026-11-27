@@ -1,12 +1,18 @@
-//! Console commands: the built-in set, `exec`, and dispatch to script commands
-//! and convars.
+//! Console commands: the built-in set, `exec`, the access control commands and
+//! dispatch to script commands and convars.
+//!
+//! A line comes from the console or from a connected player. The console may
+//! run everything. A player may run a built-in command, or a restricted script
+//! command, only when its access control entries allow `command.<name>`. A
+//! player never reaches a convar through its bare name.
 
 use std::fs;
 use std::net::SocketAddr;
 
 use sixm_core::{Host, Value};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
+use crate::access::Permission;
 use crate::config::tokenize;
 use crate::convars::ENDPOINT;
 use crate::manager::{ManagerError, ResourceManager};
@@ -15,16 +21,22 @@ use crate::manager::{ManagerError, ResourceManager};
 const MAX_EXEC_DEPTH: usize = 16;
 
 /// Built-in command names, as listed by `help`.
-const BUILT_IN: [&str; 16] = [
+const BUILT_IN: [&str; 23] = [
+    "add_ace",
+    "add_principal",
     "endpoint_add_tcp",
     "endpoint_add_udp",
     "entities",
     "ensure",
     "exec",
     "help",
+    "list_aces",
+    "list_principals",
     "players",
     "quit",
     "refresh",
+    "remove_ace",
+    "remove_principal",
     "restart",
     "set",
     "setr",
@@ -32,23 +44,81 @@ const BUILT_IN: [&str; 16] = [
     "start",
     "state",
     "stop",
+    "test_ace",
 ];
 
-/// Tokenizes `line` and runs it. `depth` is the number of `exec` files around it.
-pub(crate) fn run_line(manager: &ResourceManager, line: &str, depth: usize) {
+/// Who typed a command line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandSource {
+    /// Standard input, `server.cfg`, `exec`, `+command` and `ExecuteCommand`.
+    Console,
+    /// A connected player, by server id.
+    Player(u32),
+}
+
+/// Where a command line comes from, and how many `exec` files it is nested in.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CommandContext {
+    pub(crate) source: CommandSource,
+    /// The number of `exec` files around the line.
+    depth: usize,
+}
+
+impl CommandContext {
+    /// The context of a line typed at the console.
+    pub(crate) fn console() -> Self {
+        Self {
+            source: CommandSource::Console,
+            depth: 0,
+        }
+    }
+
+    /// The context of a line that connected player `player` sent.
+    pub(crate) fn player(player: u32) -> Self {
+        Self {
+            source: CommandSource::Player(player),
+            depth: 0,
+        }
+    }
+
+    /// The context of a line in a file that `exec` runs from this context.
+    fn nested(self) -> Self {
+        Self {
+            depth: self.depth + 1,
+            ..self
+        }
+    }
+}
+
+/// Tokenizes `line` and runs it.
+pub(crate) fn run_line(manager: &ResourceManager, line: &str, context: CommandContext) {
     match tokenize(line) {
-        Ok(words) => run_words(manager, &words, line.trim(), depth),
-        Err(err) => error!("{}: {err}", line.trim()),
+        Ok(words) => run_words(manager, &words, line.trim(), context),
+        Err(err) => match context.source {
+            CommandSource::Console => error!("{}: {err}", line.trim()),
+            CommandSource::Player(player) => {
+                info!("player {player} sent a line that does not tokenize: {err}");
+            }
+        },
     }
 }
 
 /// Runs one command given as words, name first. `raw` is the line as the
 /// script command handler should see it.
-pub(crate) fn run_words(manager: &ResourceManager, words: &[String], raw: &str, depth: usize) {
+pub(crate) fn run_words(
+    manager: &ResourceManager,
+    words: &[String],
+    raw: &str,
+    context: CommandContext,
+) {
     let Some((name, args)) = words.split_first() else {
         return;
     };
-    match name.to_ascii_lowercase().as_str() {
+    let lower = name.to_ascii_lowercase();
+    if BUILT_IN.contains(&lower.as_str()) && !permitted(manager, context.source, &lower) {
+        return;
+    }
+    match lower.as_str() {
         "set" | "sets" | "setr" => set_convar(manager, args),
         "start" => resource_command(args, "start <resource>", |resource| manager.start(resource)),
         "stop" => resource_command(args, "stop <resource>", |resource| manager.stop(resource)),
@@ -65,18 +135,60 @@ pub(crate) fn run_words(manager: &ResourceManager, words: &[String], raw: &str, 
         "entities" => entities(manager),
         "state" => state(manager, args),
         "quit" => quit(manager, args),
-        "exec" => exec(manager, args, depth),
+        "exec" => exec(manager, args, context),
         "help" => help(manager),
-        _ => run_script_or_convar(manager, name, args, raw),
+        "add_ace" => add_ace(manager, args),
+        "remove_ace" => remove_ace(manager, args),
+        "add_principal" => add_principal(manager, args),
+        "remove_principal" => remove_principal(manager, args),
+        "list_aces" => list_aces(manager, args),
+        "list_principals" => list_principals(manager, args),
+        "test_ace" => test_ace(manager, args),
+        _ => run_script_or_convar(manager, name, &lower, args, raw, context.source),
     }
 }
 
+/// Whether `source` may run `command`, a built-in or restricted command in
+/// lower case. The console may run everything. A player is checked against
+/// `command.<name>`, and a refusal is logged with the player id and the name.
+fn permitted(manager: &ResourceManager, source: CommandSource, command: &str) -> bool {
+    match source {
+        CommandSource::Console => true,
+        CommandSource::Player(player) => {
+            let allowed = manager.player_may(player, &format!("command.{command}"));
+            if !allowed {
+                info!("player {player} may not run `{command}`");
+            }
+            allowed
+        }
+    }
+}
+
+/// The first argument of a script command: the player's id, or `0` for the console.
+fn caller_id(source: CommandSource) -> Value {
+    Value::Int(match source {
+        CommandSource::Console => 0,
+        CommandSource::Player(player) => i64::from(player),
+    })
+}
+
 /// Runs a script command, or prints or sets an existing convar, or reports an
-/// unknown name.
-fn run_script_or_convar(manager: &ResourceManager, name: &str, args: &[String], raw: &str) {
-    if let Some(command) = manager.script_command(&name.to_ascii_lowercase()) {
+/// unknown name. `lower` is `name` in lower case. A restricted script command
+/// is checked for a player. A player may not read or set a convar by its name.
+fn run_script_or_convar(
+    manager: &ResourceManager,
+    name: &str,
+    lower: &str,
+    args: &[String],
+    raw: &str,
+    source: CommandSource,
+) {
+    if let Some(command) = manager.script_command(lower) {
+        if command.restricted && !permitted(manager, source, lower) {
+            return;
+        }
         let call_args = [
-            Value::Int(0),
+            caller_id(source),
             Value::Array(args.iter().map(|arg| Value::from(arg.as_str())).collect()),
             Value::from(raw),
         ];
@@ -86,14 +198,19 @@ fn run_script_or_convar(manager: &ResourceManager, name: &str, args: &[String], 
         return;
     }
     if let Some(value) = manager.convar(name) {
-        if args.is_empty() {
-            info!("{name} = \"{value}\"");
-        } else {
-            manager.set_convar(name, &args.join(" "));
+        match source {
+            CommandSource::Player(player) => {
+                info!("player {player} may not read or set the convar `{name}`");
+            }
+            CommandSource::Console if args.is_empty() => info!("{name} = \"{value}\""),
+            CommandSource::Console => manager.set_convar(name, &args.join(" ")),
         }
         return;
     }
-    warn!("No such command {name}.");
+    match source {
+        CommandSource::Console => warn!("No such command {name}."),
+        CommandSource::Player(player) => debug!("player {player} sent an unknown command `{name}`"),
+    }
 }
 
 /// `set`, `sets` and `setr`: store a convar. The value is the rest of the line,
@@ -212,13 +329,14 @@ fn quit(manager: &ResourceManager, args: &[String]) {
     manager.request_quit();
 }
 
-/// `exec <file>`: runs each line of a file. The path is relative to the working directory.
-fn exec(manager: &ResourceManager, args: &[String], depth: usize) {
+/// `exec <file>`: runs each line of a file, as the source that runs `exec`. The
+/// path is relative to the working directory.
+fn exec(manager: &ResourceManager, args: &[String], context: CommandContext) {
     let Some(file) = args.first() else {
         warn!("usage: exec <file>");
         return;
     };
-    if depth >= MAX_EXEC_DEPTH {
+    if context.depth >= MAX_EXEC_DEPTH {
         error!("exec {file}: files are nested more than {MAX_EXEC_DEPTH} levels deep");
         return;
     }
@@ -235,7 +353,7 @@ fn exec(manager: &ResourceManager, args: &[String], depth: usize) {
             break;
         }
         match tokenize(line) {
-            Ok(words) => run_words(manager, &words, line.trim(), depth + 1),
+            Ok(words) => run_words(manager, &words, line.trim(), context.nested()),
             Err(err) => warn!("{file}:{}: {err}", index + 1),
         }
     }
@@ -260,4 +378,134 @@ fn help(manager: &ResourceManager) {
         })
         .collect();
     info!("Script commands: {}", listing.join(", "));
+}
+
+/// The `N` words of `args`, which must all be non-empty. Logs `usage` and
+/// returns `None` otherwise.
+fn names<'a, const N: usize>(args: &'a [String], usage: &str) -> Option<[&'a str; N]> {
+    let words = <[&str; N]>::try_from(args.iter().map(String::as_str).collect::<Vec<_>>()).ok();
+    match words {
+        Some(words) if words.iter().all(|word| !word.is_empty()) => Some(words),
+        _ => {
+            warn!("usage: {usage}");
+            None
+        }
+    }
+}
+
+/// Reads the `allow` or `deny` word of an access command. Logs `usage` when it is neither.
+fn permission_arg(word: &str, usage: &str) -> Option<Permission> {
+    let permission = Permission::parse(word);
+    if permission.is_none() {
+        warn!("usage: {usage}");
+    }
+    permission
+}
+
+/// `add_ace <principal> <object> <allow|deny>`: sets the entry of a principal
+/// for an object. An earlier entry for the same pair is replaced.
+fn add_ace(manager: &ResourceManager, args: &[String]) {
+    const USAGE: &str = "add_ace <principal> <object> <allow|deny>";
+    let Some([principal, object, word]) = names::<3>(args, USAGE) else {
+        return;
+    };
+    let Some(permission) = permission_arg(word, USAGE) else {
+        return;
+    };
+    manager
+        .access
+        .borrow_mut()
+        .add_ace(principal, object, permission);
+    info!("ace {principal} {object} {}", permission.as_str());
+}
+
+/// `remove_ace <principal> <object> <allow|deny>`: removes an entry, when it
+/// has that permission.
+fn remove_ace(manager: &ResourceManager, args: &[String]) {
+    const USAGE: &str = "remove_ace <principal> <object> <allow|deny>";
+    let Some([principal, object, word]) = names::<3>(args, USAGE) else {
+        return;
+    };
+    let Some(permission) = permission_arg(word, USAGE) else {
+        return;
+    };
+    let removed = manager
+        .access
+        .borrow_mut()
+        .remove_ace(principal, object, permission);
+    if removed {
+        info!("removed ace {principal} {object} {}", permission.as_str());
+    } else {
+        warn!("no ace {principal} {object} {}", permission.as_str());
+    }
+}
+
+/// `add_principal <child> <parent>`: makes `child` inherit from `parent`.
+fn add_principal(manager: &ResourceManager, args: &[String]) {
+    let Some([child, parent]) = names::<2>(args, "add_principal <child> <parent>") else {
+        return;
+    };
+    manager.access.borrow_mut().add_principal(child, parent);
+    info!("principal {child} inherits from {parent}");
+}
+
+/// `remove_principal <child> <parent>`: removes an inheritance link.
+fn remove_principal(manager: &ResourceManager, args: &[String]) {
+    let Some([child, parent]) = names::<2>(args, "remove_principal <child> <parent>") else {
+        return;
+    };
+    let removed = manager.access.borrow_mut().remove_principal(child, parent);
+    if removed {
+        info!("principal {child} no longer inherits from {parent}");
+    } else {
+        warn!("no link from {child} to {parent}");
+    }
+}
+
+/// `list_aces`: lists every entry as `ace <principal> <object> <allow|deny>`.
+fn list_aces(manager: &ResourceManager, args: &[String]) {
+    if !args.is_empty() {
+        warn!("usage: list_aces");
+        return;
+    }
+    let access = manager.access.borrow();
+    let mut count = 0;
+    for (principal, object, permission) in access.aces() {
+        info!("ace {principal} {object} {}", permission.as_str());
+        count += 1;
+    }
+    if count == 0 {
+        info!("No access entries");
+    }
+}
+
+/// `list_principals`: lists every inheritance link as `principal <child> <parent>`.
+fn list_principals(manager: &ResourceManager, args: &[String]) {
+    if !args.is_empty() {
+        warn!("usage: list_principals");
+        return;
+    }
+    let access = manager.access.borrow();
+    let mut count = 0;
+    for (child, parent) in access.links() {
+        info!("principal {child} inherits from {parent}");
+        count += 1;
+    }
+    if count == 0 {
+        info!("No principal links");
+    }
+}
+
+/// `test_ace <principal> <object>`: tells whether the principal may use the
+/// object, with the same rules that the server applies to players.
+fn test_ace(manager: &ResourceManager, args: &[String]) {
+    let Some([principal, object]) = names::<2>(args, "test_ace <principal> <object>") else {
+        return;
+    };
+    let verdict = if manager.ace_allowed(principal, object) {
+        "allowed"
+    } else {
+        "denied"
+    };
+    info!("{principal} is {verdict} {object}");
 }

@@ -27,7 +27,7 @@ use crate::protocol::{
 };
 use crate::transfer::HEADER_LEN;
 use crate::transport::{ServerVerifier, Trust, client_config, close_connection, closing_reason};
-use crate::wire::{decode_server_message, encode_event, encode_frame, read_frame};
+use crate::wire::{decode_server_message, encode_command, encode_event, encode_frame, read_frame};
 
 /// Time allowed for the connection to close after the client disconnects.
 const DISCONNECT_GRACE: Duration = Duration::from_secs(1);
@@ -200,6 +200,17 @@ impl NetClient {
     /// Sends an event to the server.
     pub fn send_event(&self, name: &str, args: &[Value]) -> Result<(), NetError> {
         let frame = encode_event(ClientMessage::EVENT_TAG, name, args, MAX_FRAME)?;
+        self.commands
+            .as_ref()
+            .ok_or(NetError::Closed)?
+            .send(frame)
+            .map_err(|_| NetError::Closed)
+    }
+
+    /// Sends a console line to the server, which runs it with this player's
+    /// permissions. The line must be 1 to 4096 bytes long.
+    pub fn send_command(&self, line: &str) -> Result<(), NetError> {
+        let frame = encode_command(line, MAX_FRAME)?;
         self.commands
             .as_ref()
             .ok_or(NetError::Closed)?

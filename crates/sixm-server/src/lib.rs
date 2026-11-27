@@ -4,6 +4,7 @@
 //! The binary parses the arguments, reads standard input and calls
 //! [`Server::run`]. Everything else is usable from tests without a process.
 
+mod access;
 mod commands;
 mod config;
 mod console;

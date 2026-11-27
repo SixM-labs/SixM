@@ -66,6 +66,9 @@ pub struct TestHost {
     pub states: RefCell<HashMap<String, ResourceState>>,
     /// Manifest metadata pairs by resource name, in declaration order.
     pub metadata: RefCell<HashMap<String, Vec<(String, String)>>>,
+    /// Access grants as `(principal, object)` pairs. A principal has exactly the
+    /// objects it is granted: the test host does not model inheritance.
+    pub grants: RefCell<Vec<(String, String)>>,
 }
 
 impl TestHost {
@@ -335,6 +338,13 @@ impl ServerHost for TestHost {
 
     fn drop_player(&self, player: u32, reason: &str) {
         self.dropped.borrow_mut().push((player, reason.to_owned()));
+    }
+
+    fn is_ace_allowed(&self, principal: &str, object: &str) -> bool {
+        self.grants
+            .borrow()
+            .iter()
+            .any(|(granted, allowed)| granted == principal && allowed == object)
     }
 
     fn create_entity(&self, info: EntityInfo) -> Result<u32, ScriptError> {

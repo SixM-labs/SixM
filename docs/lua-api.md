@@ -236,11 +236,14 @@ library can tell who called it. It is `nil` when no resource caused it.
 | `GetConvar` | both | `GetConvar(name, default)`. Returns the convar's text, or `default` when it is not set. |
 | `GetConvarInt` | both | `GetConvarInt(name, default)`. Returns the convar parsed as an integer, or `default` when it is not set or does not parse. |
 | `ExecuteCommand` | both | `ExecuteCommand(line)`. Queues a console line. It runs after the current script call returns. |
-| `RegisterCommand` | both | `RegisterCommand(name, fn [, restricted])`. Registers a console command. `fn` is called as `fn(source, args, raw)`, where `source` is `0` (the console), `args` is an array of strings and `raw` is the line. |
+| `RegisterCommand` | both | `RegisterCommand(name, fn [, restricted])`. Registers a console command. `fn` is called as `fn(source, args, raw)`, where `source` is the player's id or `0` (the console), `args` is an array of strings and `raw` is the line. |
 
 - Convar names are case-insensitive.
-- `restricted` is shown in `help` as "(restricted)". The host does not enforce
-  it. Only the console can run commands, so no other source exists.
+- `restricted` is shown in `help` as "(restricted)". A player may run a
+  restricted command only if allowed `command.<name>`. An unrestricted command
+  runs for everyone. See [server.md](server.md#permissions).
+- `source` is the player's id for a command a player sent, and `0` for the
+  console. `ExecuteCommand` always runs with console rights.
 - A command registered by a resource is removed when that resource stops.
 - Built-in console commands are matched before script commands. A script
   command with the same name as a built-in can never run. See
@@ -259,6 +262,8 @@ library can tell who called it. It is `nil` when no resource caused it.
 | `GetPlayerIdentifier` | `GetPlayerIdentifier(player, index)`. Returns the identifier at the 0-based `index`, or `nil`. |
 | `GetPlayerIdentifierByType` | `GetPlayerIdentifierByType(player, kind)`. Returns the first identifier whose text before `:` is `kind`, whole, for example `license:<hex>`, or `nil`. |
 | `DropPlayer` | `DropPlayer(player [, reason])`. Disconnects the player after the current call. The default reason is `Dropped by server`. |
+| `IsPlayerAceAllowed` | `IsPlayerAceAllowed(player, object)`. Returns whether the player may use `object`, as the principal `player.<id>` with the identifiers it has. `false` for an id that is not connected. See [server.md](server.md#permissions). |
+| `IsPrincipalAceAllowed` | `IsPrincipalAceAllowed(principal, object)`. Returns whether the principal, such as `group.admin`, may use `object`. Names are case-insensitive. |
 | `Player` | `Player(id)`. Returns a table with a `state` field: the player's state bag. Raises an error when the id is not a number or a numeric string. |
 
 Player ids are whole numbers from 1. A new player gets the next number, and

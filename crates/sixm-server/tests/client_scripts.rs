@@ -233,6 +233,15 @@ impl Harness {
     /// Connects a client that keeps its files in `cache` and its data in
     /// `data`, then starts the resources it synced.
     fn connect(&self, cache: &Path, data: &Path) -> Rc<ClientRuntime> {
+        let runtime = ClientRuntime::new(self.connect_client(cache), data);
+        runtime.start_synced();
+        runtime
+    }
+
+    /// Connects a client that keeps its files in `cache`, and returns it
+    /// without wrapping it in a runtime. Its messages are not read until
+    /// something polls it.
+    fn connect_client(&self, cache: &Path) -> Client {
         let addr = self.addr;
         let cache = cache.to_path_buf();
         let handle = thread::spawn(move || {
@@ -250,13 +259,30 @@ impl Harness {
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         }
-        let client = handle
+        handle
             .join()
             .expect("the client thread does not panic")
-            .expect("the client connects and syncs");
-        let runtime = ClientRuntime::new(client, data);
-        runtime.start_synced();
-        runtime
+            .expect("the client connects and syncs")
+    }
+
+    /// Handles server inputs until the report log satisfies `done`, and returns
+    /// the log. For a client that is not polled.
+    fn wait_for_server_log(&self, what: &str, done: impl Fn(&str) -> bool) -> String {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            match self.input.recv_timeout(STEP) {
+                Ok(input) => self.fx.server.handle(input),
+                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {}
+            }
+            let log = self.fx.text(self.reporter, "report");
+            if done(&log) {
+                return log;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {what}; the server has:\n{log}"
+            );
+        }
     }
 
     /// Runs both loops until the server's report log satisfies `done`, and
@@ -486,4 +512,169 @@ fn client_resource_natives_report_state_metadata_and_resources() {
     assert!(has_line(&log, "1: state starting"), "{log}");
     assert!(has_line(&log, "1: version 1.2.0"), "{log}");
     assert!(has_line(&log, "1: count 1 hello"), "{log}");
+}
+
+/// Server side of the command tests: a restricted and an unrestricted command,
+/// a probe of `IsPlayerAceAllowed`, and the license of each joining player.
+const COMMANDS_SCRIPT: &str = r"
+local lines = {}
+
+local function record(line)
+    lines[#lines + 1] = line
+end
+
+AddEventHandler('playerJoining', function()
+    record(('license %s'):format(GetPlayerIdentifierByType(source, 'license') or '-'))
+end)
+
+RegisterCommand('hello', function(source, args)
+    record(('hello %d %s'):format(source, args[1] or '-'))
+end, false)
+
+RegisterCommand('secret', function(source)
+    record(('secret %d'):format(source))
+end, true)
+
+RegisterCommand('probe', function(source, args)
+    record(('probe %d %s %s'):format(source, args[1], tostring(IsPlayerAceAllowed(source, args[1]))))
+end, false)
+
+function report()
+    return table.concat(lines, '\n')
+end
+";
+
+/// Name of the resource that holds [`COMMANDS_SCRIPT`].
+const COMMANDS_RESOURCE: &str = "commands";
+
+/// A server with the command resource running and a client that has joined.
+struct CommandSession {
+    h: Harness,
+    runtime: Rc<ClientRuntime>,
+    /// The player's license identifier, `license:<hex>`.
+    license: String,
+    _dir: TempDir,
+}
+
+fn command_session() -> CommandSession {
+    let h = Harness::bare(COMMANDS_RESOURCE);
+    h.add(
+        COMMANDS_RESOURCE,
+        &manifest(&["server.lua"], &["report"], &[]),
+        &[("server.lua", COMMANDS_SCRIPT)],
+    );
+    h.start(COMMANDS_RESOURCE);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let runtime = h.connect(&dir.path().join("cache"), &dir.path().join("data"));
+    let log = h.wait_for_report(&runtime, "the join", |log| has_prefix(log, "license "));
+    let license = log
+        .lines()
+        .find_map(|line| line.strip_prefix("license "))
+        .expect("the join is recorded")
+        .to_owned();
+    CommandSession {
+        h,
+        runtime,
+        license,
+        _dir: dir,
+    }
+}
+
+/// Whether some line of the report log starts with `prefix`.
+fn has_prefix(log: &str, prefix: &str) -> bool {
+    log.lines().any(|line| line.starts_with(prefix))
+}
+
+/// Runs the console line `line` on the server, as the maintainer would.
+fn console(h: &Harness, line: &str) {
+    h.fx.server.execute(line);
+}
+
+#[test]
+fn player_commands_run_with_the_player_id_and_restricted_ones_need_an_entry() {
+    let s = command_session();
+    s.runtime.execute("hello world");
+    s.h.wait_for_report(&s.runtime, "the hello", |log| {
+        has_line(log, "hello 1 world")
+    });
+
+    s.runtime.execute("secret");
+    s.runtime.execute("hello refusal");
+    let log = s.h.wait_for_report(&s.runtime, "the second hello", |log| {
+        has_line(log, "hello 1 refusal")
+    });
+    assert!(
+        !has_prefix(&log, "secret"),
+        "a restricted command ran:\n{log}"
+    );
+
+    console(
+        &s.h,
+        &format!("add_ace identifier.{} command.secret allow", s.license),
+    );
+    s.runtime.execute("secret");
+    s.h.wait_for_report(&s.runtime, "the allowed secret", |log| {
+        has_line(log, "secret 1")
+    });
+
+    s.runtime.execute("probe command.secret");
+    s.runtime.execute("probe command.quit");
+    let log = s.h.wait_for_report(&s.runtime, "the probes", |log| {
+        has_line(log, "probe 1 command.quit false")
+    });
+    assert!(has_line(&log, "probe 1 command.secret true"), "{log}");
+}
+
+#[test]
+fn group_membership_grants_commands_through_the_player_principal() {
+    let s = command_session();
+    s.runtime.execute("probe command.quit");
+    s.h.wait_for_report(&s.runtime, "the first probe", |log| {
+        has_line(log, "probe 1 command.quit false")
+    });
+
+    console(
+        &s.h,
+        &format!("add_principal identifier.{} group.admin", s.license),
+    );
+    console(&s.h, "add_ace group.admin command allow");
+    s.runtime.execute("probe command.quit");
+    s.h.wait_for_report(&s.runtime, "the group probe", |log| {
+        has_line(log, "probe 1 command.quit true")
+    });
+}
+
+#[test]
+fn players_cannot_quit_stop_or_read_and_set_convars_through_the_server() {
+    let h = Harness::bare(COMMANDS_RESOURCE);
+    h.add(
+        COMMANDS_RESOURCE,
+        &manifest(&["server.lua"], &["report"], &[]),
+        &[("server.lua", COMMANDS_SCRIPT)],
+    );
+    h.start(COMMANDS_RESOURCE);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let client = h.connect_client(&dir.path().join("cache"));
+    let before = h.fx.manager().convar("sv_hostname");
+
+    for line in [
+        "quit",
+        "stop commands",
+        "sv_hostname hacked",
+        "hello refused",
+    ] {
+        client.send_command(line).expect("the command is sent");
+    }
+    h.wait_for_server_log("the last hello", |log| has_line(log, "hello 1 refused"));
+
+    assert!(
+        !h.fx.manager().quit_requested(),
+        "a player stopped the server"
+    );
+    assert!(h.fx.manager().is_running(COMMANDS_RESOURCE));
+    assert_eq!(h.fx.manager().convar("sv_hostname"), before);
+    assert_ne!(
+        h.fx.manager().convar("sv_hostname").as_deref(),
+        Some("hacked")
+    );
 }

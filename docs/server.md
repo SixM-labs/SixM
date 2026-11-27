@@ -90,6 +90,13 @@ same name is never reached.
 | `exec <file>` | Runs each line of the file. See above. |
 | `help` | Lists the built-in commands and the script commands. Restricted commands are marked. |
 | `quit [reason]` | Asks the server to stop. The reason is written to the log. |
+| `add_ace <principal> <object> <allow\|deny>` | Sets the entry of a principal for an object. An earlier entry for the same pair is replaced. See [Permissions](#permissions). |
+| `remove_ace <principal> <object> <allow\|deny>` | Removes that entry, if it has that permission. |
+| `add_principal <child> <parent>` | Makes `child` inherit from `parent`. |
+| `remove_principal <child> <parent>` | Removes that inheritance link. |
+| `list_aces` | Lists every entry as `ace <principal> <object> <allow\|deny>`. |
+| `list_principals` | Lists every link as `principal <child> <parent>`. |
+| `test_ace <principal> <object>` | Prints whether the principal is allowed or denied the object. |
 
 A failed resource command is logged. Expected refusals, such as a resource
 canceled by `onResourceStarting`, are warnings.
@@ -99,10 +106,68 @@ canceled by `onResourceStarting`, are warnings.
 For any other name, the server checks in this order:
 
 1. A script command registered with `RegisterCommand`. It receives the
-   arguments and the raw line.
+   player id (`0` for the console), the arguments and the raw line.
 2. An existing convar. Given no value, it prints the convar. Given a value, it
    sets it.
 3. Otherwise the server logs `No such command`.
+
+A console command is run by the console, a player's command by the player
+(see below). A script command that is not restricted runs for every source.
+
+## Permissions
+
+Players can send console lines from their client (see
+[client.md](client.md)). The server runs such a line with the player's
+permissions, which come from access control entries (ACEs). The console runs
+every command.
+
+- A player may run a built-in command only if its principal, `player.<id>`, is
+  allowed `command.<name>`. For example, `quit` needs `command.quit`.
+- A player may run a script command registered with `restricted` only if it is
+  allowed `command.<name>`. A script command that is not restricted runs for
+  every player.
+- A player can never print or set a convar by its bare name.
+- A refused line is logged at `info` with the player id and the command name.
+  An unknown name from a player is logged at `debug` only.
+- `ExecuteCommand` runs its line with console rights, whoever called it. A
+  script that passes a player's request to `ExecuteCommand` should first check
+  the player with `IsPlayerAceAllowed`.
+
+A principal is a name such as `identifier.license:<hex>`, `group.admin` or
+`player.3`. `add_principal` makes one principal inherit from another, so a
+player can be placed in a group. Every principal inherits from
+`builtin.everyone`. A connected player, `player.<id>`, also inherits from
+`identifier.<identifier>` for each of its identifiers, so a license can be
+named directly.
+
+An object is a dotted path, such as `command.stop`. An entry on `command`
+also covers `command.stop`. The check works like this:
+
+1. Collect the principal's ancestors: the principal itself, each principal it
+   inherits from, directly or through other principals, and `builtin.everyone`.
+   Each name is compared case-insensitively.
+2. Check the object at its full path, then at each shorter dotted prefix, from
+   the longest to the shortest (`command.stop`, then `command`).
+3. At the first path that any ancestor has an entry for, a deny means no, and
+   an allow means yes. A deny beats an allow on the same path.
+4. If no path has an entry for any ancestor, the answer is no.
+
+So with `add_ace group.admin command allow` and
+`add_ace group.admin command.quit deny`, an admin may run `start` and may not
+run `quit`. A principal with no entries is denied everything.
+
+Example `server.cfg` that lets one player and its group run every command:
+
+```text
+add_principal identifier.license:<hex> group.admin
+add_ace group.admin command allow
+```
+
+Replace `<hex>` with the player's `license` identifier, as printed by
+`players` or `GetPlayerIdentifierByType`. Entries take effect as soon as the
+line runs, so they can also be set from the console while the server runs.
+Granting `command` grants `exec`, which runs any file the server can read, and
+the access commands themselves. Grant only what a player needs.
 
 ## Convars
 
@@ -161,9 +226,9 @@ The server presents a self-signed certificate. Its file is set by
   Clients must present a certificate, so every player has a `license`.
 - A script can refuse a connection in `playerConnecting`. Without a reason the
   client sees `Rejected by the server`.
-- Each player's inbound events are rate limited to 100 events per second
-  sustained, with a burst of 200. A player whose traffic stays above 1000
-  events per second for five seconds in a row is kicked for flooding.
+- Each player's inbound events and console lines are rate limited together, at
+  100 per second sustained, with a burst of 200. A player whose traffic stays
+  above 1000 per second for five seconds in a row is kicked for flooding.
 
 ## Quitting
 

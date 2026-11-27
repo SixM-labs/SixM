@@ -16,6 +16,7 @@ use sixm_core::{ClientTarget, EventSource, PlayerInfo, ScriptError, Value};
 use sixm_net::{ConnectionId, Fingerprint, NetError, NetEvent, NetServer, ServerConfig};
 use tracing::{debug, info, warn};
 
+use crate::commands::{self, CommandContext};
 use crate::host_functions::HostFn;
 use crate::manager::ResourceManager;
 use crate::server::Input;
@@ -34,6 +35,9 @@ pub(crate) struct Player {
     connection: ConnectionId,
     /// `license:<fingerprint>` and `ip:<address>`, in that order.
     identifiers: Vec<String>,
+    /// The identifiers as access control principals, `identifier.<identifier>`,
+    /// in lower case.
+    principals: Vec<String>,
     /// Whether `playerConnecting` let the player in. Until then the player is
     /// known to `player_info` and the identifier functions only.
     admitted: bool,
@@ -46,14 +50,20 @@ impl Player {
         connection: ConnectionId,
         fingerprint: Fingerprint,
     ) -> Self {
+        let identifiers = vec![
+            format!("license:{fingerprint}"),
+            format!("ip:{}", endpoint.ip()),
+        ];
+        let principals = identifiers
+            .iter()
+            .map(|identifier| format!("identifier.{identifier}"))
+            .collect();
         Self {
             name: name.to_owned(),
             endpoint,
             connection,
-            identifiers: vec![
-                format!("license:{fingerprint}"),
-                format!("ip:{}", endpoint.ip()),
-            ],
+            identifiers,
+            principals,
             admitted: false,
         }
     }
@@ -214,6 +224,7 @@ impl ResourceManager {
                 fingerprint,
             } => self.connecting(connection, &name, endpoint, fingerprint),
             NetEvent::Event { player, name, args } => self.player_event(player, &name, &args),
+            NetEvent::Command { player, line } => self.player_command(player, &line),
             NetEvent::Disconnected { player, reason } => self.player_dropped(player, &reason),
             NetEvent::Abandoned { connection } => self.abandoned(connection),
         }
@@ -320,6 +331,39 @@ impl ResourceManager {
             return;
         }
         self.dispatch(name, EventSource::Net(player), args);
+    }
+
+    /// Runs a console line a player sent, with the player's permissions.
+    fn player_command(&self, player: u32, line: &str) {
+        if !self.network.players.borrow().contains(player) {
+            debug!(player, "command from an unknown player ignored");
+            return;
+        }
+        commands::run_line(self, line, CommandContext::player(player));
+    }
+
+    /// Whether connected player `player` may use `object`. The player is the
+    /// principal `player.<id>`.
+    pub(crate) fn player_may(&self, player: u32, object: &str) -> bool {
+        self.ace_allowed(&format!("player.{player}"), object)
+    }
+
+    /// Whether `principal` may use `object` under the access control entries.
+    /// A principal `player.<id>` of a connected or connecting player also
+    /// inherits from its identifiers.
+    pub(crate) fn ace_allowed(&self, principal: &str, object: &str) -> bool {
+        let players = self.network.players.borrow();
+        let player = principal
+            .strip_prefix("player.")
+            .and_then(|text| text.parse::<u32>().ok())
+            .and_then(|id| players.get(id));
+        self.access.borrow().is_allowed(
+            principal,
+            object,
+            player
+                .into_iter()
+                .flat_map(|found| found.principals.iter().map(String::as_str)),
+        )
     }
 
     /// Runs `playerDropped` and removes the player. The player is still listed

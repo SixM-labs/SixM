@@ -1,5 +1,5 @@
 //! Server-only player functions: client events, the connected-player list,
-//! names, endpoints, identifiers, drops and `Player(id)`.
+//! names, endpoints, identifiers, drops, access control checks and `Player(id)`.
 
 use std::rc::Weak;
 
@@ -16,8 +16,9 @@ const DEFAULT_DROP_REASON: &str = "Dropped by server";
 const EXACT_FLOAT_LIMIT: f64 = 9_007_199_254_740_992.0;
 
 /// Installs `TriggerClientEvent`, `GetPlayers`, `GetNumPlayerIndices`,
-/// `GetPlayerName`, `GetPlayerEndpoint`, the identifier functions, `DropPlayer`
-/// and `Player`. Only server runtimes call this.
+/// `GetPlayerName`, `GetPlayerEndpoint`, the identifier functions, `DropPlayer`,
+/// `IsPlayerAceAllowed`, `IsPrincipalAceAllowed` and `Player`. Only server
+/// runtimes call this.
 pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::Result<()> {
     let trigger_client_event = bind_fn(
         lua,
@@ -75,6 +76,21 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
             Ok(())
         },
     )?;
+    let is_player_ace_allowed = bind_fn(lua, weak, |rt, (player, object): (LuaValue, String)| {
+        let Some(id) = player_id(&player) else {
+            return Ok(false);
+        };
+        let host = rt.host()?;
+        let server = server(&*host)?;
+        if server.player_info(id).is_none() {
+            return Ok(false);
+        }
+        Ok(server.is_ace_allowed(&format!("player.{id}"), &object))
+    })?;
+    let is_principal_ace_allowed =
+        bind_fn(lua, weak, |rt, (principal, object): (String, String)| {
+            Ok(server(&*rt.host()?)?.is_ace_allowed(&principal, &object))
+        })?;
     let player = bind_fn(lua, weak, |rt, (id,): (LuaValue,)| {
         let id = player_id(&id).ok_or_else(|| invalid_player("Player"))?;
         let object = rt.lua.create_table()?;
@@ -93,6 +109,8 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
         ("GetPlayerIdentifier", get_player_identifier),
         ("GetPlayerIdentifierByType", get_player_identifier_by_type),
         ("DropPlayer", drop_player),
+        ("IsPlayerAceAllowed", is_player_ace_allowed),
+        ("IsPrincipalAceAllowed", is_principal_ace_allowed),
         ("Player", player),
     ];
     for (name, function) in functions {

@@ -30,7 +30,8 @@ given `PROTOCOL_VERSION`.
 ## Streams
 
 - The client opens one bidirectional stream. It sends `Hello` first.
-- The client sends its later messages (`Event`, `RequestFile`) on that stream.
+- The client sends its later messages (`Event`, `RequestFile`, `Command`) on
+  that stream.
   The server sends its messages on the send side of the same stream.
 - The server opens a **unidirectional** stream for each file transfer. See
   below.
@@ -103,6 +104,11 @@ Client to server (`ClientMessage`):
 | 0 | `Hello` | `protocol: u32`, `name: string` |
 | 1 | `Event` | `name: string`, `args: values` |
 | 2 | `RequestFile` | `hash: 32 bytes` |
+| 3 | `Command` | `line: string`, at most 4096 bytes |
+
+`Command` carries a console line typed on the client that the client does not
+know. The server runs it with the player's permissions, and it shares the
+event rate limit. A line longer than 4096 bytes is a protocol error.
 
 Server to client (`ServerMessage`):
 
@@ -126,11 +132,11 @@ Server to client (`ServerMessage`):
 
 ### Handshake
 
-1. The client sends `Hello` with `protocol = 5` and its player name. The
+1. The client sends `Hello` with `protocol = 6` and its player name. The
    server has already verified the client certificate, so only a client with a
    certificate gets this far.
 2. A different protocol number is refused with `Rejected`, for example
-   `unsupported protocol version 4, server speaks 5`.
+   `unsupported protocol version 5, server speaks 6`.
 3. A name outside 1 to 64 characters is refused.
 4. The server replies `Welcome`, or `Rejected` with a reason.
 5. The server sends a `Resources` snapshot. It may span several frames, which
@@ -190,8 +196,8 @@ Clients keep each file in a cache under its hash. See [client.md](client.md).
 | Limit | Value | Result |
 |---|---|---|
 | Outbound queue per player | 1024 frames | The player is kicked with `send queue overflow`. |
-| Event rate | 100 events per second, burst 200 | Events over the rate are dropped. The connection stays open. |
-| Event flood | More than 1000 events in a second, for five seconds | The player is kicked with `event flood`. |
+| Event rate | 100 events or commands per second, burst 200 | Events and commands over the rate are dropped. The connection stays open. |
+| Event flood | More than 1000 events or commands in a second, for five seconds | The player is kicked with `event flood`. |
 | Server shutdown | none | Every player is kicked with `server shutting down`. |
 
 ## Versioning

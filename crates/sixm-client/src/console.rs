@@ -57,7 +57,8 @@ impl ClientRuntime {
         }
     }
 
-    /// Calls a script command, prints or sets a convar, or reports an unknown name.
+    /// Calls a script command or prints or sets a convar. A name neither claims
+    /// is sent to the server.
     fn run_script_or_convar(&self, name: &str, args: &[String], raw: &str) {
         let command = self
             .commands
@@ -84,7 +85,16 @@ impl ClientRuntime {
             }
             return;
         }
-        warn!("No such command {name}.");
+        self.send_to_server(name, raw);
+    }
+
+    /// Sends a line no client command or convar claims to the server, which
+    /// may know it.
+    fn send_to_server(&self, name: &str, raw: &str) {
+        let sent = self.client.borrow().send_command(raw);
+        if let Err(err) = sent {
+            error!("{name}: the server did not get the command: {err}");
+        }
     }
 
     /// `set`, `sets` and `setr`: stores a convar. The value is the rest of the

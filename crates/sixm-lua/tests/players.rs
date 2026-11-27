@@ -4,7 +4,7 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{TestHost, call, first, new_host, start};
+use common::{TestHost, call, first, new_client_host, new_host, start};
 use sixm_core::{
     ClientTarget, EventContext, EventSource, FuncRef, PlayerInfo, ScriptError, ScriptRuntime,
     ServerHost, Value,
@@ -359,5 +359,105 @@ fn identifier_functions_answer_nothing_for_an_unknown_player() {
     assert_eq!(
         call(&rt, "list", &[Value::from("seven")]),
         vec![Value::Array(Vec::new())]
+    );
+}
+
+#[test]
+fn player_ace_check_uses_the_player_principal_and_is_false_for_unknown_players() {
+    let host = new_host();
+    let rt = start(
+        &host,
+        "aces",
+        &["check"],
+        &[(
+            "main.lua",
+            "exports('check', function(player, object) return IsPlayerAceAllowed(player, object) end)\n",
+        )],
+    );
+    join(&host, &[(7, "alice")]);
+    host.grants
+        .borrow_mut()
+        .push(("player.7".to_owned(), "command.secret".to_owned()));
+
+    assert_eq!(
+        call(
+            &rt,
+            "check",
+            &[Value::Int(7), Value::from("command.secret")]
+        ),
+        vec![Value::Bool(true)]
+    );
+    assert_eq!(
+        call(&rt, "check", &[Value::Int(7), Value::from("command.quit")]),
+        vec![Value::Bool(false)]
+    );
+    assert_eq!(
+        call(
+            &rt,
+            "check",
+            &[Value::Int(9), Value::from("command.secret")]
+        ),
+        vec![Value::Bool(false)]
+    );
+    assert_eq!(
+        call(
+            &rt,
+            "check",
+            &[Value::from("nobody"), Value::from("command.secret")]
+        ),
+        vec![Value::Bool(false)]
+    );
+}
+
+#[test]
+fn principal_ace_check_passes_the_names_to_the_host() {
+    let host = new_host();
+    let rt = start(
+        &host,
+        "principals",
+        &["check"],
+        &[(
+            "main.lua",
+            "exports('check', function(principal, object) return IsPrincipalAceAllowed(principal, object) end)\n",
+        )],
+    );
+    host.grants
+        .borrow_mut()
+        .push(("group.admin".to_owned(), "command".to_owned()));
+
+    assert_eq!(
+        call(
+            &rt,
+            "check",
+            &[Value::from("group.admin"), Value::from("command")]
+        ),
+        vec![Value::Bool(true)]
+    );
+    assert_eq!(
+        call(
+            &rt,
+            "check",
+            &[Value::from("group.user"), Value::from("command")]
+        ),
+        vec![Value::Bool(false)]
+    );
+}
+
+#[test]
+fn ace_checks_are_server_only() {
+    let host = new_client_host(2);
+    let rt = start(
+        &host,
+        "clientside",
+        &["probe"],
+        &[(
+            "main.lua",
+            "exports('probe', function() return type(IsPlayerAceAllowed), type(IsPrincipalAceAllowed) end)\n",
+        )],
+    );
+
+    assert_eq!(
+        call(&rt, "probe", &[]),
+        vec![Value::from("nil"), Value::from("nil")]
     );
 }
