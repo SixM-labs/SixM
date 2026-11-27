@@ -13,6 +13,8 @@ use mlua::{Function, Lua, LuaOptions, LuaString, MultiValue, StdLib, Table, Valu
 pub(crate) struct Helpers {
     /// The original `tostring`, used by `print`.
     pub(crate) tostring: Function,
+    /// The original `type`. The vector module wraps it to name vectors.
+    pub(crate) type_fn: Function,
     /// The `Wait` shim: yields its argument from a coroutine.
     pub(crate) wait: Function,
     /// Runs a task body under `xpcall`, so an error comes back as `false, traceback`.
@@ -57,6 +59,7 @@ pub(crate) fn new_state() -> mlua::Result<Lua> {
 pub(crate) fn prepare(lua: &Lua) -> mlua::Result<Helpers> {
     let globals = lua.globals();
     let tostring: Function = globals.raw_get("tostring")?;
+    let type_fn: Function = globals.raw_get("type")?;
     let original_load: Function = globals.raw_get("load")?;
 
     let wait: Function = lua.load(WAIT_SOURCE).set_name("=sixm wait").eval()?;
@@ -94,6 +97,7 @@ pub(crate) fn prepare(lua: &Lua) -> mlua::Result<Helpers> {
 
     Ok(Helpers {
         tostring,
+        type_fn,
         wait,
         task_wrapper,
     })

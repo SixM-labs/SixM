@@ -22,6 +22,12 @@ pub enum Value {
     Array(Vec<Value>),
     /// Any other table. Order is unspecified.
     Map(Vec<(Value, Value)>),
+    /// `vector2` of a script. Components are `f32`, as in the games.
+    Vector2([f32; 2]),
+    /// `vector3` of a script.
+    Vector3([f32; 3]),
+    /// `vector4` of a script.
+    Vector4([f32; 4]),
     /// A callable owned by another resource (or the same one).
     FuncRef(FuncRef),
 }
@@ -43,7 +49,14 @@ impl Value {
             Self::Map(pairs) => pairs
                 .iter()
                 .any(|(key, item)| key.contains_func_ref() || item.contains_func_ref()),
-            Self::Nil | Self::Bool(_) | Self::Int(_) | Self::Float(_) | Self::String(_) => false,
+            Self::Nil
+            | Self::Bool(_)
+            | Self::Int(_)
+            | Self::Float(_)
+            | Self::String(_)
+            | Self::Vector2(_)
+            | Self::Vector3(_)
+            | Self::Vector4(_) => false,
         }
     }
 }

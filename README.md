@@ -15,7 +15,8 @@ separate adapters, starting with GTA VI once a PC version is released.
 
 - **Familiar for FiveM developers.** Resources use `fxmanifest.lua`, and the
   Lua API keeps the names you know: `CreateThread`, `Wait`, `AddEventHandler`,
-  `RegisterNetEvent`, `TriggerEvent`, `exports`, `RegisterCommand`, `json`.
+  `RegisterNetEvent`, `TriggerEvent`, `exports`, `RegisterCommand`, `json`,
+  `vector2`, `vector3`, `vector4` and `GetHashKey`.
   Existing resources should need as few changes as possible.
 - **Fast.** The server, scheduler and resource handling are written in Rust.
   Each resource runs in its own isolated Lua 5.4 state.
@@ -124,6 +125,8 @@ Differences from FiveM:
 - `io` is not available. Use `LoadResourceFile` and `SaveResourceFile`
   instead.
 - `load` only accepts source text, not precompiled bytecode.
+- Vectors are userdata, so `local b = a; b.x = 1` also changes `a`. In FiveM,
+  vectors are values and `a` would keep its old `x`.
 - On the client, `LoadResourceFile` reads the files a running resource declares
   (`files`, `client_scripts` and `shared_scripts`). `SaveResourceFile` writes to
   that resource's local data folder, but never over a declared file.
