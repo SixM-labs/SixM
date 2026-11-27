@@ -17,6 +17,11 @@ may change the protocol and the API.
 - `add_convar_permission <resource> read <convar>` restricts access to a
   plain server convar through both getters and change listeners.
 
+### Fixed
+
+- With port `0`, the server can try another system-assigned game port when
+  the HTTP listener cannot bind the same port.
+
 ## [0.2.0]
 
 The client and server now use protocol 14. Upgrade both together.

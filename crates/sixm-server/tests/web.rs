@@ -3,7 +3,7 @@
 
 mod common;
 
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::mpsc;
 use std::thread;
@@ -46,18 +46,24 @@ const APP: &str = "LOG = {}\n\
 const OTHER: &str = "SetHttpHandler(function(req, res) res.send('other') end)\n";
 
 /// Sends `raw` over a new connection and reads the answer until the server closes it.
-fn exchange(addr: SocketAddr, raw: &[u8]) -> Option<Reply> {
-    let mut stream = TcpStream::connect(addr).ok()?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .ok()?;
-    stream.write_all(raw).ok()?;
+fn exchange(addr: SocketAddr, raw: &[u8]) -> io::Result<Reply> {
+    let mut stream = TcpStream::connect(addr)?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.write_all(raw)?;
     let mut data = Vec::new();
-    stream.read_to_end(&mut data).ok()?;
-    let split = data.windows(4).position(|window| window == b"\r\n\r\n")? + 4;
+    stream.read_to_end(&mut data)?;
+    let split = data
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing HTTP response head"))?
+        + 4;
     let head = String::from_utf8_lossy(&data[..split]).into_owned();
-    let status = head.split_whitespace().nth(1)?.parse().ok()?;
-    Some(Reply {
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|status| status.parse().ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid HTTP status"))?;
+    Ok(Reply {
         status,
         head,
         body: data[split..].to_vec(),
