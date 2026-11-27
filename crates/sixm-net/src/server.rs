@@ -20,7 +20,7 @@ use tokio::task::{Id, JoinError, JoinSet};
 use tracing::{debug, error, warn};
 
 use crate::connection::{self, Decision, Instruction, Shared, Ticket};
-use crate::entities::{EntityEntry, EntityTransform};
+use crate::entities::{EntityEntry, EntityStateUpdate, EntityTransform};
 use crate::error::NetError;
 use crate::files::{MAX_RESOURCE_NAME_LEN, PublishedResource, ResourceEntry, check_published};
 use crate::identity::{Credentials, Fingerprint, Identity};
@@ -32,9 +32,9 @@ use crate::traffic::{Counters, Traffic};
 use crate::transfer::Advertised;
 use crate::transport;
 use crate::wire::{
-    encode_convars, encode_deferral, encode_entity_snapshot, encode_entity_transforms,
-    encode_event, encode_frame, encode_resources_snapshot, encode_state, encode_state_removed,
-    encode_state_snapshot, validate_length,
+    encode_convars, encode_deferral, encode_entity_snapshot, encode_entity_states,
+    encode_entity_transforms, encode_event, encode_frame, encode_resources_snapshot, encode_state,
+    encode_state_removed, encode_state_snapshot, validate_length,
 };
 
 /// Default UDP port, the one FiveM clients expect.
@@ -489,6 +489,29 @@ impl NetServer {
         updates: &[EntityTransform],
     ) -> Result<(), NetError> {
         for frame in encode_entity_transforms(updates, self.max_frame)? {
+            self.post(Command::Send { player, frame })?;
+        }
+        Ok(())
+    }
+
+    /// Sends delta entity state updates to every accepted player, carrying only
+    /// fields that changed since the last frame. Nothing is sent for an empty
+    /// list.
+    pub fn broadcast_entity_states(&self, updates: &[EntityStateUpdate]) -> Result<(), NetError> {
+        for frame in encode_entity_states(updates, self.max_frame)? {
+            self.post(Command::Broadcast { frame })?;
+        }
+        Ok(())
+    }
+
+    /// Sends delta entity state updates to one player. Nothing is sent for an
+    /// empty list.
+    pub fn send_entity_states(
+        &self,
+        player: u32,
+        updates: &[EntityStateUpdate],
+    ) -> Result<(), NetError> {
+        for frame in encode_entity_states(updates, self.max_frame)? {
             self.post(Command::Send { player, frame })?;
         }
         Ok(())

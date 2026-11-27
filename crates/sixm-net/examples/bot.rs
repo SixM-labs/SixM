@@ -80,6 +80,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             Some(ClientEvent::EntityTransforms { updates }) => {
                 println!("{} entity transforms", updates.len());
             }
+            Some(ClientEvent::EntityStates { updates }) => {
+                println!("{} entity state updates", updates.len());
+            }
             Some(ClientEvent::EntityDeleted { id }) => {
                 println!("entity {id} deleted");
             }

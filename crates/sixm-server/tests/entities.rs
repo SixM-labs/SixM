@@ -999,6 +999,7 @@ fn a_frame_with_nothing_moving_sends_no_entity_messages() {
                 notice,
                 ClientNotice::EntityCreated { .. }
                     | ClientNotice::EntityTransforms { .. }
+                    | ClientNotice::EntityStates { .. }
                     | ClientNotice::EntityDeleted { .. }
                     | ClientNotice::StateBag { .. }
                     | ClientNotice::StateBagRemoved { .. }
@@ -1217,4 +1218,332 @@ fn a_bucket_change_and_a_move_in_one_frame_settle_while_scoping() {
 #[test]
 fn a_bucket_change_and_a_move_in_one_frame_settle_with_scoping_off() {
     a_bucket_change_and_a_move_in_one_frame_settle(0);
+}
+
+const STATE_RESOURCE: &str = "entity_state_demo";
+const STATE_EXPORTS: &[&str] = &[
+    "ped_of",
+    "spawn_vehicle",
+    "spawn_owned_object",
+    "freeze_entity",
+    "set_state",
+    "reset_alpha",
+    "attach",
+    "move_vehicle",
+    "delete_vehicle",
+    "set_bucket",
+    "set_vehicle_bucket",
+];
+
+const STATE_SERVER: &str = r"
+local vehicle
+
+function ped_of(player)
+    return GetPlayerPed(player)
+end
+
+function spawn_vehicle(x, y, z)
+    vehicle = CreateVehicle('adder', x, y, z, 0.0, true, false)
+    return vehicle
+end
+
+function spawn_owned_object(player, x, y, z)
+    local obj = CreateObject('prop_crate', x, y, z, true, false, 0)
+    SetEntityOwner(obj, player)
+    return obj
+end
+
+function freeze_entity(id, toggle)
+    FreezeEntityPosition(id, toggle)
+end
+
+function set_state(id, vx, vy, vz, hp, max_hp, visible, alpha)
+    SetEntityVelocity(id, vx, vy, vz)
+    SetEntityMaxHealth(id, max_hp)
+    SetEntityHealth(id, hp)
+    SetEntityVisible(id, visible)
+    SetEntityAlpha(id, alpha)
+end
+
+function reset_alpha(id)
+    ResetEntityAlpha(id)
+end
+
+function attach(child, parent, x, y, z, yaw)
+    AttachEntityToEntity(child, parent, 2, x, y, z, 0.0, 0.0, yaw)
+end
+
+function move_vehicle(x, y, z, heading)
+    SetEntityCoords(vehicle, x, y, z)
+    SetEntityHeading(vehicle, heading)
+end
+
+function delete_vehicle()
+    DeleteEntity(vehicle)
+    vehicle = nil
+end
+
+function set_bucket(player, bucket)
+    SetPlayerRoutingBucket(player, bucket)
+end
+
+function set_vehicle_bucket(bucket)
+    SetEntityRoutingBucket(vehicle, bucket)
+end
+";
+
+const STATE_CLIENT: &str = r"
+RegisterCommand('move_ped', function(_, args)
+    SetEntityCoords(PlayerPedId(), tonumber(args[1]), tonumber(args[2]), tonumber(args[3]))
+end, false)
+
+RegisterCommand('move_entity', function(_, args)
+    SetEntityCoords(tonumber(args[1]), tonumber(args[2]), tonumber(args[3]), tonumber(args[4]))
+end, false)
+";
+
+/// Whether two `[f32; 3]` vectors match within quantization tolerance.
+fn approx_vec3(a: [f32; 3], b: [f32; 3]) -> bool {
+    (a[0] - b[0]).abs() < 0.02 && (a[1] - b[1]).abs() < 0.02 && (a[2] - b[2]).abs() < 0.02
+}
+
+/// Steps the server and all `clients` until `done` returns true or `TIMEOUT` expires.
+fn spin_until(h: &Harness, clients: &[&ClientRuntime], what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + TIMEOUT;
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        h.pump_server();
+        h.fx.server.tick(Instant::now());
+        for client in clients {
+            client.pump(STEP);
+            client.tick(Instant::now());
+        }
+        thread::sleep(STEP);
+    }
+}
+
+#[test]
+fn freeze_blocks_owner_moves_and_unfreezing_allows_them() {
+    let h = Harness::start(STATE_RESOURCE, STATE_SERVER, STATE_CLIENT, STATE_EXPORTS);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let a = h.connect(&dir.path().join("cache"), &dir.path().join("data"));
+    let ped = h.number("ped_of", &[Value::Int(1)]);
+
+    spin_until(&h, &[&*a], "client to receive its ped", || {
+        a.entity_state(ped).is_some()
+    });
+
+    h.call(
+        "freeze_entity",
+        &[Value::Int(i64::from(ped)), Value::Bool(true)],
+    );
+    spin_until(&h, &[&*a], "client to see frozen = true", || {
+        a.entity_state(ped).is_some_and(|state| state.frozen)
+    });
+
+    // Owner move on client is refused while frozen.
+    a.handle(ClientInput::Line("move_ped 50 60 70".to_owned()));
+    for _ in 0..10 {
+        h.pump_server();
+        h.fx.server.tick(Instant::now());
+        a.pump(STEP);
+        a.tick(Instant::now());
+    }
+    assert_eq!(a.entity(ped).unwrap().position, [0.0, 0.0, 0.0]);
+    assert_eq!(
+        h.fx.manager().entity(ped).unwrap().position,
+        [0.0, 0.0, 0.0]
+    );
+
+    // Unfreezing allows owner moves to replicate to the server.
+    h.call(
+        "freeze_entity",
+        &[Value::Int(i64::from(ped)), Value::Bool(false)],
+    );
+    spin_until(&h, &[&*a], "client to see frozen = false", || {
+        a.entity_state(ped).is_some_and(|state| !state.frozen)
+    });
+
+    a.handle(ClientInput::Line("move_ped 12 15 0".to_owned()));
+    spin_until(&h, &[&*a], "server to receive unfrozen ped move", || {
+        h.fx.manager()
+            .entity(ped)
+            .is_some_and(|info| approx_vec3(info.position, [12.0, 15.0, 0.0]))
+    });
+}
+
+#[test]
+fn attachment_follows_parent_blocks_owner_moves_and_detaches_on_delete() {
+    let h = Harness::start(STATE_RESOURCE, STATE_SERVER, STATE_CLIENT, STATE_EXPORTS);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let a = h.connect(&dir.path().join("cache"), &dir.path().join("data"));
+    let vehicle = h.number(
+        "spawn_vehicle",
+        &[Value::Float(0.0), Value::Float(0.0), Value::Float(0.0)],
+    );
+    let prop = h.number(
+        "spawn_owned_object",
+        &[
+            Value::Int(1),
+            Value::Float(0.0),
+            Value::Float(0.0),
+            Value::Float(0.0),
+        ],
+    );
+
+    h.call(
+        "attach",
+        &[
+            Value::Int(i64::from(prop)),
+            Value::Int(i64::from(vehicle)),
+            Value::Float(1.0),
+            Value::Float(0.0),
+            Value::Float(2.0),
+            Value::Float(15.0),
+        ],
+    );
+    spin_until(&h, &[&*a], "client to see prop attached", || {
+        a.entity_state(prop)
+            .and_then(|s| s.attachment)
+            .is_some_and(|att| att.parent == vehicle)
+    });
+
+    // Attached child refuses independent owner moves.
+    a.handle(ClientInput::Line(format!("move_entity {prop} 99 99 99")));
+    for _ in 0..10 {
+        h.pump_server();
+        h.fx.server.tick(Instant::now());
+        a.pump(STEP);
+        a.tick(Instant::now());
+    }
+    assert_eq!(
+        h.fx.manager().entity(prop).unwrap().position,
+        [1.0, 0.0, 2.0]
+    );
+
+    // Moving parent updates attached child's world transform on the client.
+    h.call(
+        "move_vehicle",
+        &[
+            Value::Float(10.0),
+            Value::Float(20.0),
+            Value::Float(30.0),
+            Value::Float(90.0),
+        ],
+    );
+    spin_until(
+        &h,
+        &[&*a],
+        "client to receive child follow transform",
+        || {
+            let pos = a.entity(prop).map_or([0.0; 3], |info| info.position);
+            approx_vec3(pos, [10.0, 21.0, 32.0])
+        },
+    );
+
+    // Deleting parent automatically detaches child and replicates detachment.
+    h.call("delete_vehicle", &[]);
+    spin_until(
+        &h,
+        &[&*a],
+        "client to see auto-detach on parent delete",
+        || {
+            a.entity(vehicle).is_none()
+                && a.entity_state(prop).is_some_and(|s| s.attachment.is_none())
+        },
+    );
+
+    // Detached child can now move independently as an owned entity.
+    a.handle(ClientInput::Line(format!("move_entity {prop} 44 55 66")));
+    spin_until(&h, &[&*a], "server to accept detached child move", || {
+        h.fx.manager()
+            .entity(prop)
+            .is_some_and(|info| approx_vec3(info.position, [44.0, 55.0, 66.0]))
+    });
+}
+
+#[test]
+fn delta_entity_states_respect_scoping_and_routing_buckets() {
+    let h = Harness::start(STATE_RESOURCE, STATE_SERVER, STATE_CLIENT, STATE_EXPORTS);
+    set_cull_radius(&h, 50);
+    let dir_a = tempfile::tempdir().expect("temp dir");
+    let dir_b = tempfile::tempdir().expect("temp dir");
+    let a = h.connect(&dir_a.path().join("cache"), &dir_a.path().join("data"));
+    let b = h.connect(&dir_b.path().join("cache"), &dir_b.path().join("data"));
+    let both = [&*a, &*b];
+    let ped_a = h.number("ped_of", &[Value::Int(1)]);
+    let ped_b = h.number("ped_of", &[Value::Int(2)]);
+
+    spin_until(&h, &both, "both clients to receive peds", || {
+        a.entity(ped_a).is_some() && b.entity(ped_b).is_some()
+    });
+
+    // Move client `b` out of range, then spawn vehicle at origin (only in `a`'s scope).
+    b.handle(ClientInput::Line("move_ped 1000 0 0".to_owned()));
+    spin_until(&h, &both, "b to move away", || {
+        h.fx.manager()
+            .entity(ped_b)
+            .is_some_and(|info| info.position[0] > 900.0)
+    });
+
+    let vehicle = h.number(
+        "spawn_vehicle",
+        &[Value::Float(0.0), Value::Float(0.0), Value::Float(0.0)],
+    );
+    spin_until(&h, &both, "a to receive vehicle", || {
+        a.entity(vehicle).is_some()
+    });
+    assert!(b.entity(vehicle).is_none());
+
+    // Mutate state on server: `a` receives delta update, `b` still does not hold `vehicle`.
+    h.call(
+        "set_state",
+        &[
+            Value::Int(i64::from(vehicle)),
+            Value::Float(1.5),
+            Value::Float(2.5),
+            Value::Float(3.5),
+            Value::Int(120),
+            Value::Int(400),
+            Value::Bool(false),
+            Value::Int(80),
+        ],
+    );
+    spin_until(&h, &both, "a to receive delta state", || {
+        a.entity_state(vehicle).is_some_and(|s| {
+            approx_vec3(s.velocity, [1.5, 2.5, 3.5])
+                && s.health == 120
+                && s.max_health == 400
+                && !s.visible
+                && s.alpha == 80
+        })
+    });
+    assert!(b.entity(vehicle).is_none());
+
+    // Move `b` back in range: `b` receives EntityCreated with the full current EntityState.
+    b.handle(ClientInput::Line("move_ped 0 0 0".to_owned()));
+    spin_until(&h, &both, "b to enter scope with full entity state", || {
+        b.entity_state(vehicle).is_some_and(|s| {
+            approx_vec3(s.velocity, [1.5, 2.5, 3.5])
+                && s.health == 120
+                && s.max_health == 400
+                && !s.visible
+                && s.alpha == 80
+        })
+    });
+
+    // Move `b` to bucket 2, then move `vehicle` to bucket 2 and reset alpha:
+    // only `b` holds `vehicle` and receives the delta update.
+    h.call("set_bucket", &[Value::Int(2), Value::Int(2)]);
+    spin_until(&h, &both, "b to leave vehicle bucket", || {
+        b.entity(vehicle).is_none()
+    });
+    h.call("set_vehicle_bucket", &[Value::Int(2)]);
+    h.call("reset_alpha", &[Value::Int(i64::from(vehicle))]);
+    spin_until(
+        &h,
+        &both,
+        "b to receive vehicle in bucket 2 with reset alpha",
+        || a.entity(vehicle).is_none() && b.entity_state(vehicle).is_some_and(|s| s.alpha == 255),
+    );
 }

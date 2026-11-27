@@ -10,10 +10,13 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use sixm_core::{
-    EntityInfo, EntityKind, EventSource, MAX_ENTITIES, ScriptError, Value, entity_bag, is_finite,
-    joaat,
+    EntityAttachment, EntityInfo, EntityKind, EntityState, EventSource, MAX_ENTITIES, ScriptError,
+    Value, entity_bag, is_finite, joaat,
 };
-use sixm_net::EntityTransform;
+use sixm_net::{
+    EntityAttachmentEntry, EntityStateUpdate, EntityTransform, STATE_ALPHA, STATE_ATTACHMENT,
+    STATE_FROZEN, STATE_HEALTH, STATE_MAX_HEALTH, STATE_VELOCITY, STATE_VISIBLE,
+};
 use tracing::{debug, warn};
 
 use crate::manager::ResourceManager;
@@ -29,6 +32,7 @@ pub(crate) type EntityUpdate = EntityTransform;
 #[derive(Debug, Clone, Copy)]
 struct Slot {
     info: EntityInfo,
+    state: EntityState,
     /// How many times the server has moved the entity itself. Only the server
     /// changes it, and an owner's update must carry the current value.
     epoch: u32,
@@ -36,6 +40,8 @@ struct Slot {
     position_dirty: bool,
     /// The rotation changed since the last frame.
     rotation_dirty: bool,
+    /// Bitmask of `EntityState` fields that changed since the last frame.
+    state_dirty: u8,
     /// The client that asked for the entity, or `None` for one a script made.
     creator: Option<u32>,
     /// Whether the entity is handed to another player when its creator leaves,
@@ -57,18 +63,42 @@ impl Slot {
         self.rotation_dirty = false;
         (id, position, rotation, self.epoch)
     }
+
+    /// Takes the state fields that changed since the last frame, clearing
+    /// their bitmask. Returns `None` if nothing changed.
+    fn take_state_update(&mut self, id: u32) -> Option<EntityStateUpdate> {
+        let flags = self.state_dirty;
+        if flags == 0 {
+            return None;
+        }
+        self.state_dirty = 0;
+        Some(EntityStateUpdate {
+            id,
+            frozen: (flags & STATE_FROZEN != 0).then_some(self.state.frozen),
+            velocity: (flags & STATE_VELOCITY != 0).then_some(self.state.velocity),
+            health: (flags & STATE_HEALTH != 0).then_some(self.state.health),
+            max_health: (flags & STATE_MAX_HEALTH != 0).then_some(self.state.max_health),
+            visible: (flags & STATE_VISIBLE != 0).then_some(self.state.visible),
+            alpha: (flags & STATE_ALPHA != 0).then_some(self.state.alpha),
+            attachment: (flags & STATE_ATTACHMENT != 0)
+                .then_some(self.state.attachment.map(EntityAttachmentEntry::from)),
+        })
+    }
 }
 
-/// Every entity on the server, by id, and the ids whose transform changed since
-/// the last frame.
+/// Every entity on the server, by id, and the ids whose transform or state
+/// changed since the last frame.
 #[derive(Debug)]
 pub(crate) struct EntityStore {
     /// The next id to hand out. Zero once every id has been used.
     next_id: u32,
     by_id: BTreeMap<u32, Slot>,
-    /// Ids queued for the next frame, each listed once. An id whose entity was
-    /// deleted stays here until the frame, and is then skipped.
+    /// Ids queued for transform updates at the next frame, each listed once.
     dirty: Vec<u32>,
+    /// Ids queued for state updates at the next frame, each listed once.
+    state_dirty: Vec<u32>,
+    /// Attached children per parent entity id.
+    children: BTreeMap<u32, Vec<u32>>,
     /// The ids of the entities each player owns, in creation order.
     owned: BTreeMap<u32, Vec<u32>>,
     /// The entities by position, for finding those near a player. Only kept
@@ -94,6 +124,8 @@ impl Default for EntityStore {
             next_id: 1,
             by_id: BTreeMap::new(),
             dirty: Vec::new(),
+            state_dirty: Vec::new(),
+            children: BTreeMap::new(),
             owned: BTreeMap::new(),
             grid: None,
             dirty_owners: HashSet::new(),
@@ -131,6 +163,18 @@ impl EntityStore {
     /// The entity `id` with its teleport epoch, if it exists.
     pub(crate) fn info_and_epoch(&self, id: u32) -> Option<(EntityInfo, u32)> {
         self.by_id.get(&id).map(|slot| (slot.info, slot.epoch))
+    }
+
+    /// The entity `id` with its state and teleport epoch, if it exists.
+    pub(crate) fn info_state_and_epoch(&self, id: u32) -> Option<(EntityInfo, EntityState, u32)> {
+        self.by_id
+            .get(&id)
+            .map(|slot| (slot.info, slot.state, slot.epoch))
+    }
+
+    /// The replicated state of the entity `id`, if it exists.
+    pub(crate) fn state(&self, id: u32) -> Option<EntityState> {
+        self.by_id.get(&id).map(|slot| slot.state)
     }
 
     /// Every entity id, in ascending order.
@@ -289,9 +333,11 @@ impl EntityStore {
             id,
             Slot {
                 info,
+                state: EntityState::default(),
                 epoch: 0,
                 position_dirty: false,
                 rotation_dirty: false,
+                state_dirty: 0,
                 creator,
                 migrate_on_orphan,
             },
@@ -310,7 +356,8 @@ impl EntityStore {
         }
     }
 
-    /// Removes the entity `id`, and returns it when it existed.
+    /// Removes the entity `id`, and returns it when it existed. Any children
+    /// attached to `id` are automatically detached and queued for state sync.
     pub(crate) fn remove(&mut self, id: u32) -> Option<EntityInfo> {
         let slot = self.by_id.remove(&id)?;
         let info = slot.info;
@@ -328,7 +375,34 @@ impl EntityStore {
         if let Some(creator) = slot.creator {
             self.uncreate(creator, id);
         }
+        if let Some(att) = slot.state.attachment {
+            self.detach_child_index(att.parent, id);
+        }
+        if let Some(child_ids) = self.children.remove(&id) {
+            for child_id in child_ids {
+                if let Some(child) = self.by_id.get_mut(&child_id)
+                    && child.state.attachment.is_some()
+                {
+                    child.state.attachment = None;
+                    let queued = child.state_dirty != 0;
+                    child.state_dirty |= STATE_ATTACHMENT;
+                    if !queued {
+                        self.state_dirty.push(child_id);
+                    }
+                }
+            }
+        }
         Some(info)
+    }
+
+    /// Removes `child_id` from `parent_id`'s children list.
+    fn detach_child_index(&mut self, parent_id: u32, child_id: u32) {
+        if let Some(list) = self.children.get_mut(&parent_id) {
+            list.retain(|&id| id != child_id);
+            if list.is_empty() {
+                self.children.remove(&parent_id);
+            }
+        }
     }
 
     /// Drops `id` from the entities `creator` created.
@@ -470,11 +544,11 @@ impl EntityStore {
         self.by_id.contains_key(&id)
     }
 
-    /// Every entity with its epoch, in ascending id order.
-    pub(crate) fn all(&self) -> Vec<(u32, EntityInfo, u32)> {
+    /// Every entity with its state and epoch, in ascending id order.
+    pub(crate) fn all(&self) -> Vec<(u32, EntityInfo, EntityState, u32)> {
         self.by_id
             .iter()
-            .map(|(id, slot)| (*id, slot.info, slot.epoch))
+            .map(|(id, slot)| (*id, slot.info, slot.state, slot.epoch))
             .collect()
     }
 
@@ -531,16 +605,18 @@ impl EntityStore {
         if !queued {
             self.dirty.push(id);
         }
+        self.propagate_attachment_transforms(id);
         Ok(())
     }
 
     /// Stores a transform that `player`, the owner of the entity `id`, sent for
     /// the teleport epoch `epoch`. Each part given is stored, and a part that is
     /// `None` keeps its value. Returns `false` and changes nothing unless the
-    /// entity exists, `player` owns it, at least one part is given, every part
-    /// given is finite, and `epoch` is the entity's current epoch. An update
-    /// computed before a server move therefore never lands, whenever it arrives.
-    /// An accepted transform keeps the epoch.
+    /// entity exists, `player` owns it, it is neither frozen nor attached, at
+    /// least one part is given, every part given is finite, and `epoch` is the
+    /// entity's current epoch. An update computed before a server move therefore
+    /// never lands, whenever it arrives. An accepted transform keeps the epoch,
+    /// and updates any attached children.
     pub(crate) fn owner_move(
         &mut self,
         player: u32,
@@ -553,6 +629,8 @@ impl EntityStore {
             return false;
         };
         if slot.info.owner != Some(player)
+            || slot.state.frozen
+            || slot.state.attachment.is_some()
             || slot.epoch != epoch
             || (position.is_none() && rotation.is_none())
             || !position.is_none_or(is_finite)
@@ -575,6 +653,7 @@ impl EntityStore {
         if !queued {
             self.dirty.push(id);
         }
+        self.propagate_attachment_transforms(id);
         true
     }
 
@@ -588,6 +667,289 @@ impl EntityStore {
             }
         }
     }
+
+    /// Moves the state changes of every queued entity into `out`, in the order
+    /// they were first dirtied, and clears the state queue.
+    pub(crate) fn take_state_dirty(&mut self, out: &mut Vec<EntityStateUpdate>) {
+        for id in self.state_dirty.drain(..) {
+            if let Some(slot) = self.by_id.get_mut(&id)
+                && let Some(update) = slot.take_state_update(id)
+            {
+                out.push(update);
+            }
+        }
+    }
+
+    /// Marks `bit` dirty on `id` and queues it if not already queued.
+    fn mark_state_dirty(&mut self, id: u32, bit: u8) {
+        if let Some(slot) = self.by_id.get_mut(&id) {
+            let queued = slot.state_dirty != 0;
+            slot.state_dirty |= bit;
+            if !queued {
+                self.state_dirty.push(id);
+            }
+        }
+    }
+
+    /// Freezes or unfreezes entity `id`.
+    pub(crate) fn set_frozen(&mut self, id: u32, frozen: bool) -> Result<(), ScriptError> {
+        let slot = self
+            .by_id
+            .get_mut(&id)
+            .ok_or_else(|| ScriptError::Runtime(format!("entity {id} does not exist")))?;
+        if slot.state.frozen != frozen {
+            slot.state.frozen = frozen;
+            self.mark_state_dirty(id, STATE_FROZEN);
+        }
+        Ok(())
+    }
+
+    /// Sets entity `id`'s velocity.
+    pub(crate) fn set_velocity(&mut self, id: u32, velocity: [f32; 3]) -> Result<(), ScriptError> {
+        check_finite(velocity)?;
+        let slot = self
+            .by_id
+            .get_mut(&id)
+            .ok_or_else(|| ScriptError::Runtime(format!("entity {id} does not exist")))?;
+        let changed = slot.state.velocity[0].to_bits() != velocity[0].to_bits()
+            || slot.state.velocity[1].to_bits() != velocity[1].to_bits()
+            || slot.state.velocity[2].to_bits() != velocity[2].to_bits();
+        if changed {
+            slot.state.velocity = velocity;
+            self.mark_state_dirty(id, STATE_VELOCITY);
+        }
+        Ok(())
+    }
+
+    /// Sets entity `id`'s health (clamped to `0..=i32::MAX`).
+    pub(crate) fn set_health(&mut self, id: u32, health: i32) -> Result<(), ScriptError> {
+        let health = health.max(0);
+        let slot = self
+            .by_id
+            .get_mut(&id)
+            .ok_or_else(|| ScriptError::Runtime(format!("entity {id} does not exist")))?;
+        if slot.state.health != health {
+            slot.state.health = health;
+            self.mark_state_dirty(id, STATE_HEALTH);
+        }
+        Ok(())
+    }
+
+    /// Sets entity `id`'s maximum health (clamped to `0..=i32::MAX`).
+    pub(crate) fn set_max_health(&mut self, id: u32, max_health: i32) -> Result<(), ScriptError> {
+        let max_health = max_health.max(0);
+        let slot = self
+            .by_id
+            .get_mut(&id)
+            .ok_or_else(|| ScriptError::Runtime(format!("entity {id} does not exist")))?;
+        if slot.state.max_health != max_health {
+            slot.state.max_health = max_health;
+            self.mark_state_dirty(id, STATE_MAX_HEALTH);
+        }
+        Ok(())
+    }
+
+    /// Sets whether entity `id` is visible.
+    pub(crate) fn set_visible(&mut self, id: u32, visible: bool) -> Result<(), ScriptError> {
+        let slot = self
+            .by_id
+            .get_mut(&id)
+            .ok_or_else(|| ScriptError::Runtime(format!("entity {id} does not exist")))?;
+        if slot.state.visible != visible {
+            slot.state.visible = visible;
+            self.mark_state_dirty(id, STATE_VISIBLE);
+        }
+        Ok(())
+    }
+
+    /// Sets entity `id`'s alpha (`0..=255`).
+    pub(crate) fn set_alpha(&mut self, id: u32, alpha: u8) -> Result<(), ScriptError> {
+        let slot = self
+            .by_id
+            .get_mut(&id)
+            .ok_or_else(|| ScriptError::Runtime(format!("entity {id} does not exist")))?;
+        if slot.state.alpha != alpha {
+            slot.state.alpha = alpha;
+            self.mark_state_dirty(id, STATE_ALPHA);
+        }
+        Ok(())
+    }
+
+    /// Attaches `id` to `attachment.parent`. Prevents self-attachment and
+    /// cycles, updates `id`'s world transform (and its children's) to follow
+    /// the parent, and marks state + transform dirty.
+    pub(crate) fn attach(
+        &mut self,
+        id: u32,
+        attachment: EntityAttachment,
+    ) -> Result<(), ScriptError> {
+        check_finite(attachment.offset)?;
+        check_finite(attachment.rotation)?;
+        if !self.by_id.contains_key(&id) {
+            return Err(ScriptError::Runtime(format!("entity {id} does not exist")));
+        }
+        let target = attachment.parent;
+        if !self.by_id.contains_key(&target) {
+            return Err(ScriptError::Runtime(format!(
+                "target entity {target} does not exist"
+            )));
+        }
+        if id == target {
+            return Err(ScriptError::Runtime(
+                "cannot attach an entity to itself".to_owned(),
+            ));
+        }
+        let mut cursor = Some(target);
+        while let Some(ancestor) = cursor {
+            if ancestor == id {
+                return Err(ScriptError::Runtime("attachment cycle detected".to_owned()));
+            }
+            cursor = self
+                .by_id
+                .get(&ancestor)
+                .and_then(|slot| slot.state.attachment)
+                .map(|att| att.parent);
+        }
+
+        let old_attachment = self.by_id.get(&id).and_then(|slot| slot.state.attachment);
+        if let Some(old) = old_attachment
+            && old.parent != target
+        {
+            self.detach_child_index(old.parent, id);
+        }
+        let list = self.children.entry(target).or_default();
+        if !list.contains(&id) {
+            list.push(id);
+        }
+        if old_attachment != Some(attachment) {
+            if let Some(slot) = self.by_id.get_mut(&id) {
+                slot.state.attachment = Some(attachment);
+            }
+            self.mark_state_dirty(id, STATE_ATTACHMENT);
+        }
+        self.apply_attached_transform(id, target, attachment);
+        self.propagate_attachment_transforms(id);
+        Ok(())
+    }
+
+    /// Detaches `id` from its parent if attached.
+    pub(crate) fn detach(&mut self, id: u32) -> Result<(), ScriptError> {
+        let slot = self
+            .by_id
+            .get_mut(&id)
+            .ok_or_else(|| ScriptError::Runtime(format!("entity {id} does not exist")))?;
+        if let Some(old) = slot.state.attachment.take() {
+            self.detach_child_index(old.parent, id);
+            self.mark_state_dirty(id, STATE_ATTACHMENT);
+        }
+        Ok(())
+    }
+
+    /// Updates `child_id`'s world transform from `parent_id`'s current world
+    /// transform and `attachment`, marking it dirty and advancing its epoch.
+    fn apply_attached_transform(
+        &mut self,
+        child_id: u32,
+        parent_id: u32,
+        attachment: EntityAttachment,
+    ) {
+        let Some((parent_pos, parent_rot)) = self
+            .by_id
+            .get(&parent_id)
+            .map(|slot| (slot.info.position, slot.info.rotation))
+        else {
+            return;
+        };
+        let (world_pos, world_rot) = attached_world_transform(
+            parent_pos,
+            parent_rot,
+            attachment.offset,
+            attachment.rotation,
+        );
+        let Some(child_slot) = self.by_id.get_mut(&child_id) else {
+            return;
+        };
+        let queued = child_slot.is_dirty();
+        child_slot.info.position = world_pos;
+        child_slot.info.rotation = world_rot;
+        child_slot.position_dirty = true;
+        child_slot.rotation_dirty = true;
+        child_slot.epoch = child_slot.epoch.wrapping_add(1);
+        if let Some(grid) = self.grid.as_mut() {
+            grid.move_to(child_id, world_pos);
+        }
+        if !queued {
+            self.dirty.push(child_id);
+        }
+    }
+
+    /// Recomputes world transforms for all descendants attached to `root`.
+    /// Returns immediately without allocating when `root` has no children.
+    fn propagate_attachment_transforms(&mut self, root: u32) {
+        if !self.children.contains_key(&root) {
+            return;
+        }
+        let mut stack = vec![root];
+        while let Some(parent_id) = stack.pop() {
+            let Some(child_ids) = self.children.get(&parent_id).cloned() else {
+                continue;
+            };
+            for child_id in child_ids {
+                let Some(att) = self
+                    .by_id
+                    .get(&child_id)
+                    .and_then(|slot| slot.state.attachment)
+                else {
+                    continue;
+                };
+                self.apply_attached_transform(child_id, parent_id, att);
+                stack.push(child_id);
+            }
+        }
+    }
+}
+
+/// Computes an attached child's world position and rotation from its parent's
+/// world transform and the child's local offset and rotation.
+fn attached_world_transform(
+    parent_pos: [f32; 3],
+    parent_rot: [f32; 3],
+    offset: [f32; 3],
+    local_rot: [f32; 3],
+) -> ([f32; 3], [f32; 3]) {
+    let rotated = rotate_euler(offset, parent_rot);
+    let world_pos = [
+        parent_pos[0] + rotated[0],
+        parent_pos[1] + rotated[1],
+        parent_pos[2] + rotated[2],
+    ];
+    let world_rot = [
+        parent_rot[0] + local_rot[0],
+        parent_rot[1] + local_rot[1],
+        parent_rot[2] + local_rot[2],
+    ];
+    (world_pos, world_rot)
+}
+
+/// Rotates `offset` by Euler angles `(pitch, roll, yaw)` in degrees around X, Y, Z.
+fn rotate_euler(offset: [f32; 3], rot_deg: [f32; 3]) -> [f32; 3] {
+    if rot_deg == [0.0, 0.0, 0.0] {
+        return offset;
+    }
+    let (sp, cp) = rot_deg[0].to_radians().sin_cos();
+    let y1 = offset[1] * cp - offset[2] * sp;
+    let z1 = offset[1] * sp + offset[2] * cp;
+    let x1 = offset[0];
+
+    let (sr, cr) = rot_deg[1].to_radians().sin_cos();
+    let x2 = x1 * cr + z1 * sr;
+    let z2 = -x1 * sr + z1 * cr;
+    let y2 = y1;
+
+    let (sy, cy) = rot_deg[2].to_radians().sin_cos();
+    let x3 = x2 * cy - y2 * sy;
+    let y3 = x2 * sy + y2 * cy;
+    [x3, y3, z2]
 }
 
 /// Fails unless every component is finite.
@@ -681,36 +1043,58 @@ impl ResourceManager {
     }
 
     /// Runs once per frame. Reads `sixm_cullRadius`, then sends the transforms
-    /// queued since the last frame. With scoping on, each player's scope is
-    /// recomputed first, the entities that entered or left it are sent, and each
-    /// player gets only the transforms of the entities it holds. With scoping
-    /// off, the transforms are broadcast. Nothing is sent when no entity moved.
-    /// The update buffer is reused, so a frame does not allocate once warm.
+    /// and state updates queued since the last frame. With scoping on, each
+    /// player's scope is recomputed first, the entities that entered or left it
+    /// are sent, and each player gets only the updates of the entities it
+    /// holds. With scoping off, the updates are broadcast (or routed per
+    /// bucket). Nothing is sent when no entity changed. The update buffers are
+    /// reused, so a frame does not allocate once warm.
     pub(crate) fn flush_entities(&self) {
         let radius = self.convars.borrow().cull_radius();
         self.apply_cull_radius(radius);
         let mut updates = std::mem::take(&mut *self.entity_updates.borrow_mut());
-        self.entities.borrow_mut().take_dirty(&mut updates);
+        let mut state_updates = std::mem::take(&mut *self.entity_state_updates.borrow_mut());
+        {
+            let mut entities = self.entities.borrow_mut();
+            entities.take_dirty(&mut updates);
+            entities.take_state_dirty(&mut state_updates);
+        }
         if self.scoping() {
             self.refresh_scopes();
             self.send_scoped_transforms(&updates);
-        } else if !updates.is_empty() {
-            if self.buckets_in_use() {
-                self.send_bucketed_transforms(&updates);
-            } else {
-                self.with_server(|server| {
-                    if let Err(err) = server.broadcast_entity_transforms(&updates) {
-                        warn!("cannot send the entity transforms: {err}");
-                    }
-                });
+            self.send_scoped_states(&state_updates);
+        } else {
+            if !updates.is_empty() {
+                if self.buckets_in_use() {
+                    self.send_bucketed_transforms(&updates);
+                } else {
+                    self.with_server(|server| {
+                        if let Err(err) = server.broadcast_entity_transforms(&updates) {
+                            warn!("cannot send the entity transforms: {err}");
+                        }
+                    });
+                }
+            }
+            if !state_updates.is_empty() {
+                if self.buckets_in_use() {
+                    self.send_bucketed_states(&state_updates);
+                } else {
+                    self.with_server(|server| {
+                        if let Err(err) = server.broadcast_entity_states(&state_updates) {
+                            warn!("cannot send the entity states: {err}");
+                        }
+                    });
+                }
             }
         }
         updates.clear();
+        state_updates.clear();
         *self.entity_updates.borrow_mut() = updates;
+        *self.entity_state_updates.borrow_mut() = state_updates;
     }
 
     /// Every entity, in ascending id order, for the console.
-    pub(crate) fn entity_list(&self) -> Vec<(u32, EntityInfo, u32)> {
+    pub(crate) fn entity_list(&self) -> Vec<(u32, EntityInfo, EntityState, u32)> {
         self.entities.borrow().all()
     }
 
@@ -1228,5 +1612,177 @@ mod client_store_tests {
         assert!(store.get(1).is_some(), "the entity stays");
         store.drop_leases(4);
         assert_eq!(store.leased_remaining(4), 0);
+    }
+
+    #[test]
+    fn freezing_blocks_owner_moves_but_allows_server_moves() {
+        let mut store = EntityStore::default();
+        let ped = store
+            .insert(EntityInfo {
+                owner: Some(4),
+                ..at(EntityKind::Ped)
+            })
+            .unwrap();
+        store.set_frozen(ped, true).unwrap();
+        assert!(!store.owner_move(4, ped, Some([9.0, 9.0, 9.0]), None, 0));
+        assert_eq!(store.get(ped).unwrap().position, [1.0, 2.0, 3.0]);
+
+        // Server move still succeeds and advances epoch.
+        store.set_position(ped, [5.0, 6.0, 7.0]).unwrap();
+        assert_eq!(store.get(ped).unwrap().position, [5.0, 6.0, 7.0]);
+
+        // Unfreezing allows owner moves at the new epoch.
+        store.set_frozen(ped, false).unwrap();
+        assert!(store.owner_move(4, ped, Some([8.0, 8.0, 8.0]), None, 1));
+        assert_eq!(store.get(ped).unwrap().position, [8.0, 8.0, 8.0]);
+    }
+
+    #[test]
+    fn state_deltas_coalesce_and_skip_unchanged_fields() {
+        let mut store = EntityStore::default();
+        let id = store.insert(at(EntityKind::Vehicle)).unwrap();
+        let mut updates = Vec::new();
+        store.take_state_dirty(&mut updates);
+        assert_eq!(updates, Vec::new());
+
+        // Setting defaults produces no dirty updates.
+        store.set_frozen(id, false).unwrap();
+        store.set_visible(id, true).unwrap();
+        store.set_alpha(id, 255).unwrap();
+        store.set_health(id, 200).unwrap();
+        store.set_max_health(id, 200).unwrap();
+        store.set_velocity(id, [0.0; 3]).unwrap();
+        store.take_state_dirty(&mut updates);
+        assert_eq!(updates, Vec::new());
+
+        store.set_health(id, -10).unwrap();
+        store.set_health(id, 125).unwrap();
+        store.set_alpha(id, 100).unwrap();
+        store.set_visible(id, false).unwrap();
+        store.set_velocity(id, [1.0, 2.0, 3.0]).unwrap();
+        store.set_max_health(id, 500).unwrap();
+        store.take_state_dirty(&mut updates);
+        assert_eq!(
+            updates,
+            vec![EntityStateUpdate {
+                id,
+                frozen: None,
+                velocity: Some([1.0, 2.0, 3.0]),
+                health: Some(125),
+                max_health: Some(500),
+                visible: Some(false),
+                alpha: Some(100),
+                attachment: None,
+            }]
+        );
+        updates.clear();
+        store.take_state_dirty(&mut updates);
+        assert_eq!(updates, Vec::new());
+        assert!(store.set_velocity(id, [f32::NAN, 0.0, 0.0]).is_err());
+    }
+
+    #[test]
+    fn attachment_prevents_self_and_cycles() {
+        let mut store = EntityStore::default();
+        let parent = store.insert(at(EntityKind::Vehicle)).unwrap();
+        let child = store.insert(at(EntityKind::Object)).unwrap();
+        let grand = store.insert(at(EntityKind::Object)).unwrap();
+
+        let att = |to| EntityAttachment {
+            parent: to,
+            bone_index: 0,
+            offset: [0.0; 3],
+            rotation: [0.0; 3],
+        };
+        assert!(store.attach(parent, att(parent)).is_err());
+        store.attach(child, att(parent)).unwrap();
+        store.attach(grand, att(child)).unwrap();
+        assert!(store.attach(parent, att(grand)).is_err());
+    }
+
+    #[test]
+    fn attachment_follows_parent_blocks_owner_moves_and_detaches_on_delete() {
+        let mut store = EntityStore::default();
+        let parent = store
+            .insert(EntityInfo {
+                owner: Some(1),
+                ..at(EntityKind::Vehicle)
+            })
+            .unwrap();
+        let child = store
+            .insert(EntityInfo {
+                owner: Some(2),
+                ..at(EntityKind::Object)
+            })
+            .unwrap();
+        let grand = store.insert(at(EntityKind::Object)).unwrap();
+
+        store
+            .attach(
+                child,
+                EntityAttachment {
+                    parent,
+                    bone_index: 3,
+                    offset: [1.0, 0.0, 0.0],
+                    rotation: [0.0, 0.0, 10.0],
+                },
+            )
+            .unwrap();
+        store
+            .attach(
+                grand,
+                EntityAttachment {
+                    parent: child,
+                    bone_index: 0,
+                    offset: [0.0, 2.0, 0.0],
+                    rotation: [0.0; 3],
+                },
+            )
+            .unwrap();
+
+        let child_epoch = store.info_and_epoch(child).unwrap().1;
+        assert!(!store.owner_move(2, child, Some([50.0, 50.0, 50.0]), None, child_epoch));
+
+        let mut dirty_transforms = Vec::new();
+        store.take_dirty(&mut dirty_transforms);
+        dirty_transforms.clear();
+
+        assert!(store.owner_move(
+            1,
+            parent,
+            Some([10.0, 20.0, 30.0]),
+            Some([0.0, 0.0, 90.0]),
+            0
+        ));
+        let child_pos = store.get(child).unwrap().position;
+        assert!((child_pos[0] - 10.0).abs() < 1e-4);
+        assert!((child_pos[1] - 21.0).abs() < 1e-4);
+        assert!((child_pos[2] - 30.0).abs() < 1e-4);
+        assert_eq!(store.get(child).unwrap().rotation, [0.0, 0.0, 100.0]);
+
+        store.take_dirty(&mut dirty_transforms);
+        assert!(dirty_transforms.iter().any(|u| u.0 == child));
+        assert!(dirty_transforms.iter().any(|u| u.0 == grand));
+
+        let mut state_updates = Vec::new();
+        store.take_state_dirty(&mut state_updates);
+        state_updates.clear();
+
+        store.remove(parent);
+        assert_eq!(store.state(child).unwrap().attachment, None);
+        store.take_state_dirty(&mut state_updates);
+        assert_eq!(
+            state_updates,
+            vec![EntityStateUpdate {
+                id: child,
+                frozen: None,
+                velocity: None,
+                health: None,
+                max_health: None,
+                visible: None,
+                alpha: None,
+                attachment: Some(None),
+            }]
+        );
     }
 }

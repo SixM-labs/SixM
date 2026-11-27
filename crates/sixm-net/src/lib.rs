@@ -33,7 +33,11 @@ mod wire;
 mod fuzz_tests;
 
 pub use client::{ClientEvent, NetClient};
-pub use entities::{EntityEntry, EntityTransform};
+pub use entities::{
+    EntityAttachmentEntry, EntityEntry, EntityStateEntry, EntityStateUpdate, EntityTransform,
+    STATE_ALPHA, STATE_ATTACHMENT, STATE_FROZEN, STATE_HEALTH, STATE_MAX_HEALTH, STATE_VELOCITY,
+    STATE_VISIBLE,
+};
 pub use error::NetError;
 pub use files::{
     FILE_KIND_CLIENT, FILE_KIND_FILE, FILE_KIND_SHARED, FileEntry, FileHash, MAX_EXPORT_NAME_LEN,

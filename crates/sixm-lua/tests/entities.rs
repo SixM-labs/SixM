@@ -464,3 +464,162 @@ fn a_client_without_a_local_ped_reports_zero() {
 
     call(&rt, "check", &[]);
 }
+
+#[test]
+fn server_reads_and_writes_entity_state_and_validates_inputs() {
+    let host = new_host();
+    let rt = start(
+        &host,
+        "entity_state_server",
+        &["check"],
+        &[(
+            "main.lua",
+            "exports('check', function()\n\
+               -- Unknown entity reads neutral values.\n\
+               assert(IsEntityPositionFrozen(999) == false)\n\
+               local uv = GetEntityVelocity(999)\n\
+               assert(uv.x == 0.0 and uv.y == 0.0 and uv.z == 0.0)\n\
+               assert(GetEntityHealth(999) == 0)\n\
+               assert(GetEntityMaxHealth(999) == 0)\n\
+               assert(IsEntityVisible(999) == false)\n\
+               assert(GetEntityAlpha(999) == 0)\n\
+               assert(GetEntityAttachedTo(999) == 0)\n\
+               assert(IsEntityAttached(999) == false)\n\
+               -- Unknown entity setters do nothing.\n\
+               FreezeEntityPosition(999, true)\n\
+               SetEntityVelocity(999, 1.0, 2.0, 3.0)\n\
+               SetEntityHealth(999, 100)\n\
+               SetEntityMaxHealth(999, 300)\n\
+               SetEntityVisible(999, false)\n\
+               SetEntityAlpha(999, 128)\n\
+               ResetEntityAlpha(999)\n\
+               AttachEntityToEntity(999, 1, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)\n\
+               DetachEntity(999)\n\
+               -- Defaults on a newly created entity.\n\
+               local v = CreateVehicle('adder', 0.0, 0.0, 0.0, 0.0, true, false)\n\
+               local p = CreatePed(4, 'a_m_m_skater_01', 1.0, 0.0, 0.0, 0.0, true, false)\n\
+               assert(IsEntityPositionFrozen(v) == false)\n\
+               local vel = GetEntityVelocity(v)\n\
+               assert(vel.x == 0.0 and vel.y == 0.0 and vel.z == 0.0)\n\
+               assert(GetEntityHealth(v) == 200 and GetEntityMaxHealth(v) == 200)\n\
+               assert(GetEntityHealth(p) == 200 and GetEntityMaxHealth(p) == 200)\n\
+               assert(IsEntityVisible(v) == true)\n\
+               assert(GetEntityAlpha(v) == 255)\n\
+               assert(GetEntityAttachedTo(v) == 0 and IsEntityAttached(v) == false)\n\
+               -- Mutate and verify getters.\n\
+               FreezeEntityPosition(v, true)\n\
+               assert(IsEntityPositionFrozen(v) == true)\n\
+               FreezeEntityPosition(v, false)\n\
+               assert(IsEntityPositionFrozen(v) == false)\n\
+               SetEntityVelocity(v, 1.5, -2.5, 3.25)\n\
+               vel = GetEntityVelocity(v)\n\
+               assert(vel.x == 1.5 and vel.y == -2.5 and vel.z == 3.25)\n\
+               SetEntityMaxHealth(v, 500)\n\
+               SetEntityHealth(v, 350)\n\
+               assert(GetEntityMaxHealth(v) == 500 and GetEntityHealth(v) == 350)\n\
+               SetEntityHealth(v, -25)\n\
+               assert(GetEntityHealth(v) == 0)\n\
+               SetEntityVisible(v, false)\n\
+               assert(IsEntityVisible(v) == false)\n\
+               SetEntityAlpha(v, 400)\n\
+               assert(GetEntityAlpha(v) == 255)\n\
+               SetEntityAlpha(v, -10)\n\
+               assert(GetEntityAlpha(v) == 0)\n\
+               SetEntityAlpha(v, 128)\n\
+               assert(GetEntityAlpha(v) == 128)\n\
+               ResetEntityAlpha(v)\n\
+               assert(GetEntityAlpha(v) == 255)\n\
+               -- Attachment and cycle/self validation.\n\
+               assert(not pcall(AttachEntityToEntity, p, p, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0))\n\
+               AttachEntityToEntity(p, v, 0, 1.0, 2.0, 3.0, 0.0, 0.0, 90.0, false, false, false, false, 2, true)\n\
+               assert(IsEntityAttached(p) == true and GetEntityAttachedTo(p) == v)\n\
+               assert(not pcall(AttachEntityToEntity, v, p, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0))\n\
+               DetachEntity(p)\n\
+               assert(IsEntityAttached(p) == false and GetEntityAttachedTo(p) == 0)\n\
+               -- Auto-detach on parent delete.\n\
+               AttachEntityToEntity(p, v, 1, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)\n\
+               assert(IsEntityAttached(p) == true)\n\
+               DeleteEntity(v)\n\
+               assert(IsEntityAttached(p) == false and GetEntityAttachedTo(p) == 0)\n\
+               -- Validation errors.\n\
+               assert(not pcall(SetEntityVelocity, p, 0.0 / 0.0, 0.0, 0.0))\n\
+               assert(not pcall(SetEntityVelocity, p, 'bad', 0.0, 0.0))\n\
+               assert(not pcall(SetEntityHealth, p, 0.0 / 0.0))\n\
+               assert(not pcall(SetEntityHealth, p, 'bad'))\n\
+               assert(not pcall(SetEntityMaxHealth, p, 1.0 / 0.0))\n\
+               assert(not pcall(SetEntityAlpha, p, 0.0 / 0.0))\n\
+               assert(not pcall(SetEntityAlpha, p, 'bad'))\n\
+               assert(not pcall(AttachEntityToEntity, p, p, 'bad', 0.0, 0.0, 0.0, 0.0, 0.0, 0.0))\n\
+               assert(not pcall(AttachEntityToEntity, p, p, 0, 0.0 / 0.0, 0.0, 0.0, 0.0, 0.0, 0.0))\n\
+             end)\n",
+        )],
+    );
+
+    call(&rt, "check", &[]);
+}
+
+#[test]
+fn client_reads_entity_state_and_server_setters_are_absent() {
+    let host = new_client_host(3);
+    let owned = host.create_entity_for_test(EntityKind::Ped, Some(3));
+    let other = host.create_entity_for_test(EntityKind::Vehicle, None);
+    {
+        let mut states = host.entity_states.borrow_mut();
+        let owned_state = states.get_mut(&owned).unwrap();
+        owned_state.frozen = true;
+        owned_state.velocity = [4.0, 5.0, 6.0];
+        owned_state.health = 110;
+        owned_state.max_health = 250;
+        owned_state.visible = false;
+        owned_state.alpha = 90;
+        owned_state.attachment = Some(sixm_core::EntityAttachment {
+            parent: other,
+            bone_index: 2,
+            offset: [0.0, 1.0, 0.0],
+            rotation: [0.0; 3],
+        });
+    }
+    let rt = start(
+        &host,
+        "entity_state_client",
+        &["check"],
+        &[(
+            "main.lua",
+            &format!(
+                "exports('check', function()\n\
+                   assert(FreezeEntityPosition == nil)\n\
+                   assert(SetEntityVelocity == nil)\n\
+                   assert(SetEntityHealth == nil)\n\
+                   assert(SetEntityMaxHealth == nil)\n\
+                   assert(SetEntityVisible == nil)\n\
+                   assert(SetEntityAlpha == nil)\n\
+                   assert(ResetEntityAlpha == nil)\n\
+                   assert(AttachEntityToEntity == nil)\n\
+                   assert(DetachEntity == nil)\n\
+                   assert(IsEntityPositionFrozen({owned}) == true)\n\
+                   local vel = GetEntityVelocity({owned})\n\
+                   assert(vel.x == 4.0 and vel.y == 5.0 and vel.z == 6.0)\n\
+                   assert(GetEntityHealth({owned}) == 110)\n\
+                   assert(GetEntityMaxHealth({owned}) == 250)\n\
+                   assert(IsEntityVisible({owned}) == false)\n\
+                   assert(GetEntityAlpha({owned}) == 90)\n\
+                   assert(IsEntityAttached({owned}) == true)\n\
+                   assert(GetEntityAttachedTo({owned}) == {other})\n\
+                   -- Default state on unmutated entity and neutral on unknown.\n\
+                   assert(IsEntityPositionFrozen({other}) == false)\n\
+                   assert(IsEntityVisible({other}) == true)\n\
+                   assert(GetEntityAlpha({other}) == 255)\n\
+                   assert(IsEntityVisible(999) == false)\n\
+                   assert(GetEntityAlpha(999) == 0)\n\
+                   assert(GetEntityAttachedTo(999) == 0)\n\
+                   -- Frozen/attached owned entity refuses client moves.\n\
+                   SetEntityCoords({owned}, 10.0, 20.0, 30.0)\n\
+                   assert(GetEntityCoords({owned}).x == 0.0)\n\
+                 end)\n"
+            ),
+        )],
+    );
+
+    call(&rt, "check", &[]);
+    assert!(host.owned_moves.borrow().is_empty());
+}

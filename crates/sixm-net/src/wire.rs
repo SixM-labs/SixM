@@ -22,7 +22,11 @@ use serde::{Serialize, Serializer};
 use sixm_core::{EntityKind, MAX_STATE_NAME_LEN, Value, is_finite};
 use tracing::warn;
 
-use crate::entities::{EntityEntry, EntityTransform};
+use crate::entities::{
+    EntityAttachmentEntry, EntityEntry, EntityStateUpdate, EntityTransform, STATE_ALPHA,
+    STATE_ATTACHMENT, STATE_FLAGS, STATE_FROZEN, STATE_HEALTH, STATE_MAX_HEALTH, STATE_VELOCITY,
+    STATE_VISIBLE,
+};
 use crate::error::NetError;
 use crate::files::{
     FILE_KIND_FILE, FileEntry, FileHash, MAX_EXPORT_NAME_LEN, MAX_EXPORTS, MAX_FILE_NAME_LEN,
@@ -81,6 +85,7 @@ const SERVER_VARIANTS: &[&str] = &[
     "EntityIdLease",
     "EntityCreateRefused",
     "EntityOwner",
+    "EntityStates",
 ];
 /// Most files one snapshot entry carries. Larger resources are split into
 /// several entries of the same name, so one entry always fits a frame.
@@ -340,6 +345,80 @@ pub(crate) fn encode_entity_transforms(
         max_frame,
         append_transform,
     )
+}
+
+/// Encodes delta entity state updates as the fewest frames that carry them in
+/// order. Each update costs one unit of the decoding budget.
+pub(crate) fn encode_entity_states(
+    updates: &[EntityStateUpdate],
+    max_frame: usize,
+) -> Result<Vec<Arc<[u8]>>, NetError> {
+    encode_with(
+        ServerMessage::ENTITY_STATES_TAG,
+        updates,
+        max_frame,
+        append_entity_state,
+    )
+}
+
+/// Appends one delta entity state update: the id as a varint, a flags bitmask,
+/// and the fields the flags announce in bit order.
+fn append_entity_state(bytes: &mut Vec<u8>, update: &EntityStateUpdate) -> Result<(), NetError> {
+    let flags = update.frozen.map_or(0, |_| STATE_FROZEN)
+        | update.velocity.map_or(0, |_| STATE_VELOCITY)
+        | update.health.map_or(0, |_| STATE_HEALTH)
+        | update.max_health.map_or(0, |_| STATE_MAX_HEALTH)
+        | update.visible.map_or(0, |_| STATE_VISIBLE)
+        | update.alpha.map_or(0, |_| STATE_ALPHA)
+        | update.attachment.map_or(0, |_| STATE_ATTACHMENT);
+    if flags == 0 {
+        return Err(NetError::InvalidInput(
+            "an entity state update carries at least one changed field".to_owned(),
+        ));
+    }
+    if let Some(velocity) = update.velocity
+        && !is_finite(velocity)
+    {
+        return Err(NetError::InvalidInput(
+            "entity velocity must be finite".to_owned(),
+        ));
+    }
+    if let Some(Some(att)) = update.attachment {
+        if !is_finite(att.offset) || !is_finite(att.rotation) {
+            return Err(NetError::InvalidInput(
+                "entity attachment must be finite".to_owned(),
+            ));
+        }
+        if att.parent == update.id {
+            return Err(NetError::InvalidInput(
+                "an entity cannot attach to itself".to_owned(),
+            ));
+        }
+    }
+    push_varint(bytes, update.id);
+    bytes.push(flags);
+    if let Some(frozen) = update.frozen {
+        append_encoded(bytes, &frozen)?;
+    }
+    if let Some(velocity) = update.velocity {
+        append_encoded(bytes, &velocity)?;
+    }
+    if let Some(health) = update.health {
+        append_encoded(bytes, &health)?;
+    }
+    if let Some(max_health) = update.max_health {
+        append_encoded(bytes, &max_health)?;
+    }
+    if let Some(visible) = update.visible {
+        append_encoded(bytes, &visible)?;
+    }
+    if let Some(alpha) = update.alpha {
+        append_encoded(bytes, &alpha)?;
+    }
+    if let Some(attachment) = update.attachment {
+        append_encoded(bytes, &attachment)?;
+    }
+    Ok(())
 }
 
 /// Encodes the transforms a client sends as the fewest frames that carry them
@@ -1072,7 +1151,8 @@ impl<'de> Visitor<'de> for ServerMessageVisitor<'_> {
             | ServerMessage::ENTITY_SNAPSHOT_TAG
             | ServerMessage::ENTITY_ID_LEASE_TAG
             | ServerMessage::ENTITY_CREATE_REFUSED_TAG
-            | ServerMessage::ENTITY_OWNER_TAG => self.visit_entity_variant(tag, variant),
+            | ServerMessage::ENTITY_OWNER_TAG
+            | ServerMessage::ENTITY_STATES_TAG => self.visit_entity_variant(tag, variant),
             other => Err(de::Error::unknown_variant(
                 &other.to_string(),
                 SERVER_VARIANTS,
@@ -1206,6 +1286,11 @@ impl<'de> ServerMessageVisitor<'_> {
                         rotation,
                     },
                 ),
+            ServerMessage::ENTITY_STATES_TAG => variant
+                .newtype_variant_seed(EntityStatesSeed {
+                    budget: self.budget,
+                })
+                .map(|updates| ServerMessage::EntityStates { updates }),
             _ => unreachable!(),
         }
     }
@@ -1318,8 +1403,159 @@ impl<'de> DeserializeSeed<'de> for EntitySeed<'_> {
     fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<EntityEntry, D::Error> {
         self.budget.spend::<D::Error>()?;
         let entry = EntityEntry::deserialize(deserializer)?;
-        checked_entity_kind::<D::Error>(&entry)?;
+        checked_entity::<D::Error>(&entry)?;
         Ok(entry)
+    }
+}
+
+/// Decodes a sequence of delta entity state updates. Each update costs one
+/// unit of the decoding budget.
+#[derive(Clone, Copy)]
+struct EntityStatesSeed<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> DeserializeSeed<'de> for EntityStatesSeed<'_> {
+    type Value = Vec<EntityStateUpdate>;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_seq(EntityStatesVisitor {
+            budget: self.budget,
+        })
+    }
+}
+
+struct EntityStatesVisitor<'a> {
+    budget: &'a ValueBudget,
+}
+
+impl<'de> Visitor<'de> for EntityStatesVisitor<'_> {
+    type Value = Vec<EntityStateUpdate>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a sequence of entity state updates")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut updates = Vec::new();
+        while let Some(update) = seq.next_element_seed(EntityStateSeed)? {
+            self.budget.spend::<A::Error>()?;
+            updates.push(update);
+        }
+        Ok(updates)
+    }
+}
+
+/// Decodes one delta entity state update, the inverse of `append_entity_state`.
+#[derive(Clone, Copy)]
+struct EntityStateSeed;
+
+impl<'de> DeserializeSeed<'de> for EntityStateSeed {
+    type Value = EntityStateUpdate;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_tuple(9, EntityStateVisitor)
+    }
+}
+
+struct EntityStateVisitor;
+
+impl<'de> Visitor<'de> for EntityStateVisitor {
+    type Value = EntityStateUpdate;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("an entity state update")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let id: u32 = seq
+            .next_element()?
+            .ok_or_else(|| de::Error::invalid_length(0, &"an entity id"))?;
+        let flags: u8 = seq
+            .next_element()?
+            .ok_or_else(|| de::Error::invalid_length(1, &"state flags"))?;
+        if flags & !STATE_FLAGS != 0 || flags & STATE_FLAGS == 0 {
+            return Err(de::Error::custom(format!(
+                "entity state flags {flags:#04x} must set at least one state bit and no reserved bits"
+            )));
+        }
+        let frozen = if flags & STATE_FROZEN != 0 {
+            Some(
+                seq.next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(2, &"frozen flag"))?,
+            )
+        } else {
+            None
+        };
+        let velocity = if flags & STATE_VELOCITY != 0 {
+            let v: [f32; 3] = seq
+                .next_element()?
+                .ok_or_else(|| de::Error::invalid_length(3, &"velocity"))?;
+            if !is_finite(v) {
+                return Err(de::Error::custom("entity velocity must be finite"));
+            }
+            Some(v)
+        } else {
+            None
+        };
+        let health = if flags & STATE_HEALTH != 0 {
+            Some(
+                seq.next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(4, &"health"))?,
+            )
+        } else {
+            None
+        };
+        let max_health = if flags & STATE_MAX_HEALTH != 0 {
+            Some(
+                seq.next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(5, &"max health"))?,
+            )
+        } else {
+            None
+        };
+        let visible = if flags & STATE_VISIBLE != 0 {
+            Some(
+                seq.next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(6, &"visible flag"))?,
+            )
+        } else {
+            None
+        };
+        let alpha = if flags & STATE_ALPHA != 0 {
+            Some(
+                seq.next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(7, &"alpha"))?,
+            )
+        } else {
+            None
+        };
+        let attachment = if flags & STATE_ATTACHMENT != 0 {
+            let att: Option<EntityAttachmentEntry> = seq
+                .next_element()?
+                .ok_or_else(|| de::Error::invalid_length(8, &"attachment"))?;
+            if let Some(att) = att {
+                if !is_finite(att.offset) || !is_finite(att.rotation) {
+                    return Err(de::Error::custom("entity attachment must be finite"));
+                }
+                if att.parent == id {
+                    return Err(de::Error::custom("an entity cannot attach to itself"));
+                }
+            }
+            Some(att)
+        } else {
+            None
+        };
+        Ok(EntityStateUpdate {
+            id,
+            frozen,
+            velocity,
+            health,
+            max_health,
+            visible,
+            alpha,
+            attachment,
+        })
     }
 }
 
@@ -1589,20 +1825,31 @@ impl<'de> Visitor<'de> for EntitiesVisitor<'_> {
         let mut entities = Vec::new();
         while let Some(entry) = seq.next_element::<EntityEntry>()? {
             self.budget.spend::<A::Error>()?;
-            checked_entity_kind::<A::Error>(&entry)?;
+            checked_entity::<A::Error>(&entry)?;
             entities.push(entry);
         }
         Ok(entities)
     }
 }
 
-/// Rejects an entity whose kind code is not one of the known kinds.
-fn checked_entity_kind<E: de::Error>(entry: &EntityEntry) -> Result<(), E> {
-    if EntityKind::from_code(entry.kind).is_some() {
-        Ok(())
-    } else {
-        Err(E::custom(format!("unknown entity kind {}", entry.kind)))
+/// Rejects an entity whose kind code is unknown or whose floats/attachment are invalid.
+fn checked_entity<E: de::Error>(entry: &EntityEntry) -> Result<(), E> {
+    if EntityKind::from_code(entry.kind).is_none() {
+        return Err(E::custom(format!("unknown entity kind {}", entry.kind)));
     }
+    if !is_finite(entry.position) || !is_finite(entry.rotation) || !is_finite(entry.state.velocity)
+    {
+        return Err(E::custom("entity floats must be finite"));
+    }
+    if let Some(att) = entry.state.attachment {
+        if !is_finite(att.offset) || !is_finite(att.rotation) {
+            return Err(E::custom("entity attachment must be finite"));
+        }
+        if att.parent == entry.id {
+            return Err(E::custom("an entity cannot attach to itself"));
+        }
+    }
+    Ok(())
 }
 
 /// Decodes the body of a `Resources` frame: a sequence of resource entries.
@@ -2215,6 +2462,7 @@ impl<'de> Visitor<'de> for PairVisitor<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::EntityStateEntry;
     use crate::files::{FILE_KIND_CLIENT, FILE_KIND_SHARED};
     use crate::protocol::MAX_FRAME;
 
@@ -2933,6 +3181,7 @@ mod tests {
             rotation: [0.0, 0.0, 90.0],
             owner: 0,
             epoch: 0,
+            state: EntityStateEntry::default(),
         }
     }
 
@@ -3449,5 +3698,122 @@ mod tests {
             decode_server_message(&payload_of(&over)),
             Err(NetError::Protocol(reason)) if reason.contains("values")
         ));
+    }
+
+    fn states_of(message: ServerMessage) -> Option<Vec<EntityStateUpdate>> {
+        match message {
+            ServerMessage::EntityStates { updates } => Some(updates),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn entity_states_round_trip_with_partial_and_full_bitmasks() {
+        let updates = vec![
+            EntityStateUpdate {
+                id: 1,
+                frozen: Some(true),
+                velocity: None,
+                health: None,
+                max_health: None,
+                visible: None,
+                alpha: None,
+                attachment: None,
+            },
+            EntityStateUpdate {
+                id: 2,
+                frozen: None,
+                velocity: Some([1.5, -2.25, 0.5]),
+                health: Some(150),
+                max_health: Some(300),
+                visible: Some(false),
+                alpha: Some(128),
+                attachment: Some(Some(EntityAttachmentEntry {
+                    parent: 1,
+                    bone_index: 42,
+                    offset: [0.5, -1.0, 2.0],
+                    rotation: [10.0, 20.0, 30.0],
+                })),
+            },
+            EntityStateUpdate {
+                id: 3,
+                frozen: None,
+                velocity: None,
+                health: None,
+                max_health: None,
+                visible: None,
+                alpha: None,
+                attachment: Some(None),
+            },
+        ];
+        let frames = encode_entity_states(&updates, MAX_FRAME).expect("states encode");
+        assert_eq!(decode_frames(&frames, MAX_FRAME, states_of), updates);
+        assert_eq!(
+            encode_entity_states(&[], MAX_FRAME)
+                .expect("empty states")
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn entity_states_split_and_respect_limits_and_validation() {
+        const MAX: usize = 256;
+        let updates: Vec<EntityStateUpdate> = (1..=200_u32)
+            .map(|id| EntityStateUpdate {
+                id,
+                frozen: Some(id % 2 == 0),
+                velocity: Some([1.0, 2.0, 3.0]),
+                health: Some(100),
+                max_health: None,
+                visible: None,
+                alpha: Some(200),
+                attachment: None,
+            })
+            .collect();
+        let frames = encode_entity_states(&updates, MAX).expect("states encode");
+        assert!(frames.len() > 1);
+        assert_eq!(decode_frames(&frames, MAX, states_of), updates);
+
+        // Empty update (no changed fields) fails on encode.
+        let empty = EntityStateUpdate {
+            id: 1,
+            frozen: None,
+            velocity: None,
+            health: None,
+            max_health: None,
+            visible: None,
+            alpha: None,
+            attachment: None,
+        };
+        assert!(encode_entity_states(&[empty], MAX_FRAME).is_err());
+
+        // Non-finite velocity or self-attachment fails on encode.
+        let non_finite = EntityStateUpdate {
+            velocity: Some([f32::NAN, 0.0, 0.0]),
+            ..empty
+        };
+        assert!(encode_entity_states(&[non_finite], MAX_FRAME).is_err());
+        let self_attach = EntityStateUpdate {
+            id: 5,
+            attachment: Some(Some(EntityAttachmentEntry {
+                parent: 5,
+                bone_index: 0,
+                offset: [0.0; 3],
+                rotation: [0.0; 3],
+            })),
+            ..empty
+        };
+        assert!(encode_entity_states(&[self_attach], MAX_FRAME).is_err());
+
+        // Invalid flags (0 or reserved bit 7) are rejected on decode.
+        let tag = u8::try_from(ServerMessage::ENTITY_STATES_TAG).expect("tag fits u8");
+        for flags in [0_u8, 0x80, 0xFF] {
+            let payload = [tag, 1, 1, flags, 0];
+            assert!(matches!(
+                decode_server_message(&payload),
+                Err(NetError::Protocol(_))
+            ));
+        }
     }
 }
