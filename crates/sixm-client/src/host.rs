@@ -6,8 +6,8 @@ use std::path::PathBuf;
 
 use sixm_core::{
     ClientHost, EntityInfo, EntityKind, EntityState, EventSource, FuncRef, GLOBAL_BAG, Host,
-    HttpRequest, ResourceName, ResourceState, ScriptError, ScriptRuntime, ServerHost, Value,
-    entity_of_bag, is_finite, player_of_bag,
+    HttpRequest, ResourceName, ResourceState, ScriptError, ServerHost, Value, entity_of_bag,
+    is_finite, player_of_bag,
 };
 use tracing::warn;
 
@@ -47,10 +47,20 @@ impl Host for ClientRuntime {
         args: &[Value],
         invoker: Option<&ResourceName>,
     ) -> Result<Vec<Value>, ScriptError> {
-        let runtime = self
-            .running_runtime(resource)
+        let runtimes = self
+            .running_runtimes(resource)
             .ok_or_else(|| ScriptError::ResourceNotRunning(resource.to_owned()))?;
-        runtime.call_export(export, args, invoker)
+        for runtime in &runtimes {
+            match runtime.call_export(export, args, invoker) {
+                Ok(values) => return Ok(values),
+                Err(ScriptError::NoSuchExport { .. }) => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Err(ScriptError::NoSuchExport {
+            resource: resource.to_owned(),
+            export: export.to_owned(),
+        })
     }
 
     fn resource_state(&self, resource: &str) -> ResourceState {

@@ -69,9 +69,9 @@ stored as `this_i`. A plain string with an unknown name keeps its spelling.
 
 | Directive | Field | Notes |
 |---|---|---|
-| `server_script` / `server_scripts` | `server_scripts` | Loaded on the server. Globs allowed. |
-| `client_script` / `client_scripts` | `client_scripts` | Sent to clients and loaded there. Globs allowed. |
-| `shared_script` / `shared_scripts` | `shared_scripts` | Loaded on the server and sent to clients. Globs allowed. |
+| `server_script` / `server_scripts` | `server_scripts` | Loaded on the server (`.lua` or `.js`). Globs allowed. |
+| `client_script` / `client_scripts` | `client_scripts` | Sent to clients and loaded there (`.lua` or `.js`). Globs allowed. |
+| `shared_script` / `shared_scripts` | `shared_scripts` | Loaded on the server and sent to clients (`.lua` or `.js`). Globs allowed. |
 | `file` / `files` | `files` | Sent to clients as data files. Not loaded as scripts. Globs allowed. |
 | `dependency` / `dependencies` | `dependencies` | Resources that must start first. See below. |
 | `export` / `exports` | `exports` | Client exports, sent to clients. See below. |

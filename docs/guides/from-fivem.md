@@ -7,7 +7,7 @@ and transport are built from scratch in Rust.
 
 This guide covers what works the same, what differs intentionally, and what is
 not implemented yet. For exact function signatures, see
-[lua-api.md](../lua-api.md).
+[lua-api.md](../lua-api.md) and [js-api.md](../js-api.md).
 
 ## What works the same
 
@@ -216,10 +216,14 @@ want scripts to stay portable back to FiveM.
   scripts cannot make requests from a player's IP address; proxy external HTTP
   requests through server scripts instead.
 
-### 6. Server-only runtime language
+### 6. Scripting languages (Lua 5.4 and JavaScript)
 
-Currently, only **Lua 5.4** is implemented. JavaScript (`v8`/Node) and C#
-(`Mono`) runtimes are not present.
+SixM supports both **Lua 5.4** (`sixm-lua`) and **ES2023 JavaScript**
+(`sixm-js`, embedded QuickJS) on both server and client, including mixed `.lua`
+and `.js` scripts inside the same resource with shared events, exports, and
+state bags. C# (`Mono`) is not present. JS runs in a strict sandbox without Node
+APIs (`require`, `fs`, `process`), `eval`, or `Function` constructors; see
+[js-api.md](../js-api.md).
 
 ## What is missing (not yet implemented)
 

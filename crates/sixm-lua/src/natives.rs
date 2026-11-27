@@ -2,11 +2,10 @@
 
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
-use std::sync::OnceLock;
 use std::time::Instant;
 
 use mlua::{Function, Lua, LuaString, MultiValue, Table, Value as LuaValue};
-use sixm_core::{ConvarKind, EventSource, joaat, normalize_resource_path};
+use sixm_core::{ConvarKind, EventSource, game_timer_ms, joaat, normalize_resource_path};
 
 use crate::client;
 use crate::entities;
@@ -24,16 +23,13 @@ use crate::state;
 use crate::vector;
 use crate::web;
 
-/// Process-wide clock behind `GetGameTimer`.
-static START: OnceLock<Instant> = OnceLock::new();
-
 /// Installs every global function, the `Citizen` table, `exports` and `json`.
 ///
 /// The common globals are installed on both sides. The player and entity
 /// creation functions are server-only, and the connection and game pool
 /// functions are client-only.
 pub(crate) fn install(runtime: &Rc<LuaRuntime>, helpers: &Helpers) -> mlua::Result<()> {
-    START.get_or_init(Instant::now);
+    let _ = game_timer_ms();
     let lua = &runtime.lua;
     let weak = &runtime.me;
     let globals = lua.globals();
@@ -138,7 +134,9 @@ fn install_events(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::
         let saved: LuaValue = rt.lua.globals().raw_get("source")?;
         let outcome = host.trigger_event(&name, EventSource::Local, &values, Some(&rt.resource));
         rt.lua.globals().raw_set("source", saved)?;
-        outcome.map(|_| ()).map_err(lua_err)
+        let canceled = outcome.map_err(lua_err)?;
+        rt.set_last_emit_canceled(canceled);
+        Ok(())
     })?;
     let cancel_event = bind_fn(lua, weak, |rt, (): ()| {
         rt.set_canceled();
@@ -315,12 +313,6 @@ fn print_function(
 )]
 fn hash_key(text: &[u8]) -> i64 {
     i64::from(joaat(text) as i32)
-}
-
-/// Milliseconds since the process first asked for the game timer.
-fn game_timer_ms() -> i64 {
-    let elapsed = START.get_or_init(Instant::now).elapsed();
-    i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
 }
 
 /// The root folder of `name`. The runtime's own root is used without asking the host.

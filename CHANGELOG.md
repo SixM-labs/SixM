@@ -9,6 +9,16 @@ may change the protocol and the API.
 
 ### Added
 
+- JavaScript scripting runtime (`sixm-js`) backed by QuickJS (`rquickjs`),
+  supporting `.js` scripts in `server_scripts`, `client_scripts`, and
+  `shared_scripts` alongside `.lua` (including mixed Lua/JS resources):
+  `setTick`/`clearTick`, `setTimeout`/`clearTimeout`, `setInterval`/`clearInterval`,
+  async `Delay`/`Wait`, `on`/`onNet`/`emit`/`emitNet` + FiveM aliases, `exports`
+  cross-runtime dispatch, `GlobalState`/`Player`/`LocalPlayer`/`Entity` state bags
+  and change handlers, `vector2`/`vector3`/`vector4` (`Vector*`), KVP, resource
+  natives, entities/state/buckets, `PerformHttpRequest`, and `SetHttpHandler`.
+  Runs inside a strict memory/stack/operation-budget sandbox with `eval` and
+  `Function` disabled.
 - Per-entity replicated state (`PROTOCOL_VERSION` 13): `FreezeEntityPosition` /
   `IsEntityPositionFrozen`, `SetEntityVelocity` / `GetEntityVelocity`,
   `SetEntityHealth` / `GetEntityHealth` / `SetEntityMaxHealth` /

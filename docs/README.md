@@ -23,8 +23,10 @@ today. Where the code and a page disagree, the code is right.
 - [manifest.md](manifest.md): every `fxmanifest.lua` directive, how globs and
   `@other/` references work, dependencies, exports, and the limits that keep a
   manifest from hanging the server.
-- [lua-api.md](lua-api.md): every global a script can use, grouped by topic,
+- [lua-api.md](lua-api.md): every global a Lua script can use, grouped by topic,
   with the side it exists on, the lifecycle events and the sandbox differences.
+- [js-api.md](js-api.md): every global and Promise/timer helper a JavaScript
+  (`.js`) script can use on server and client, plus QuickJS sandbox limits.
 - [server.md](server.md): running `sixm-server`, `server.cfg`, console commands,
   convars with their defaults, the identity file and the fingerprint.
 - [client.md](client.md): running the headless `sixm-client`, its arguments,

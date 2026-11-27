@@ -1,6 +1,6 @@
-//! The client's script host: one [`LuaRuntime`] per synced resource, started in
-//! the server's order, with the connection, the state mirror, the console and
-//! the frame loop around them.
+//! The client's script host: one runtime per script language per synced
+//! resource, started in the server's order, with the connection, the state
+//! mirror, the console and the frame loop around them.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -17,6 +17,7 @@ use sixm_core::{
     EntityAttachment, EntityInfo, EntityKind, EntityState, EventContext, EventSource, FuncRef,
     Host, ResourceName, ResourceState, ScriptRuntime, Value,
 };
+use sixm_js::JsRuntime;
 use sixm_kvp::KvpStore;
 use sixm_lua::LuaRuntime;
 use sixm_net::{EntityStateUpdate, EntityTransform};
@@ -81,12 +82,19 @@ pub(crate) struct ScriptCommand {
     pub(crate) restricted: bool,
 }
 
+/// The script runtimes of one running resource, in load order.
+#[derive(Debug)]
+struct RunningResource {
+    name: ResourceName,
+    runtimes: Vec<Rc<dyn ScriptRuntime>>,
+}
+
 /// The client side of SixM: a connection to a server and the script runtimes
 /// of the resources it synced.
 ///
-/// Each synced resource runs in its own [`LuaRuntime`], in the order the server
-/// started them. Scripts talk to the server through events and state bags, as
-/// they do on the server. Everything runs on one thread, and no borrow of the
+/// Each synced resource runs in its own Lua and/or JS runtime, in the order the
+/// server started them. Scripts talk to the server through events and state bags,
+/// as they do on the server. Everything runs on one thread, and no borrow of the
 /// runtime's cells is held while script code runs, so scripts can call back
 /// into it.
 #[derive(Debug)]
@@ -104,10 +112,10 @@ pub struct ClientRuntime {
     pub(crate) kvp: RefCell<KvpStore>,
     pub(crate) convars: RefCell<Convars>,
     /// Running resources in start order.
-    running: RefCell<Vec<Rc<LuaRuntime>>>,
+    running: RefCell<Vec<RunningResource>>,
     /// The running runtimes as one shared slice, rebuilt when `running` changes.
     /// Event fan-out and frames clone this `Rc` instead of allocating.
-    snapshot: RefCell<Rc<[Rc<LuaRuntime>]>>,
+    snapshot: RefCell<Rc<[Rc<dyn ScriptRuntime>]>>,
     next_instance: Cell<u64>,
     /// Script commands by lower-case name.
     pub(crate) commands: RefCell<BTreeMap<String, ScriptCommand>>,
@@ -557,7 +565,7 @@ impl ClientRuntime {
             .cloned()
     }
 
-    /// Creates the runtime for `resource`, loads its shared and client scripts
+    /// Creates the runtime(s) for `resource`, loads its shared and client scripts
     /// in order, then fires the start events. A resource that is already running
     /// is stopped first. A script that fails to load is logged, and the rest
     /// still load.
@@ -573,23 +581,29 @@ impl ClientRuntime {
                 return;
             }
         };
-        let instance = self.next_instance.get();
-        self.next_instance.set(instance + 1);
-        let runtime = match LuaRuntime::new(
-            name.clone(),
-            instance,
-            root,
-            resource.exports.clone(),
-            self.me.clone(),
+        let scripts: Vec<_> = resource
+            .files
+            .iter()
+            .filter(|file| file.kind != ClientFileKind::File)
+            .collect();
+
+        let (runtimes, lua_rt, js_rt) = match self.create_runtimes(
+            &name,
+            &root,
+            &resource.exports,
+            scripts.iter().map(|file| Path::new(&file.name)),
         ) {
-            Ok(runtime) => runtime,
+            Ok(created) => created,
             Err(err) => {
                 error!("[{name}] cannot create the runtime: {err}");
                 return;
             }
         };
 
-        self.running.borrow_mut().push(Rc::clone(&runtime));
+        self.running.borrow_mut().push(RunningResource {
+            name: name.clone(),
+            runtimes,
+        });
         self.rebuild_snapshot();
         let synced: HashMap<String, PathBuf> = resource
             .files
@@ -603,12 +617,14 @@ impl ClientRuntime {
             .borrow_mut()
             .insert(resource.name.clone(), resource.metadata.clone());
         self.set_transition(&name, ResourceState::Starting);
-        for file in resource
-            .files
-            .iter()
-            .filter(|file| file.kind != ClientFileKind::File)
-        {
-            if let Err(err) = runtime.load_script(&file.path) {
+        for file in scripts {
+            // Check `file.name` (the cache stores files under extensionless content hashes).
+            let result = if is_js_script(Path::new(&file.name)) {
+                js_rt.as_ref().map(|rt| rt.load_script(&file.path))
+            } else {
+                lua_rt.as_ref().map(|rt| rt.load_script(&file.path))
+            };
+            if let Some(Err(err)) = result {
                 error!("[{name}] cannot load {}: {err}", file.name);
             }
         }
@@ -619,39 +635,105 @@ impl ClientRuntime {
         info!("Started resource {name}");
     }
 
-    /// Stops the runtime of `name`, if it is running.
+    /// Creates up to one Lua runtime and one JS runtime matching the extensions
+    /// present in `scripts`, in order of first appearance.
+    #[expect(clippy::type_complexity)]
+    fn create_runtimes<'a>(
+        &self,
+        name: &ResourceName,
+        root: &Path,
+        exports: &[String],
+        scripts: impl IntoIterator<Item = &'a Path>,
+    ) -> Result<
+        (
+            Vec<Rc<dyn ScriptRuntime>>,
+            Option<Rc<LuaRuntime>>,
+            Option<Rc<JsRuntime>>,
+        ),
+        sixm_core::ScriptError,
+    > {
+        let mut runtimes: Vec<Rc<dyn ScriptRuntime>> = Vec::new();
+        let mut lua_rt: Option<Rc<LuaRuntime>> = None;
+        let mut js_rt: Option<Rc<JsRuntime>> = None;
+
+        for path in scripts {
+            if is_js_script(path) {
+                if js_rt.is_none() {
+                    let instance = self.next_instance.get();
+                    self.next_instance.set(instance + 1);
+                    let rt = JsRuntime::new(
+                        name.clone(),
+                        instance,
+                        root.to_path_buf(),
+                        exports.to_vec(),
+                        self.me.clone(),
+                    )?;
+                    runtimes.push(Rc::clone(&rt) as Rc<dyn ScriptRuntime>);
+                    js_rt = Some(rt);
+                }
+            } else if lua_rt.is_none() {
+                let instance = self.next_instance.get();
+                self.next_instance.set(instance + 1);
+                let rt = LuaRuntime::new(
+                    name.clone(),
+                    instance,
+                    root.to_path_buf(),
+                    exports.to_vec(),
+                    self.me.clone(),
+                )?;
+                runtimes.push(Rc::clone(&rt) as Rc<dyn ScriptRuntime>);
+                lua_rt = Some(rt);
+            }
+        }
+        Ok((runtimes, lua_rt, js_rt))
+    }
+
+    /// Stops the resource `name`, if it is running.
     fn stop_named(&self, name: &str) {
-        if let Some(runtime) = self.running_runtime(name) {
-            self.stop_runtime(&runtime);
+        let resource = self
+            .running
+            .borrow()
+            .iter()
+            .find(|res| res.name.as_ref() == name)
+            .map(|res| res.name.clone());
+        if let Some(name) = resource {
+            self.stop_resource(&name);
         }
     }
 
     /// Stops every running resource, last started first.
     fn stop_all(&self) {
         loop {
-            let last = self.running.borrow().last().cloned();
-            let Some(runtime) = last else {
+            let last = self.running.borrow().last().map(|res| res.name.clone());
+            let Some(name) = last else {
                 return;
             };
-            self.stop_runtime(&runtime);
+            self.stop_resource(&name);
         }
     }
 
-    /// Fires the stop events, removes the runtime and its commands, and shuts it down.
-    fn stop_runtime(&self, runtime: &Rc<LuaRuntime>) {
-        let name = runtime.resource().clone();
-        self.set_transition(&name, ResourceState::Stopping);
-        self.dispatch_local("onClientResourceStop", &name);
-        self.dispatch_local("onResourceStop", &name);
-        self.release_commands_of(&name);
-        self.files.borrow_mut().remove(&*name);
-        self.metadata.borrow_mut().remove(&*name);
-        self.running
-            .borrow_mut()
-            .retain(|candidate| !Rc::ptr_eq(candidate, runtime));
+    /// Fires the stop events, removes the resource's runtimes and commands, and shuts them down.
+    fn stop_resource(&self, name: &ResourceName) {
+        self.set_transition(name, ResourceState::Stopping);
+        self.dispatch_local("onClientResourceStop", name);
+        self.dispatch_local("onResourceStop", name);
+        self.release_commands_of(name);
+        self.files.borrow_mut().remove(name.as_ref());
+        self.metadata.borrow_mut().remove(name.as_ref());
+        let removed = {
+            let mut running = self.running.borrow_mut();
+            running
+                .iter()
+                .position(|res| res.name == *name)
+                .map(|index| running.remove(index))
+        };
         self.rebuild_snapshot();
-        self.clear_transition(&name);
-        runtime.shutdown();
+        self.clear_transition(name);
+        if let Some(resource) = removed {
+            for runtime in resource.runtimes.into_iter().rev() {
+                runtime.shutdown();
+            }
+        }
         info!("Stopping resource {name}");
     }
 
@@ -695,39 +777,49 @@ impl ClientRuntime {
         }
     }
 
-    /// Whether a runtime for `name` is running.
+    /// Whether a resource called `name` is running.
     pub(crate) fn is_running(&self, name: &str) -> bool {
-        self.running_runtime(name).is_some()
-    }
-
-    /// The running runtime called `name`.
-    pub(crate) fn running_runtime(&self, name: &str) -> Option<Rc<LuaRuntime>> {
         self.running
             .borrow()
             .iter()
-            .find(|runtime| runtime.resource().as_ref() == name)
-            .cloned()
+            .any(|res| res.name.as_ref() == name)
+    }
+
+    /// The running runtimes of the resource called `name`, in load order.
+    pub(crate) fn running_runtimes(&self, name: &str) -> Option<Vec<Rc<dyn ScriptRuntime>>> {
+        self.running
+            .borrow()
+            .iter()
+            .find(|res| res.name.as_ref() == name)
+            .map(|res| res.runtimes.clone())
     }
 
     /// The running runtime that owns `func`, if this exact instance is still up.
-    pub(crate) fn runtime_of(&self, func: &FuncRef) -> Option<Rc<LuaRuntime>> {
+    pub(crate) fn runtime_of(&self, func: &FuncRef) -> Option<Rc<dyn ScriptRuntime>> {
         self.running
             .borrow()
             .iter()
-            .find(|runtime| {
-                runtime.resource().as_ref() == func.owner.as_ref()
-                    && runtime.instance() == func.instance
+            .find(|res| res.name.as_ref() == func.owner.as_ref())
+            .and_then(|res| {
+                res.runtimes
+                    .iter()
+                    .find(|runtime| runtime.instance() == func.instance)
+                    .cloned()
             })
-            .cloned()
     }
 
     /// The running runtimes, in start order, as a shared slice that needs no borrow.
-    pub(crate) fn snapshot(&self) -> Rc<[Rc<LuaRuntime>]> {
+    pub(crate) fn snapshot(&self) -> Rc<[Rc<dyn ScriptRuntime>]> {
         self.snapshot.borrow().clone()
     }
 
     fn rebuild_snapshot(&self) {
-        let fresh: Rc<[Rc<LuaRuntime>]> = self.running.borrow().iter().cloned().collect();
+        let fresh: Rc<[Rc<dyn ScriptRuntime>]> = self
+            .running
+            .borrow()
+            .iter()
+            .flat_map(|res| res.runtimes.iter().cloned())
+            .collect();
         *self.snapshot.borrow_mut() = fresh;
     }
 
@@ -803,7 +895,7 @@ impl ClientRuntime {
         self.running
             .borrow()
             .iter()
-            .map(|runtime| runtime.resource().clone())
+            .map(|res| res.name.clone())
             .collect()
     }
 
@@ -836,6 +928,12 @@ impl ClientRuntime {
 fn advance(scheduled: Instant, now: Instant, period: Duration) -> Instant {
     let next = scheduled + period;
     if next > now { next } else { now + period }
+}
+
+fn is_js_script(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("js"))
 }
 
 /// Time between frames at `rate` frames per second. `rate` is at least 1.
