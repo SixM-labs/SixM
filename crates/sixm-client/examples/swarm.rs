@@ -132,7 +132,15 @@ fn main() -> ExitCode {
         });
     }
     print_summary(&reports);
-    ExitCode::SUCCESS
+    if reports.len() == options.count
+        && reports
+            .iter()
+            .all(|report| report.error.is_none() && !report.ended_early)
+    {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 /// Runs one bot until it quits or the server ends its connection.
@@ -282,7 +290,7 @@ fn init_logging() {
 mod tests {
     use super::parse_args;
 
-    fn args(list: &[&str]) -> impl Iterator<Item = String> + use<'_> {
+    fn args<'a>(list: &'a [&'a str]) -> impl Iterator<Item = String> + 'a {
         list.iter().map(|arg| (*arg).to_owned())
     }
 
