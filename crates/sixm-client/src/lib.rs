@@ -17,9 +17,11 @@ mod convars;
 mod error;
 mod host;
 mod runtime;
+mod sim;
 mod state;
 
 pub use cache::Cache;
 pub use client::{Client, ClientNotice, SyncStats, SyncedFile, SyncedResource};
 pub use error::ClientError;
 pub use runtime::{ClientRuntime, Input};
+pub use sim::SimAdapter;

@@ -3,7 +3,7 @@
 use std::rc::Rc;
 
 use mlua::{MultiValue, Table, Value as LuaValue};
-use sixm_core::{ClientHost, Host, player_bag};
+use sixm_core::{ClientHost, Host, NativeRegistry, player_bag};
 
 use crate::players::{player_id, whole_number};
 use crate::runtime::{LuaRuntime, bind_fn, lua_err};
@@ -70,7 +70,70 @@ pub(crate) fn install(
         globals.raw_set(name, function)?;
     }
     globals.raw_set("LocalPlayer", local)?;
+    install_adapter_natives(runtime, globals)?;
     Ok(())
+}
+
+fn install_adapter_natives(runtime: &Rc<LuaRuntime>, globals: &Table) -> mlua::Result<()> {
+    let Ok(host) = runtime.host() else {
+        return Ok(());
+    };
+    let Some(registry) = host.client().and_then(ClientHost::adapter_natives) else {
+        return Ok(());
+    };
+    drop(host);
+
+    let lua = &runtime.lua;
+    let weak = &runtime.me;
+    for (name, func) in registry.iter() {
+        let func = func.clone();
+        let wrapper = bind_fn(lua, weak, move |rt, args: MultiValue| {
+            let lua_args = args.into_vec();
+            let values = rt.to_values(&lua_args).map_err(lua_err)?;
+            let out = func(&values).map_err(lua_err)?;
+            rt.to_lua_multi(&out)
+        })?;
+        globals.raw_set(name, wrapper)?;
+    }
+
+    let invoke = make_invoke_native(lua, weak, registry)?;
+    if let Ok(citizen) = globals.raw_get::<Table>("Citizen") {
+        citizen.raw_set("InvokeNative", invoke)?;
+    }
+    Ok(())
+}
+
+fn make_invoke_native(
+    lua: &mlua::Lua,
+    weak: &std::rc::Weak<LuaRuntime>,
+    registry: NativeRegistry,
+) -> mlua::Result<mlua::Function> {
+    bind_fn(
+        lua,
+        weak,
+        move |rt, (hash_val, args): (LuaValue, MultiValue)| {
+            let hash = native_hash(&hash_val)?;
+            let native = registry
+                .get_by_hash(hash)
+                .ok_or_else(|| mlua::Error::runtime(format!("unknown native hash {hash:#010x}")))?;
+            let lua_args = args.into_vec();
+            let values = rt.to_values(&lua_args).map_err(lua_err)?;
+            let out = native(&values).map_err(lua_err)?;
+            rt.to_lua_multi(&out)
+        },
+    )
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "native hashes are 32-bit values and may pass as signed integers from GetHashKey"
+)]
+fn native_hash(value: &LuaValue) -> mlua::Result<u32> {
+    whole_number(value)
+        .filter(|&n| (i64::from(i32::MIN)..=i64::from(u32::MAX)).contains(&n))
+        .map(|n| n as u32)
+        .ok_or_else(|| mlua::Error::runtime("InvokeNative: native hash must be a 32-bit integer"))
 }
 
 pub(crate) fn latent_bps(value: &LuaValue) -> mlua::Result<u64> {

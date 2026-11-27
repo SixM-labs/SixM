@@ -9,13 +9,13 @@ use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use sixm_client::{Client, ClientRuntime, Input};
+use sixm_client::{Client, ClientRuntime, Input, SimAdapter};
 use sixm_net::{Fingerprint, Identity};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 /// Usage line printed on bad arguments.
-const USAGE: &str = "usage: sixm-client <addr> <name> [--fingerprint HEX] [--cache DIR] [--identity FILE] [+command args...]";
+const USAGE: &str = "usage: sixm-client <addr> <name> [--fingerprint HEX] [--cache DIR] [--identity FILE] [--sim] [+command args...]";
 /// Cache folder used when `--cache` is not given.
 const DEFAULT_CACHE: &str = "sixm-cache";
 /// File inside the cache folder that holds the client certificate, unless
@@ -38,6 +38,8 @@ struct Options {
     identity: Identity,
     /// Console commands given as `+name args...`, each one its words, name first.
     commands: Vec<Vec<String>>,
+    /// Attach the built-in simulated [`GameAdapter`].
+    sim: bool,
 }
 
 fn main() -> ExitCode {
@@ -80,7 +82,13 @@ fn main() -> ExitCode {
     log_sync(&client);
 
     let runtime = ClientRuntime::new(client, options.cache.join(DATA_FOLDER));
-    runtime.start_synced();
+    if options.sim {
+        runtime.set_adapter(Box::new(SimAdapter::new()));
+    }
+    if let Err(err) = runtime.try_start_synced() {
+        error!("cannot attach game adapter: {err}");
+        return ExitCode::FAILURE;
+    }
     for command in &options.commands {
         runtime.execute_words(command);
     }
@@ -98,6 +106,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {
     let mut cache = PathBuf::from(DEFAULT_CACHE);
     let mut identity = None;
     let mut commands: Vec<Vec<String>> = Vec::new();
+    let mut sim = false;
     while let Some(arg) = args.next() {
         if let Some(name) = arg.strip_prefix('+') {
             if name.is_empty() {
@@ -121,6 +130,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {
                 let file = args.next().ok_or("--identity needs a file")?;
                 identity = Some(PathBuf::from(file));
             }
+            "--sim" => sim = true,
             _ => match commands.last_mut() {
                 Some(command) => command.push(arg),
                 None => positional.push(arg),
@@ -140,6 +150,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {
         cache,
         identity: Identity::Persistent(identity),
         commands,
+        sim,
     })
 }
 

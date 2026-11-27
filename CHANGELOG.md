@@ -9,6 +9,12 @@ may change the protocol and the API.
 
 ### Added
 
+- Game adapter contract (`sixm-core::adapter`: `GameAdapter`, `MirrorChange`,
+  `AdapterError`, `AdapterSink`, `NativeRegistry`), adapter native installation
+  and `Citizen.InvokeNative` (plus global `InvokeNative` in JS) on client
+  runtimes when an adapter is attached, `ClientRuntime` tick/mirror hooks, and
+  built-in Phase 1 `SimAdapter` (`--sim` CLI flag in `sixm-client`) with
+  `GetEntitySpeed`, `TaskGoStraightToCoord`, and `GetSimEntityCoords`.
 - JavaScript scripting runtime (`sixm-js`) backed by QuickJS (`rquickjs`),
   supporting `.js` scripts in `server_scripts`, `client_scripts`, and
   `shared_scripts` alongside `.lua` (including mixed Lua/JS resources):

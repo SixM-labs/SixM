@@ -1,9 +1,9 @@
 # Game adapters (design)
 
-Status: **proposed**. Nothing in this document exists in the code except where
-it says so. It describes the contract we intend to add to `sixm-core` once a
-game exists to adapt. Where the code and this page disagree about something
-that exists, the code is right.
+Status: **Phase 1 implemented** (`sixm-core::adapter`, `sixm-client::SimAdapter`,
+`sixm-client` mirror/tick hooks, and Lua/JS `InvokeNative`). Phase 2 (a real
+game crate) waits on a PC release with a supported interface. Where the code
+and this page disagree about something that exists, the code is right.
 
 ## 1. Goal and non-goals
 
