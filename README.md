@@ -22,7 +22,7 @@ separate adapters, starting with GTA VI once a PC version is released.
   `vector2`, `vector3`, `vector4` and `GetHashKey`.
   Existing resources should need as few changes as possible.
 - **Fast.** The server, scheduler and resource handling are written in Rust.
-  Each resource runs in its own isolated Lua 5.4 state.
+  Resources run in isolated Lua 5.4 or QuickJS runtimes.
 - **Safe by default.** Scripts run in a sandbox without `io`, without
   bytecode loading and without access to files outside their resource.
   Manifests cannot hang the server.
@@ -107,6 +107,13 @@ A test client can connect while the example server runs:
 
 ```sh
 cargo run -p sixm-net --example bot -- 127.0.0.1:30120 Tester hello:ping hi
+```
+
+To try the example chat, connect the headless client and type `say Hello` in
+its console:
+
+```sh
+cargo run -p sixm-client -- 127.0.0.1:30120 Tester
 ```
 
 ## Writing resources

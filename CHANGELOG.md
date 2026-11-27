@@ -7,6 +7,10 @@ may change the protocol and the API.
 
 ## [Unreleased]
 
+## [0.2.0]
+
+The client and server now use protocol 14. Upgrade both together.
+
 ### Added
 
 - Frame and per-resource profiling with `profiler record [frames]`,
@@ -14,12 +18,24 @@ may change the protocol and the API.
   `profiler saveJSON <path>`.
 - Authenticated remote console on `POST /rcon` with a console-only
   `rcon_password`, per-address failure lockout, and JSON command output.
+- Console chat in the example server, usable with `say <message>` from the
+  server or a connected headless client.
+- Release archive smoke tests on Linux and Windows that start the extracted
+  binaries and verify a chat round trip over a pinned connection.
 
 - FiveM scripting compatibility (`PROTOCOL_VERSION` 14):
   - Lua compile-time backtick JOAAT hash literals (`` `adder` ``) with comment/string awareness and line-number preservation.
   - `quat(w, x, y, z)` (`Value::Quat`) across Lua, JavaScript, exports/state bags/network, plus `GetEntityQuaternion` and `SetEntityQuaternion`.
   - Convar change listeners (`AddConvarChangeListener` with `*`/`?` glob filtering and `RemoveConvarChangeListener`) on server and client.
   - CFX and OneSync natives on Lua & JS: `GetRegisteredCommands`, `StartResource`/`StopResource` (server, ACE-gated via `resource.<caller>`), `GetEntityScript`, `NetworkGetFirstEntityOwner`, `SetEntityDistanceCullingRadius`, `GetPlayerLastMsg`, `GetNumPlayerTokens`, and `GetPlayerToken`.
+
+### Changed
+
+- Lua resources have a 64 MiB VM heap limit and an instruction budget for
+  each callback or task resume. The server and client only run `.lua` and
+  `.js` resource scripts, and Lua script files are loaded as text.
+- JavaScript disables all dynamic function constructors. Manifest evaluation
+  also caps the number and combined size of the directives it records.
 
 ## [0.1.0]
 
@@ -126,5 +142,6 @@ client (`SimAdapter`) are complete.
   or with the built-in simulated adapter (`--sim`).
 - `LoadResourceFile` on the client only sees the resource's own data folder.
 
-[Unreleased]: https://github.com/SixM-labs/SixM/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/SixM-labs/SixM/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/SixM-labs/SixM/releases/tag/v0.2.0
 [0.1.0]: https://github.com/SixM-labs/SixM/releases/tag/v0.1.0

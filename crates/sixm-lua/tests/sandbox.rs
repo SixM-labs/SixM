@@ -47,6 +47,47 @@ fn load_accepts_text_and_rejects_bytecode() {
 }
 
 #[test]
+fn allocation_and_execution_limits_leave_the_resource_usable() {
+    let host = new_host();
+    let rt = start(
+        &host,
+        "limits",
+        &[],
+        &[(
+            "main.lua",
+            r"
+            local function calculate()
+                local total = 0
+                for i = 1, 4000000 do total = total + i end
+                return total
+            end
+            exports('compute', function() return pcall(calculate) end)
+            exports('coroutine', function() return coroutine.resume(coroutine.create(calculate)) end)
+            exports('allocate', function() return string.rep('x', 70 * 1024 * 1024) end)
+            exports('ok', function()
+                local ok, result = xpcall(function() error('ordinary error') end,
+                    function() return 7 end)
+                local wrapped = coroutine.wrap(function() coroutine.yield(nil, result) end)
+                local empty, value = wrapped()
+                return not ok and empty == nil and value
+            end)
+            ",
+        )],
+    );
+    for name in ["compute", "coroutine"] {
+        let error = rt
+            .call_export(name, &[], None)
+            .expect_err("execution limit");
+        assert!(error.to_string().contains("instruction limit"), "{error}");
+    }
+    let error = rt
+        .call_export("allocate", &[], None)
+        .expect_err("memory limit");
+    assert!(error.to_string().contains("memory"), "{error}");
+    assert_eq!(first(&rt, "ok"), Value::Int(7));
+}
+
+#[test]
 fn json_encodes_arrays_maps_and_numbers() {
     let host = new_host();
     let rt = start(

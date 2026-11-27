@@ -22,13 +22,18 @@ Sources: `crates/sixm-js/src/` (`runtime.rs`, `sandbox.rs`, `scheduler.rs`,
 Scripts run inside a constrained QuickJS runtime per resource:
 
 - **Memory and CPU guards:** each runtime enforces a 64 MiB heap limit, a
-  2 MiB call stack limit, and an operation budget per synchronous turn so an
-  infinite loop or catastrophic regex fails cleanly without hanging the host.
+  256 KiB call stack limit, and execution deadlines of 500 ms for script
+  loading and 100 ms per callback. QuickJS also checks the deadline when
+  running regular expressions.
 - **No dynamic code execution or Node/OS access:** `eval` is disabled,
   `Function` constructors throw, and Node/filesystem modules (`require`,
   `import`, `fs`, `process`, `Buffer`) do not exist. Load multiple JS files via
   `fxmanifest.lua` and read/write data files with `LoadResourceFile` and
   `SaveResourceFile`.
+
+The runtime exposes no shell or process API. The server's `PerformHttpRequest`
+passes response data to scripts. `ExecuteCommand` only interprets SixM console
+commands with the resource's permissions.
 
 ## Scheduling, timers, and async
 

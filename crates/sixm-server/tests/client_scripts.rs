@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use common::{Fixture, manifest};
 use sixm_client::{Client, ClientRuntime};
-use sixm_core::{ConvarKind, GLOBAL_BAG, Host, Value};
+use sixm_core::{ConvarKind, GLOBAL_BAG, Host, ScriptError, Value};
 use sixm_net::Identity;
 use sixm_server::Input;
 use tempfile::TempDir;
@@ -341,6 +341,34 @@ fn client_script_runs_on_join_and_its_server_event_reaches_the_handler() {
         has_line(log, "1: ping from the client") && has_line(log, "1: started")
     });
     assert!(has_line(&log, "1: started"), "{log}");
+}
+
+#[test]
+fn synced_unsupported_script_files_remain_data() {
+    let h = Harness::bare("script_types");
+    let data = "exports('data_marker', function() return true end)";
+    h.add(
+        "script_types",
+        "fx_version 'cerulean'\nclient_scripts { 'client.lua', 'external.sh' }\n",
+        &[
+            ("external.sh", data),
+            (
+                "client.lua",
+                "exports('read_data', function() return LoadResourceFile('script_types', 'external.sh') end)",
+            ),
+        ],
+    );
+    h.start("script_types");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let runtime = h.connect(&dir.path().join("cache"), &dir.path().join("data"));
+    let bytes = runtime
+        .call_export("script_types", "read_data", &[], None)
+        .expect("read synced data");
+    assert_eq!(bytes, [Value::from(data)]);
+    assert!(matches!(
+        runtime.call_export("script_types", "data_marker", &[], None),
+        Err(ScriptError::NoSuchExport { .. })
+    ));
 }
 
 #[test]

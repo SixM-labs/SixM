@@ -43,8 +43,13 @@ struct Options {
 }
 
 fn main() -> ExitCode {
+    let mut args = std::env::args().skip(1).peekable();
+    if args.len() == 1 && args.peek().is_some_and(|arg| arg == "--version") {
+        println!("sixm-client {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
     init_logging();
-    let options = match parse_args(std::env::args().skip(1)) {
+    let options = match parse_args(args) {
         Ok(options) => options,
         Err(message) => {
             eprintln!("sixm-client: {message}\n{USAGE}");

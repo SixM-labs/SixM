@@ -19,7 +19,7 @@ fn dangerous_globals_are_absent_or_disabled() {
                 const absent = [
                     "require", "process", "fetch", "XMLHttpRequest",
                     "WebAssembly", "SharedArrayBuffer", "Atomics",
-                    "eval", "Intl", "std", "os"
+                    "eval", "Intl", "std", "os", "Deno", "Bun"
                 ];
                 for (const name of absent) {
                     if (typeof globalThis[name] !== "undefined") {
@@ -33,6 +33,13 @@ fn dangerous_globals_are_absent_or_disabled() {
                 threw = false;
                 try { (() => {}).constructor("return 1")(); } catch (e) { threw = true; }
                 if (!threw) throw new Error("Function.prototype.constructor should throw");
+
+                const forms = [async () => 1, function* () { yield 1; }, async function* () { yield 1; }];
+                for (const form of forms) {
+                    if (form.constructor !== Function) {
+                        throw new Error("every function prototype should use the disabled constructor");
+                    }
+                }
 
                 // Safe builtins still work
                 const d = new Date(0);

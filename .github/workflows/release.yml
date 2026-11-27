@@ -19,10 +19,8 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            exe: ""
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            exe: ".exe"
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -42,22 +40,11 @@ jobs:
           fi
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }} -p sixm-server -p sixm-client
-      - name: Package
+      - name: Package and smoke test
         env:
           TARGET: ${{ matrix.target }}
-          EXE: ${{ matrix.exe }}
         run: |
-          name="sixm-$GITHUB_REF_NAME-$TARGET"
-          mkdir -p "dist/$name"
-          cp "target/$TARGET/release/sixm-server$EXE" "target/$TARGET/release/sixm-client$EXE" "dist/$name/"
-          cp LICENSE README.md "dist/$name/"
-          cp -r examples/server-data "dist/$name/server-data"
-          cd dist
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            7z a -tzip "$name.zip" "$name"
-          else
-            zip -r "$name.zip" "$name"
-          fi
+          python scripts/release_package.py "$TARGET" "target/$TARGET/release" --tag "$GITHUB_REF_NAME"
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}

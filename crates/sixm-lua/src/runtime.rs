@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::time::Instant;
 
+use mlua::chunk::ChunkMode;
 use mlua::{FromLuaMulti, Function, IntoLuaMulti, Lua, MultiValue, Table, Value as LuaValue};
 use sixm_core::{
     EventContext, EventSource, Host, ResourceName, ScriptError, ScriptRuntime, Value, WebRequest,
@@ -49,6 +50,7 @@ pub struct LuaRuntime {
     /// Weak handle to this runtime, captured by Lua closures and function handles.
     pub(crate) me: Weak<Self>,
     pub(crate) lua: Lua,
+    pub(crate) budget: sandbox::Budget,
     pub(crate) task_wrapper: Function,
     /// `""`, the `source` of local events, kept to avoid a string per resume.
     pub(crate) empty_string: mlua::LuaString,
@@ -87,8 +89,9 @@ impl LuaRuntime {
         host: Weak<dyn Host>,
     ) -> Result<Rc<Self>, ScriptError> {
         let side = side_of(&host)?;
-        let lua = sandbox::new_state().into_script()?;
-        let helpers = sandbox::prepare(&lua).into_script()?;
+        let budget = sandbox::Budget::default();
+        let lua = sandbox::new_state(&budget).into_script()?;
+        let helpers = sandbox::prepare(&lua, budget.clone()).into_script()?;
         let empty_string = lua.create_string("").into_script()?;
         let runtime = Rc::new_cyclic(|me| Self {
             resource,
@@ -99,6 +102,7 @@ impl LuaRuntime {
             side,
             me: me.clone(),
             lua,
+            budget,
             task_wrapper: helpers.task_wrapper.clone(),
             empty_string,
             current_source: Cell::new(EventSource::Local),
@@ -135,6 +139,7 @@ impl LuaRuntime {
             .lua
             .load(source.as_ref())
             .set_name(chunk_name)
+            .set_mode(ChunkMode::Text)
             .into_function()
             .into_script()?;
         let (slot, _) = self.spawn(main, EventSource::Local, None).into_script()?;

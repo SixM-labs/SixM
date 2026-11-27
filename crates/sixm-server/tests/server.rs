@@ -8,6 +8,31 @@ use common::{Fixture, manifest, write_file};
 use sixm_core::{Host, ScriptError, Value};
 use sixm_server::ManagerError;
 
+#[test]
+fn unsupported_script_files_remain_data() {
+    let fx = Fixture::new();
+    let data = "exports('data_marker', function() return true end)";
+    fx.add_resource(
+        "script_types",
+        &manifest(&["server.lua", "external.sh"], &[], &[]),
+        &[
+            ("external.sh", data),
+            (
+                "server.lua",
+                "exports('read_data', function() return LoadResourceFile('script_types', 'external.sh') end)",
+            ),
+        ],
+    );
+    fx.server.execute("ensure script_types");
+
+    assert_eq!(fx.text("script_types", "read_data"), data);
+    assert!(matches!(
+        fx.manager()
+            .call_export("script_types", "data_marker", &[], None),
+        Err(ScriptError::NoSuchExport { .. })
+    ));
+}
+
 /// A `watch` resource that records lifecycle events into `LOG`, exposed as `log()`.
 fn add_watch(fx: &Fixture) {
     let script = r"

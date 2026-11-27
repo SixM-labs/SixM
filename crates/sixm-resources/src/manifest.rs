@@ -15,13 +15,16 @@ use crate::error::ManifestError;
 const MEMORY_LIMIT: usize = 16 * 1024 * 1024;
 /// Lua VM instructions a manifest may execute before it is aborted.
 const INSTRUCTION_LIMIT: u64 = 10_000_000;
+/// Upper bounds on the manifest copied out of the Lua heap.
+const MAX_ENTRIES: usize = 8_192;
+const MAX_ENTRY_BYTES: usize = 1024 * 1024;
 /// The instruction hook runs once per this many instructions.
 const HOOK_INTERVAL: u32 = 10_000;
 /// Globals a manifest cannot reach. They read as nil instead of becoming
 /// directive recorders. `load`, `dofile`, `loadfile`, `pcall` and `xpcall` are
 /// also removed from the base library: an instruction-limit error must not be
 /// catchable, or a manifest could loop forever around a `pcall`.
-const BLOCKED_GLOBALS: [&str; 12] = [
+const BLOCKED_GLOBALS: [&str; 13] = [
     "coroutine",
     "debug",
     "dofile",
@@ -32,6 +35,7 @@ const BLOCKED_GLOBALS: [&str; 12] = [
     "package",
     "pcall",
     "require",
+    "setmetatable",
     "utf8",
     "xpcall",
 ];
@@ -114,6 +118,7 @@ pub fn parse_manifest(source: &str, chunk_name: &str) -> Result<Manifest, Manife
 struct Sink {
     /// `(key, value)` pairs, with the key already normalised.
     entries: RefCell<Vec<(String, String)>>,
+    entry_bytes: Cell<usize>,
     /// The first invalid value. It stops the script and is reported instead of
     /// the Lua error it caused.
     failure: RefCell<Option<ManifestError>>,
@@ -206,14 +211,23 @@ fn fail(sink: &Sink, error: ManifestError) -> mlua::Error {
 /// Records every element of `value` under `key`.
 fn record(sink: &Sink, directive: &str, key: &str, value: &Value) -> Result<(), ManifestError> {
     let mut entries = sink.entries.borrow_mut();
+    let mut push = |value: &Value| {
+        let value = scalar(directive, value)?;
+        let bytes = sink.entry_bytes.get() + key.len() + value.len();
+        if entries.len() >= MAX_ENTRIES || bytes > MAX_ENTRY_BYTES {
+            return Err(ManifestError::OutputLimit);
+        }
+        sink.entry_bytes.set(bytes);
+        entries.push((key.to_owned(), value));
+        Ok(())
+    };
     match value {
         Value::Table(table) => {
             for element in table.sequence_values::<Value>() {
-                let element = element.map_err(lua_error)?;
-                entries.push((key.to_owned(), scalar(directive, &element)?));
+                push(&element.map_err(lua_error)?)?;
             }
         }
-        other => entries.push((key.to_owned(), scalar(directive, other)?)),
+        other => push(other)?,
     }
     Ok(())
 }
@@ -284,6 +298,19 @@ mod tests {
 
     fn parse(source: &str) -> Manifest {
         parse_manifest(source, "@test/fxmanifest.lua").expect("manifest should parse")
+    }
+
+    #[test]
+    fn recorded_metadata_has_entry_and_byte_limits() {
+        for source in [
+            "for i = 1, 9000 do description 'small' end",
+            "local text = string.rep('x', 1024); for i = 1, 1024 do description(text) end",
+        ] {
+            assert!(matches!(
+                parse_manifest(source, "@test/fxmanifest.lua"),
+                Err(ManifestError::OutputLimit)
+            ));
+        }
     }
 
     fn metadata_of(manifest: &Manifest, key: &str) -> Vec<String> {

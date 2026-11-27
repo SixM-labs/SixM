@@ -44,7 +44,9 @@ impl LuaRuntime {
             .lookup_function(id)
             .ok_or_else(|| ScriptError::StaleRef(self.func_ref(id)))?;
         let body_handler: Rc<RefCell<Option<Function>>> = Rc::default();
-        let outcome = self.run_web(&handler, request, data, &body_handler);
+        let outcome = self
+            .budget
+            .run(|| self.run_web(&handler, request, data, &body_handler));
         // Released here, so that a body handler which captures the request
         // cannot keep it alive past this call.
         let leftover = body_handler.borrow_mut().take();

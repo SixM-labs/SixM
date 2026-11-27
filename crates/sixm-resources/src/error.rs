@@ -27,6 +27,9 @@ pub enum ManifestError {
         /// The instruction budget that was exhausted.
         limit: u64,
     },
+    /// The recorded directives exceeded the entry or byte limit.
+    #[error("manifest directives exceeded the output limit")]
+    OutputLimit,
 }
 
 /// Why a resource folder could not be loaded, or why its scripts could not be

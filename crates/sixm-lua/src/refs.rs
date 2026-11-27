@@ -163,7 +163,7 @@ impl LuaRuntime {
             .lookup_function(id)
             .ok_or_else(|| ScriptError::StaleRef(self.func_ref(id)))?;
         let lua_args = self.to_lua_multi(args).into_script()?;
-        let results: MultiValue = func.call(lua_args).into_script()?;
+        let results: MultiValue = self.budget.run(|| func.call(lua_args)).into_script()?;
         self.multi_to_values(results)
     }
 }

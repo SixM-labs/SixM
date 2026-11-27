@@ -1,6 +1,7 @@
 # JavaScript Runtime (design)
 
-Status: **proposed**. Nothing in `crates/sixm-js` exists in the codebase yet. Where this document refers to existing crates (`sixm-core`, `sixm-lua`, `sixm-resources`, `sixm-server`, `sixm-client`), symbol names and behavior match the current `main` branch.
+Status: **implemented** in `crates/sixm-js`. This document records the original
+design. For the supported API and current limits, see [JavaScript API](../js-api.md).
 
 Clean room: this design uses public FiveM JavaScript API names and concepts only. It copies no FiveM or Cfx.re code.
 

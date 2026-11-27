@@ -745,8 +745,15 @@ The sandbox removes parts of standard Lua:
 | Standard libraries | `coroutine`, `table`, `string`, `utf8`, `math`, and the `os` functions `time`, `clock`, `date` and `difftime`. |
 | Not available | `io`, `package`, `require`, `dofile`, `loadfile`. |
 | `os` | Only `time`, `clock`, `date` and `difftime`. Other `os` functions are removed. |
-| `load` | Accepts source text only. The mode is forced to text, so precompiled bytecode is rejected. |
+| Script loading | Resource files and `load` accept Lua source text only. |
 | `debug` | Only `debug.traceback` and `debug.getinfo`. |
-| `pcall`, `xpcall` | Available to scripts. |
+| Execution | Each task resume or synchronous entry has a 2,000,000-instruction budget, checked every 1,000 instructions. Nested calls into the same runtime share its remaining budget. `pcall` and `xpcall` still handle ordinary Lua errors. |
+| Memory | Each resource's Lua VM heap is limited to 64 MiB. |
+| Table finalizers | `setmetatable` rejects metatables with `__gc`. |
+
+Shell and process APIs such as `os.execute` and `io.popen` are unavailable.
+`PerformHttpRequest` receives data and `SaveResourceFile` stores data.
+`ExecuteCommand` only interprets SixM console commands with the resource's
+permissions. Lua source passed to `load` stays inside the same Lua sandbox.
 
 Manifests have a smaller environment. See [manifest.md](manifest.md).
