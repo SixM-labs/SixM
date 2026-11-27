@@ -86,6 +86,13 @@ stored as `this_i`. A plain string with an unknown name keeps its spelling.
 The first group and `server_only` change behaviour. `fx_version`, `game`, `lua54`
 and metadata are parsed and kept, but nothing in SixM uses them yet.
 
+The server does not directly sync a `server_only` resource to clients. A
+different, client-synced resource may explicitly reference one of its files
+with a path such as `@server_only_res/data/config.json` in `files`,
+`client_scripts`, or `shared_scripts`. That file is sent as part of the
+referencing resource; this does not advertise or start the `server_only`
+resource on clients.
+
 ## Script load order
 
 Server side, the server loads:

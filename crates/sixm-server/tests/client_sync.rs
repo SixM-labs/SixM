@@ -240,6 +240,57 @@ fn stopped_resources_are_reported_and_leave_the_list() {
 }
 
 #[test]
+fn server_only_files_can_be_referenced_but_the_resource_is_never_synced() {
+    let h = Harness::new();
+    h.fx.add_resource(
+        "server_only_res",
+        "fx_version 'cerulean'\ngame 'common'\nserver_only 'yes'\nfiles { 'data/config.json' }\n",
+        &[("data/config.json", "{\"from\":\"server-only\"}")],
+    );
+    h.fx.add_resource(
+        "consumer",
+        &client_manifest(&[], &[], &["@server_only_res/data/config.json"]),
+        &[],
+    );
+    h.fx.add_resource("marker", &client_manifest(&[], &[], &[]), &[]);
+    h.fx.server.execute("start server_only_res");
+    h.fx.server.execute("start consumer");
+
+    let mut client = h.connect(&h.fx.root().join("cache"));
+    assert_eq!(client.resources().len(), 1);
+    assert_eq!(client.resources()[0].name, "consumer");
+    assert_eq!(client.resources()[0].files.len(), 1);
+    assert_eq!(
+        read(&client.resources()[0].files[0].path),
+        "{\"from\":\"server-only\"}"
+    );
+
+    // Lifecycle changes to a server-only resource do not produce client
+    // resource notices while the client remains connected.
+    h.fx.server.execute("stop server_only_res");
+    h.fx.server.execute("start server_only_res");
+    h.fx.server.execute("start marker");
+    h.expect_notice(&mut client, "marker start", |notice| {
+        assert!(
+            !matches!(
+                notice,
+                ClientNotice::ResourceStarted { name, .. }
+                    | ClientNotice::ResourceStopped { name }
+                    if name == "server_only_res"
+            ),
+            "server-only lifecycle reached the client: {notice:?}"
+        );
+        matches!(notice, ClientNotice::ResourceStarted { name, .. } if name == "marker")
+    });
+    let names: Vec<&str> = client
+        .resources()
+        .iter()
+        .map(|resource| resource.name.as_str())
+        .collect();
+    assert_eq!(names, ["consumer", "marker"]);
+}
+
+#[test]
 fn resource_whose_client_files_cannot_be_expanded_starts_without_files() {
     let h = Harness::new();
     h.fx.add_resource("broken", &client_manifest(&[], &[], &["missing.txt"]), &[]);

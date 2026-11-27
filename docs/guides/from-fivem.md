@@ -18,8 +18,12 @@ not implemented yet. For exact function signatures, see
   ignored.
 - Manifests use `fxmanifest.lua` (with `__resource.lua` fallback).
 - `start`, `stop`, `restart` and `ensure` accept a `[category]` argument as well as a
-  resource name. Manifest `server_only 'yes'` keeps a resource away from clients. Only
-  `'yes'` is accepted; `server_only true` is a manifest error.
+  resource name. Manifest `server_only 'yes'` keeps a resource away from clients.
+  Only the exact string `'yes'` enables the flag. A Lua boolean such as
+  `true` raises a manifest error. Another
+  client-synced resource can explicitly include a file from it with a path such
+  as `@server_only_res/data/config.json`; the file is sent as part of that
+  other resource, while the `server_only` resource itself remains unsynced.
 - Supported functional directives: `shared_script` / `shared_scripts`,
   `server_script` / `server_scripts`, `client_script` / `client_scripts`,
   `file` / `files`, `dependency` / `dependencies`, `provide` / `provides`,

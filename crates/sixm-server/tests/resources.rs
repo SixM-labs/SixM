@@ -476,7 +476,7 @@ fn start_category_starts_members_and_dependencies_in_order() {
     let fx = Fixture::new();
     add_observer(&fx);
     add_recorder(&fx, "[g]/a", "a", &["base"]);
-    add_recorder(&fx, "[g]/b", "b", &["a"]);
+    add_recorder(&fx, "[g]/[inner]/b", "b", &["a"]);
     add_recorder(&fx, "base", "base", &[]);
     fx.manager().start("observer").expect("observer starts");
 

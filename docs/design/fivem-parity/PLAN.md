@@ -291,7 +291,7 @@ equivalent / no effect / absent".
 | A3 | done | Claude (Haiku impl, Sonnet review) | `git log --grep "^A3:"` |
 | A4 | done | Claude (Haiku impl, Sonnet review) | `git log --grep "^A4:"` |
 | A5 | done | Claude (Haiku impl, Sonnet review) | `git log --grep "^A5:"` |
-| A6 | done, review pending | Claude (Haiku impl, not yet reviewed) | `git log --grep "^A6:"` |
+| A6 | done | Claude (Haiku impl), ChatGPT (Luna fixes, Terra review) | `git log --grep "^A6:"` |
 | A7 | todo | | |
 | A8 | todo | | |
 | B1 | todo | | |
@@ -345,3 +345,8 @@ what is next, anything surprising.
   A7, A8 (PR `feat/fivem-parity-a` → `main`, CI green on both OS, merge),
   then Phase B (write specs `specs/B1.md`… first). Handing over to
   ChatGPT/Codex (Claude limit).
+- 2026-11-28, ChatGPT, `feat/fivem-parity-a`: `A6: review fixes` follows
+  d552314. Reviewed nested categories, dependency order and server-only client
+  sync. Fixed duplicate membership for repeated category names, documented
+  explicit cross-resource client file references and expanded client sync
+  coverage. Next: A7.

@@ -320,7 +320,13 @@ fn add_resource(
             let name = info.name.clone();
             scan_order.push(name.clone());
             slot.insert(info);
-            for category in path {
+            for (index, category) in path.iter().enumerate() {
+                // A nested folder may reuse an ancestor's name (`[g]/[g]`).
+                // Membership is unique per category while retaining the first
+                // occurrence's position in the scan order.
+                if path[..index].contains(category) {
+                    continue;
+                }
                 catalog
                     .categories
                     .entry(category.clone())
@@ -640,6 +646,21 @@ mod tests {
         assert_eq!(catalog.category_members("[z]"), None);
         assert!(catalog.is_category("[a]"));
         assert!(!catalog.is_category("top"));
+    }
+
+    #[test]
+    fn repeated_category_ancestors_add_a_resource_only_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        resource(&root.join("[g]").join("[g]"), "nested", &[]);
+        resource(&root.join("[g]"), "sibling", &[]);
+
+        let (catalog, issues) = Catalog::scan(&[root.to_path_buf()]);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(
+            names(catalog.category_members("[g]").expect("[g]")),
+            ["nested", "sibling"]
+        );
     }
 
     #[test]
