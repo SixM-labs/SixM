@@ -52,6 +52,9 @@ pub enum ManagerError {
     /// The operation needs a running resource, and this one is not running.
     #[error("resource `{0}` is not running")]
     NotRunning(String),
+    /// No resource category has this name. The name includes the brackets.
+    #[error("no resource category `{0}`")]
+    UnknownCategory(String),
     /// A handler of `onResourceStarting` canceled the start.
     #[error("start of `{0}` was canceled by onResourceStarting")]
     Canceled(String),
@@ -268,6 +271,80 @@ impl ResourceManager {
         } else {
             self.start(&canonical)
         }
+    }
+
+    /// Starts the resources of `category` and the resources they depend on,
+    /// dependencies first. Running resources are left as they are.
+    pub fn start_category(&self, category: &str) -> Result<(), ManagerError> {
+        self.ensure_scanned();
+        for resource in &self.category_order(category)? {
+            if !self.is_running_canonical(resource) {
+                self.start_one(resource)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Stops the running resources of `category`, dependents first. Each stop
+    /// also stops running dependents outside the category.
+    pub fn stop_category(&self, category: &str) -> Result<(), ManagerError> {
+        self.ensure_scanned();
+        for resource in self.members_in_dependency_order(category)?.iter().rev() {
+            if self.is_running_canonical(resource) {
+                self.stop(resource)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Restarts each resource of `category` in dependency order, starting the
+    /// ones that are not running.
+    pub fn restart_category(&self, category: &str) -> Result<(), ManagerError> {
+        self.ensure_scanned();
+        for resource in self.members_in_dependency_order(category)? {
+            self.restart(&resource)?;
+        }
+        Ok(())
+    }
+
+    /// Restarts or starts each resource of `category` in dependency order. A
+    /// dependent that is restarted again when its dependency restarts is
+    /// restarted twice.
+    pub fn ensure_category(&self, category: &str) -> Result<(), ManagerError> {
+        self.ensure_scanned();
+        for resource in self.members_in_dependency_order(category)? {
+            self.ensure(&resource)?;
+        }
+        Ok(())
+    }
+
+    /// The resources of `category` and their dependencies, dependencies first.
+    /// An empty category is logged and gives an empty list.
+    fn category_order(&self, category: &str) -> Result<Vec<ResourceName>, ManagerError> {
+        let order = self
+            .catalog
+            .borrow()
+            .category_start_order(category)?
+            .ok_or_else(|| ManagerError::UnknownCategory(category.to_owned()))?;
+        if order.is_empty() {
+            warn!("category `{category}` has no resources");
+        }
+        Ok(order)
+    }
+
+    /// The members of `category` in dependency order, leaving out the outside
+    /// dependencies that [`category_order`](Self::category_order) adds.
+    fn members_in_dependency_order(
+        &self,
+        category: &str,
+    ) -> Result<Vec<ResourceName>, ManagerError> {
+        let order = self.category_order(category)?;
+        let catalog = self.catalog.borrow();
+        let members = catalog.category_members(category).unwrap_or_default();
+        Ok(order
+            .into_iter()
+            .filter(|name| members.contains(name))
+            .collect())
     }
 
     /// Scans the resource folder again. Running resources are not affected.
@@ -829,6 +906,14 @@ impl ResourceManager {
     /// Lists the client files of `name` to players. A resource whose files
     /// cannot be expanded is still listed, with no files, and the error is logged.
     fn advertise(&self, name: &ResourceName) {
+        let server_only = self
+            .catalog
+            .borrow()
+            .get(name)
+            .is_some_and(|info| info.manifest.server_only);
+        if server_only {
+            return;
+        }
         let resource = self.client_resource(name);
         let entry = listing(&resource);
         self.advertised.borrow_mut().push(resource);
@@ -842,9 +927,15 @@ impl ResourceManager {
 
     /// Removes `name` from the client files and tells players it stopped.
     fn withdraw(&self, name: &ResourceName) {
-        self.advertised
-            .borrow_mut()
-            .retain(|resource| resource.name != name.as_ref());
+        let removed = {
+            let mut advertised = self.advertised.borrow_mut();
+            let before = advertised.len();
+            advertised.retain(|resource| resource.name != name.as_ref());
+            advertised.len() != before
+        };
+        if !removed {
+            return;
+        }
         self.publish_advertised();
         self.with_server(|server| {
             if let Err(err) = server.broadcast_resource_stopped(name) {

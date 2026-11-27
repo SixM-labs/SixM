@@ -85,10 +85,10 @@ same name is never reached.
 
 | Command | Action |
 |---|---|
-| `start <resource>` | Starts the resource after its dependencies that are not running. A resource that is already running is left alone. |
-| `stop <resource>` | Stops the running resources that depend on it, then the resource. A resource that is not running is a warning. |
-| `restart <resource>` | Stops the resource and its running dependents, starts the resource, then starts the dependents in dependency order. If the resource is not running, it is started. |
-| `ensure <resource>` | Restarts the resource if it is running, otherwise starts it. |
+| `start <resource \| [category]>` | Starts the resource after its dependencies that are not running. A resource that is already running is left alone. With a category, starts each member as described below. |
+| `stop <resource \| [category]>` | Stops the running resources that depend on it, then the resource. A resource that is not running is a warning. With a category, stops its running members as described below. |
+| `restart <resource \| [category]>` | Stops the resource and its running dependents, starts the resource, then starts the dependents in dependency order. If the resource is not running, it is started. With a category, restarts each member as described below. |
+| `ensure <resource \| [category]>` | Restarts the resource if it is running, otherwise starts it. With a category, applies that to each member as described below. |
 | `refresh` | Scans `sixm_resourcesPath` again. Running resources are not affected. `start` scans on its own if no scan has run yet. Fires `onResourceListRefresh` when done. |
 | `watch_resources [on\|off]` | Console-only. Prints or toggles hot-reload watching for running resources. When on, polls running resource folders every 500 ms for changes to manifests (`fxmanifest.lua`, `__resource.lua`) and `.lua`/`.js` scripts (ignoring `data/`, hidden `.` entries, `[...]` folders, and symlinks) and runs `refresh` and `restart` on changed resources. |
 | `endpoint_add_udp <ip:port>` | Stores the listen address in `endpoint_add_udp`. It applies at the next start. The address must parse. |
@@ -117,6 +117,20 @@ same name is never reached.
 
 A failed resource command is logged. Expected refusals, such as a resource
 canceled by `onResourceStarting`, are warnings.
+
+A category is a folder whose name starts with `[` and ends with `]`, such as
+`[core]`. The name includes the brackets and is matched exactly, so `[core]` and
+`[Core]` are different categories. Categories nest: a resource in `[a]/[b]` is a
+member of both `[a]` and `[b]`, and `[a]` also has the members of `[b]`. A
+bracketed argument is always a category, so a resource folder named `[x]` cannot be
+started by name. `start [category]` starts the members in dependency order, and
+the dependencies they need start too, even when they are outside the category.
+`stop [category]` stops the running members, dependents first. Dependencies outside
+the category stay running. `restart [category]` and `ensure [category]` apply the
+single-resource rule to each member in dependency order. A member that depends on
+an earlier member may be restarted twice, because restarting the earlier one also
+restarts its running dependents. An unknown category is a warning, ``no resource
+category `[x]` ``. Each command stops at the first failure.
 
 ### Other names
 

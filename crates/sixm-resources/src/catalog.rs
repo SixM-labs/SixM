@@ -38,6 +38,7 @@ pub enum ScanIssue {
 pub struct Catalog {
     resources: BTreeMap<ResourceName, ResourceInfo>,
     aliases: BTreeMap<ResourceName, ResourceName>,
+    categories: BTreeMap<String, Vec<ResourceName>>,
 }
 
 impl Catalog {
@@ -53,7 +54,13 @@ impl Catalog {
         let mut issues = Vec::new();
         let mut scan_order = Vec::new();
         for root in roots {
-            scan_dir(root, &mut catalog, &mut scan_order, &mut issues);
+            scan_dir(
+                root,
+                &mut catalog,
+                &mut Vec::new(),
+                &mut scan_order,
+                &mut issues,
+            );
         }
         register_aliases(&mut catalog, &scan_order, &mut issues);
         (catalog, issues)
@@ -95,6 +102,41 @@ impl Catalog {
     /// All resources, sorted by name.
     pub fn iter(&self) -> impl Iterator<Item = &ResourceInfo> {
         self.resources.values()
+    }
+
+    /// Whether `name` is a category folder, written with its brackets, such as
+    /// `[core]`. A category may be empty.
+    pub fn is_category(&self, name: &str) -> bool {
+        self.categories.contains_key(name)
+    }
+
+    /// The resources in category `name`, in scan order. A resource in a nested
+    /// category is a member of every category on its path. Returns `None` if
+    /// there is no such category.
+    pub fn category_members(&self, name: &str) -> Option<&[ResourceName]> {
+        self.categories.get(name).map(Vec::as_slice)
+    }
+
+    /// Members of category `name` and the resources they depend on, dependencies
+    /// first. Each resource appears once. Returns `None` if there is no such
+    /// category.
+    pub fn category_start_order(
+        &self,
+        name: &str,
+    ) -> Result<Option<Vec<ResourceName>>, DependencyError> {
+        let Some(members) = self.category_members(name) else {
+            return Ok(None);
+        };
+        let mut order = Vec::new();
+        let mut seen = HashSet::new();
+        for member in members {
+            for step in self.start_order(member)? {
+                if seen.insert(step.clone()) {
+                    order.push(step);
+                }
+            }
+        }
+        Ok(Some(order))
     }
 
     /// `name`'s transitive dependencies followed by `name`, dependencies first.
@@ -214,10 +256,12 @@ fn dependencies(info: &ResourceInfo) -> impl Iterator<Item = &str> {
         .filter(|dependency| !dependency.starts_with('/'))
 }
 
-/// Scans the subfolders of `dir`, recursing into categories.
+/// Scans the subfolders of `dir`, recursing into categories. `path` holds the
+/// category folder names enclosing `dir`.
 fn scan_dir(
     dir: &Path,
     catalog: &mut Catalog,
+    path: &mut Vec<String>,
     scan_order: &mut Vec<ResourceName>,
     issues: &mut Vec<ScanIssue>,
 ) {
@@ -233,17 +277,26 @@ fn scan_dir(
     };
     for folder in folders {
         if find_manifest(&folder).is_some() {
-            add_resource(&folder, catalog, scan_order, issues);
+            add_resource(&folder, catalog, path, scan_order, issues);
         } else if is_category(&folder) {
-            scan_dir(&folder, catalog, scan_order, issues);
+            let category = folder
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            catalog.categories.entry(category.clone()).or_default();
+            path.push(category);
+            scan_dir(&folder, catalog, path, scan_order, issues);
+            path.pop();
         }
     }
 }
 
-/// Loads the resource in `folder` into the catalog, or records why it could not be.
+/// Loads the resource in `folder` into the catalog, or records why it could not
+/// be. `path` holds the category folder names enclosing `folder`.
 fn add_resource(
     folder: &Path,
     catalog: &mut Catalog,
+    path: &[String],
     scan_order: &mut Vec<ResourceName>,
     issues: &mut Vec<ScanIssue>,
 ) {
@@ -264,8 +317,16 @@ fn add_resource(
             ignored: info.root,
         }),
         Entry::Vacant(slot) => {
-            scan_order.push(info.name.clone());
+            let name = info.name.clone();
+            scan_order.push(name.clone());
             slot.insert(info);
+            for category in path {
+                catalog
+                    .categories
+                    .entry(category.clone())
+                    .or_default()
+                    .push(name.clone());
+            }
         }
     }
 }
@@ -556,6 +617,51 @@ mod tests {
         let (catalog, issues) = Catalog::scan(&roots);
         assert!(issues.is_empty());
         assert_eq!(catalog.len(), 2);
+    }
+
+    #[test]
+    fn categories_nest_and_list_members_in_scan_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        resource(&root.join("[a]"), "x", &[]);
+        resource(&root.join("[a]").join("[b]"), "y", &[]);
+        fs::create_dir_all(root.join("[c]")).expect("create empty category");
+        resource(root, "top", &[]);
+
+        let (catalog, issues) = Catalog::scan(&[root.to_path_buf()]);
+        assert!(issues.is_empty(), "{issues:?}");
+
+        assert_eq!(
+            names(catalog.category_members("[a]").expect("[a]")),
+            ["y", "x"]
+        );
+        assert_eq!(names(catalog.category_members("[b]").expect("[b]")), ["y"]);
+        assert_eq!(catalog.category_members("[c]"), Some(&[][..]));
+        assert_eq!(catalog.category_members("[z]"), None);
+        assert!(catalog.is_category("[a]"));
+        assert!(!catalog.is_category("top"));
+    }
+
+    #[test]
+    fn category_start_order_puts_dependencies_first_and_lists_each_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        resource(root, "base", &[]);
+        resource(&root.join("[g]"), "a", &["base"]);
+        resource(&root.join("[g]"), "b", &["a"]);
+        resource(&root.join("[h]"), "c", &["d"]);
+        resource(&root.join("[h]"), "d", &["c"]);
+
+        let (catalog, issues) = Catalog::scan(&[root.to_path_buf()]);
+        assert!(issues.is_empty(), "{issues:?}");
+
+        let order = catalog
+            .category_start_order("[g]")
+            .expect("order")
+            .expect("known category");
+        assert_eq!(names(&order), ["base", "a", "b"]);
+        assert_eq!(catalog.category_start_order("[nope]").expect("order"), None);
+        assert!(catalog.category_start_order("[h]").is_err());
     }
 
     #[test]

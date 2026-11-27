@@ -436,3 +436,117 @@ fn refresh_fires_on_resource_list_refresh() {
         .expect("log");
     assert_eq!(values, vec![Value::from("refreshed refreshed")]);
 }
+
+/// Writes resource `name` in folder `folder` that depends on `dependencies`.
+/// It records its name with the observer when it loads, and `stop name` when
+/// it stops.
+fn add_recorder(fx: &Fixture, folder: &str, name: &str, dependencies: &[&str]) {
+    fx.add_resource(
+        folder,
+        &manifest(&["server.lua"], &[], dependencies),
+        &[(
+            "server.lua",
+            &format!(
+                "exports.observer:record('{name}')\n\
+                 AddEventHandler('onResourceStop', function(stopped)\n\
+                     if stopped == GetCurrentResourceName() then\n\
+                         exports.observer:record('stop {name}')\n\
+                     end\n\
+                 end)\n"
+            ),
+        )],
+    );
+}
+
+/// The observer's log, as one string.
+fn observer_log(fx: &Fixture) -> String {
+    match fx
+        .manager()
+        .call_export("observer", "log", &[], None)
+        .expect("log")
+        .first()
+    {
+        Some(Value::String(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
+        other => panic!("log returned {other:?}"),
+    }
+}
+
+#[test]
+fn start_category_starts_members_and_dependencies_in_order() {
+    let fx = Fixture::new();
+    add_observer(&fx);
+    add_recorder(&fx, "[g]/a", "a", &["base"]);
+    add_recorder(&fx, "[g]/b", "b", &["a"]);
+    add_recorder(&fx, "base", "base", &[]);
+    fx.manager().start("observer").expect("observer starts");
+
+    fx.server.execute("start [g]");
+
+    assert_eq!(observer_log(&fx), "base a b");
+    assert!(fx.manager().is_running("base"));
+    assert!(fx.manager().is_running("a"));
+    assert!(fx.manager().is_running("b"));
+}
+
+#[test]
+fn stop_category_stops_dependents_first_and_leaves_outside_dependencies() {
+    let fx = Fixture::new();
+    add_observer(&fx);
+    add_recorder(&fx, "[g]/a", "a", &["base"]);
+    add_recorder(&fx, "[g]/b", "b", &["a"]);
+    add_recorder(&fx, "base", "base", &[]);
+    fx.manager().start("observer").expect("observer starts");
+    fx.server.execute("start [g]");
+
+    fx.server.execute("stop [g]");
+
+    assert_eq!(observer_log(&fx), "base a b stop b stop a");
+    assert!(fx.manager().is_running("base"), "outside dependency stays");
+    assert!(!fx.manager().is_running("a"));
+    assert!(!fx.manager().is_running("b"));
+}
+
+#[test]
+fn ensure_and_restart_category_restart_running_and_start_stopped() {
+    let fx = Fixture::new();
+    add_observer(&fx);
+    add_recorder(&fx, "[g]/a", "a", &["base"]);
+    add_recorder(&fx, "[g]/b", "b", &["a"]);
+    add_recorder(&fx, "base", "base", &[]);
+    fx.manager().start("observer").expect("observer starts");
+    fx.manager().start("a").expect("a starts");
+    assert_eq!(observer_log(&fx), "base a");
+
+    fx.server.execute("ensure [g]");
+
+    assert_eq!(observer_log(&fx), "base a stop a a b");
+    assert!(fx.manager().is_running("a"));
+    assert!(fx.manager().is_running("b"));
+
+    fx.server.execute("restart [g]");
+
+    assert_eq!(
+        observer_log(&fx),
+        "base a stop a a b stop b stop a a b stop b b"
+    );
+    assert!(fx.manager().is_running("a"));
+    assert!(fx.manager().is_running("b"));
+}
+
+#[test]
+fn an_unknown_category_changes_nothing() {
+    let fx = Fixture::new();
+    add_observer(&fx);
+    add_recorder(&fx, "base", "base", &[]);
+    fx.manager().start("observer").expect("observer starts");
+
+    fx.server.execute("start [nope]");
+
+    assert_eq!(observer_log(&fx), "");
+    assert!(!fx.manager().is_running("base"));
+    let error = fx
+        .manager()
+        .start_category("[nope]")
+        .expect_err("unknown category");
+    assert_eq!(error.to_string(), "no resource category `[nope]`");
+}

@@ -141,13 +141,33 @@ pub(crate) fn run_words(
             ConvarKind::Replicated,
             &context.source,
         ),
-        "start" => resource_command(args, "start <resource>", |resource| manager.start(resource)),
-        "stop" => resource_command(args, "stop <resource>", |resource| manager.stop(resource)),
-        "restart" => resource_command(args, "restart <resource>", |resource| {
-            manager.restart(resource)
+        "start" => resource_command(args, "start <resource|[category]>", |resource| {
+            if is_category_arg(resource) {
+                manager.start_category(resource)
+            } else {
+                manager.start(resource)
+            }
         }),
-        "ensure" => resource_command(args, "ensure <resource>", |resource| {
-            manager.ensure(resource)
+        "stop" => resource_command(args, "stop <resource|[category]>", |resource| {
+            if is_category_arg(resource) {
+                manager.stop_category(resource)
+            } else {
+                manager.stop(resource)
+            }
+        }),
+        "restart" => resource_command(args, "restart <resource|[category]>", |resource| {
+            if is_category_arg(resource) {
+                manager.restart_category(resource)
+            } else {
+                manager.restart(resource)
+            }
+        }),
+        "ensure" => resource_command(args, "ensure <resource|[category]>", |resource| {
+            if is_category_arg(resource) {
+                manager.ensure_category(resource)
+            } else {
+                manager.ensure(resource)
+            }
         }),
         "refresh" => manager.refresh(),
         "endpoint_add_udp" => endpoint(manager, args, false),
@@ -365,6 +385,12 @@ fn list_convar_permissions(manager: &ResourceManager, args: &[String], source: &
     }
 }
 
+/// Whether `arg` names a resource category, such as `[core]`. The bracketed
+/// form always means a category.
+fn is_category_arg(arg: &str) -> bool {
+    arg.len() > 2 && arg.starts_with('[') && arg.ends_with(']')
+}
+
 /// Runs a resource command with the resource name as its only argument.
 fn resource_command(
     args: &[String],
@@ -383,7 +409,9 @@ fn resource_command(
 fn report(result: Result<(), ManagerError>) {
     if let Err(err) = result {
         match &err {
-            ManagerError::Canceled(_) | ManagerError::NotRunning(_) => warn!("{err}"),
+            ManagerError::Canceled(_)
+            | ManagerError::NotRunning(_)
+            | ManagerError::UnknownCategory(_) => warn!("{err}"),
             _ => error!("{err}"),
         }
     }

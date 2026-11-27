@@ -291,7 +291,7 @@ equivalent / no effect / absent".
 | A3 | done | Claude (Haiku impl, Sonnet review) | `git log --grep "^A3:"` |
 | A4 | done | Claude (Haiku impl, Sonnet review) | `git log --grep "^A4:"` |
 | A5 | done | Claude (Haiku impl, Sonnet review) | `git log --grep "^A5:"` |
-| A6 | todo | | |
+| A6 | done, review pending | Claude (Haiku impl, not yet reviewed) | `git log --grep "^A6:"` |
 | A7 | todo | | |
 | A8 | todo | | |
 | B1 | todo | | |
@@ -335,3 +335,13 @@ what is next, anything surprising.
   `(bag, key, data, length, replicated)`; `GetPlayerTimeOnline` counts from
   admission (after deferrals) and is nil while pending. Next: write specs
   A5–A7 (same format as `specs/A1.md`), implement, then A8 (PR).
+- 2026-11-28, Claude (Opus, main): A5 done (Sonnet-reviewed). A6 implemented
+  by Haiku from `specs/A6.md`, full checks green on Linux, but **not reviewed
+  yet**: the next agent reviews the A6 commit against `specs/A6.md` and
+  section 1 first (category resolution incl. nested `[a]/[b]`, start order by
+  dependencies and reverse for stop, `server_only` never reaching clients),
+  fixes findings in a follow-up commit `A6: review fixes`, then sets A6 to
+  `done`. Spec `specs/A7.md` is written, not implemented. Next: A6 review,
+  A7, A8 (PR `feat/fivem-parity-a` → `main`, CI green on both OS, merge),
+  then Phase B (write specs `specs/B1.md`… first). Handing over to
+  ChatGPT/Codex (Claude limit).

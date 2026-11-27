@@ -578,6 +578,38 @@ fn client_resource_natives_report_state_metadata_and_resources() {
     assert!(has_line(&log, "1: count 1 hello"), "{log}");
 }
 
+#[test]
+fn server_only_resources_are_not_offered_to_clients() {
+    let h = Harness::bare("hello");
+    let text = manifest(&["server.lua"], &["report", "poke"], &[])
+        + "version '1.2.0'\nclient_scripts { 'client.lua' }\n";
+    h.add(
+        "hello",
+        &text,
+        &[
+            ("server.lua", SERVER_SCRIPT),
+            ("client.lua", RESOURCE_INFO_CLIENT_SCRIPT),
+        ],
+    );
+    let secret = manifest(&[], &[], &[]) + "server_only 'yes'\nclient_scripts { 'client.lua' }\n";
+    h.add(
+        "secret",
+        &secret,
+        &[(
+            "client.lua",
+            "TriggerServerEvent('hello:report', 'secret ran')\n",
+        )],
+    );
+    h.start("hello");
+    h.start("secret");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let runtime = h.connect(&dir.path().join("cache"), &dir.path().join("data"));
+    let log = h.wait_for_report(&runtime, "the resource list", |log| {
+        has_line(log, "1: count 1 hello")
+    });
+    assert!(!has_line(&log, "1: secret ran"), "{log}");
+}
+
 /// Server side of the command tests: a restricted and an unrestricted command,
 /// a probe of `IsPlayerAceAllowed`, and the license of each joining player.
 const COMMANDS_SCRIPT: &str = r"

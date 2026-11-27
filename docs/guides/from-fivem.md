@@ -17,6 +17,9 @@ not implemented yet. For exact function signatures, see
   optionally grouped inside `[category]` folders. Dot-prefixed folders are
   ignored.
 - Manifests use `fxmanifest.lua` (with `__resource.lua` fallback).
+- `start`, `stop`, `restart` and `ensure` accept a `[category]` argument as well as a
+  resource name. Manifest `server_only 'yes'` keeps a resource away from clients. Only
+  `'yes'` is accepted; `server_only true` is a manifest error.
 - Supported functional directives: `shared_script` / `shared_scripts`,
   `server_script` / `server_scripts`, `client_script` / `client_scripts`,
   `file` / `files`, `dependency` / `dependencies`, `provide` / `provides`,
