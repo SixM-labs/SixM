@@ -1,5 +1,5 @@
 //! Server-only player functions: client events, the connected-player list,
-//! names, endpoints, drops and `Player(id)`.
+//! names, endpoints, identifiers, drops and `Player(id)`.
 
 use std::rc::Weak;
 
@@ -16,8 +16,8 @@ const DEFAULT_DROP_REASON: &str = "Dropped by server";
 const EXACT_FLOAT_LIMIT: f64 = 9_007_199_254_740_992.0;
 
 /// Installs `TriggerClientEvent`, `GetPlayers`, `GetNumPlayerIndices`,
-/// `GetPlayerName`, `GetPlayerEndpoint`, `DropPlayer` and `Player`. Only server
-/// runtimes call this.
+/// `GetPlayerName`, `GetPlayerEndpoint`, the identifier functions, `DropPlayer`
+/// and `Player`. Only server runtimes call this.
 pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::Result<()> {
     let trigger_client_event = bind_fn(
         lua,
@@ -45,6 +45,26 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
     let get_player_endpoint = bind_fn(lua, weak, |rt, (player,): (LuaValue,)| {
         Ok(player_info(rt, &player)?.map(|info| info.endpoint))
     })?;
+    let get_player_identifiers = bind_fn(lua, weak, |rt, (player,): (LuaValue,)| {
+        let identifiers = identifiers_of_player(rt, &player)?;
+        rt.lua.create_sequence_from(identifiers)
+    })?;
+    let get_num_player_identifiers = bind_fn(lua, weak, |rt, (player,): (LuaValue,)| {
+        let count = identifiers_of_player(rt, &player)?.len();
+        i64::try_from(count).map_err(mlua::Error::runtime)
+    })?;
+    let get_player_identifier = bind_fn(lua, weak, |rt, (player, index): (LuaValue, LuaValue)| {
+        let identifiers = identifiers_of_player(rt, &player)?;
+        let index = whole_number(&index).and_then(|index| usize::try_from(index).ok());
+        Ok(index.and_then(|index| identifiers.get(index).cloned()))
+    })?;
+    let get_player_identifier_by_type =
+        bind_fn(lua, weak, |rt, (player, kind): (LuaValue, String)| {
+            let identifiers = identifiers_of_player(rt, &player)?;
+            Ok(identifiers
+                .into_iter()
+                .find(|identifier| identifier_kind(identifier) == Some(kind.as_str())))
+        })?;
     let drop_player = bind_fn(
         lua,
         weak,
@@ -68,6 +88,10 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
         ("GetNumPlayerIndices", get_num_player_indices),
         ("GetPlayerName", get_player_name),
         ("GetPlayerEndpoint", get_player_endpoint),
+        ("GetPlayerIdentifiers", get_player_identifiers),
+        ("GetNumPlayerIdentifiers", get_num_player_identifiers),
+        ("GetPlayerIdentifier", get_player_identifier),
+        ("GetPlayerIdentifierByType", get_player_identifier_by_type),
         ("DropPlayer", drop_player),
         ("Player", player),
     ];
@@ -90,6 +114,20 @@ fn player_info(rt: &LuaRuntime, player: &LuaValue) -> mlua::Result<Option<Player
         return Ok(None);
     };
     Ok(server(&*rt.host()?)?.player_info(id))
+}
+
+/// The identifiers of the player `player` names. Empty when it names no player.
+fn identifiers_of_player(rt: &LuaRuntime, player: &LuaValue) -> mlua::Result<Vec<String>> {
+    let Some(id) = player_id(player) else {
+        return Ok(Vec::new());
+    };
+    Ok(server(&*rt.host()?)?.player_identifiers(id))
+}
+
+/// The kind of an identifier: the text before its first `:`, as in `license`
+/// for `license:<hex>`.
+fn identifier_kind(identifier: &str) -> Option<&str> {
+    identifier.split_once(':').map(|(kind, _)| kind)
 }
 
 /// Target of `TriggerClientEvent`: `-1` addresses every player.

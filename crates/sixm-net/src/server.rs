@@ -82,11 +82,13 @@ impl fmt::Display for ConnectionId {
 #[derive(Debug, Clone, PartialEq)]
 pub enum NetEvent {
     /// A connection sent a valid `Hello`. The server must call
-    /// [`NetServer::accept`] or [`NetServer::reject`] for it.
+    /// [`NetServer::accept`] or [`NetServer::reject`] for it. `fingerprint` is
+    /// the fingerprint of the client certificate the handshake verified.
     Connecting {
         connection: ConnectionId,
         name: String,
         endpoint: SocketAddr,
+        fingerprint: Fingerprint,
     },
     /// A player sent an event.
     Event {

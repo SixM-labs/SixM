@@ -21,7 +21,7 @@ use tracing::debug;
 use crate::entities::EntityEntry;
 use crate::error::NetError;
 use crate::files::{FileHash, MAX_FILE_SIZE, ResourceEntry, hash_hex};
-use crate::identity::Fingerprint;
+use crate::identity::{Credentials, Fingerprint, Identity};
 use crate::protocol::{
     ClientMessage, MAX_FRAME, MAX_PLAYER_NAME_LEN, PROTOCOL_VERSION, SERVER_NAME, ServerMessage,
 };
@@ -81,6 +81,7 @@ type Pending = Arc<Mutex<Waiters>>;
 pub struct NetClient {
     player: u32,
     server_name: String,
+    fingerprint: Fingerprint,
     commands: Option<mpsc::UnboundedSender<Arc<[u8]>>>,
     events: Receiver<ClientEvent>,
     pending: Pending,
@@ -96,14 +97,22 @@ struct Welcome {
 impl NetClient {
     /// Connects to `addr` without checking the server's certificate, sends a
     /// `Hello` with `name` and waits for the server to accept or reject the
-    /// connection. The connection is encrypted, but nothing shows that the
-    /// server is the one the player meant to reach; use
-    /// [`connect_pinned`](Self::connect_pinned) for that.
+    /// connection. The client presents the certificate of `identity`, which the
+    /// server derives the player's identifiers from. The connection is
+    /// encrypted, but nothing shows that the server is the one the player meant
+    /// to reach; use [`connect_pinned`](Self::connect_pinned) for that.
     ///
-    /// Returns [`NetError::Rejected`] if the server refuses, and
-    /// [`NetError::Timeout`] if the whole handshake takes longer than `timeout`.
-    pub fn connect(addr: SocketAddr, name: &str, timeout: Duration) -> Result<Self, NetError> {
-        Self::connect_with(addr, name, timeout, Trust::Any)
+    /// A [`Identity::Persistent`] identity is read from its file, or created
+    /// there when the file is missing. Returns [`NetError::Rejected`] if the
+    /// server refuses, and [`NetError::Timeout`] if the whole handshake takes
+    /// longer than `timeout`.
+    pub fn connect(
+        addr: SocketAddr,
+        name: &str,
+        identity: &Identity,
+        timeout: Duration,
+    ) -> Result<Self, NetError> {
+        Self::connect_with(addr, name, identity, timeout, Trust::Any)
     }
 
     /// Like [`connect`](Self::connect), but accepts only a server whose
@@ -113,14 +122,16 @@ impl NetClient {
         addr: SocketAddr,
         name: &str,
         fingerprint: &Fingerprint,
+        identity: &Identity,
         timeout: Duration,
     ) -> Result<Self, NetError> {
-        Self::connect_with(addr, name, timeout, Trust::Pinned(*fingerprint))
+        Self::connect_with(addr, name, identity, timeout, Trust::Pinned(*fingerprint))
     }
 
     fn connect_with(
         addr: SocketAddr,
         name: &str,
+        identity: &Identity,
         timeout: Duration,
         trust: Trust,
     ) -> Result<Self, NetError> {
@@ -130,6 +141,8 @@ impl NetClient {
                 "player name must be 1 to {MAX_PLAYER_NAME_LEN} characters"
             )));
         }
+        let credentials = Credentials::load(identity)?;
+        let fingerprint = credentials.fingerprint();
         let (commands, command_rx) = mpsc::unbounded_channel();
         let (events_tx, events) = std_mpsc::channel();
         let (ready_tx, ready_rx) = sync_channel(1);
@@ -144,13 +157,14 @@ impl NetClient {
                     events: events_tx,
                     pending: thread_pending,
                 };
-                run_thread(addr, name, timeout, trust, link);
+                run_thread(addr, name, timeout, trust, credentials, link);
             })
             .map_err(NetError::Io)?;
         match ready_rx.recv() {
             Ok(Ok(welcome)) => Ok(Self {
                 player: welcome.player,
                 server_name: welcome.server_name,
+                fingerprint,
                 commands: Some(commands),
                 events,
                 pending,
@@ -175,6 +189,12 @@ impl NetClient {
     /// Name the server sent in its welcome.
     pub fn server_name(&self) -> &str {
         &self.server_name
+    }
+
+    /// Fingerprint of the client certificate this client presented. The server
+    /// derives the player's `license` identifier from it.
+    pub fn fingerprint(&self) -> Fingerprint {
+        self.fingerprint
     }
 
     /// Sends an event to the server.
@@ -277,7 +297,14 @@ struct Link {
     pending: Pending,
 }
 
-fn run_thread(addr: SocketAddr, name: String, timeout: Duration, trust: Trust, link: Link) {
+fn run_thread(
+    addr: SocketAddr,
+    name: String,
+    timeout: Duration,
+    trust: Trust,
+    credentials: Credentials,
+    link: Link,
+) {
     let Link {
         ready,
         commands,
@@ -295,7 +322,8 @@ fn run_thread(addr: SocketAddr, name: String, timeout: Duration, trust: Trust, l
         }
     };
     runtime.block_on(async move {
-        let handshake = tokio::time::timeout(timeout, establish(addr, &name, trust)).await;
+        let handshake =
+            tokio::time::timeout(timeout, establish(addr, &name, trust, credentials)).await;
         let established = match handshake {
             Ok(Ok((established, welcome))) => {
                 if ready.send(Ok(welcome)).is_err() {
@@ -316,11 +344,13 @@ fn run_thread(addr: SocketAddr, name: String, timeout: Duration, trust: Trust, l
     });
 }
 
-/// Connects, sends the `Hello` and reads the server's first message.
+/// Connects with the client certificate, sends the `Hello` and reads the
+/// server's first message.
 async fn establish(
     addr: SocketAddr,
     name: &str,
     trust: Trust,
+    credentials: Credentials,
 ) -> Result<(Established, Welcome), NetError> {
     let bind = if addr.is_ipv4() {
         SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
@@ -330,7 +360,7 @@ async fn establish(
     let verifier = ServerVerifier::new(trust);
     let mut endpoint =
         Endpoint::client(bind).map_err(|source| NetError::Bind { addr: bind, source })?;
-    endpoint.set_default_client_config(client_config(&verifier)?);
+    endpoint.set_default_client_config(client_config(&verifier, credentials)?);
     let connecting = endpoint
         .connect(addr, SERVER_NAME)
         .map_err(|err| NetError::Connect(err.to_string()))?;

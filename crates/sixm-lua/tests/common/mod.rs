@@ -48,6 +48,8 @@ pub struct TestHost {
     pub commands: RefCell<Vec<String>>,
     /// Connected players as `(id, info)`, in join order. Tests set this directly.
     pub players: RefCell<Vec<(u32, PlayerInfo)>>,
+    /// Identifiers of players as `(id, identifiers)`. Tests set this directly.
+    pub identifiers: RefCell<Vec<(u32, Vec<String>)>>,
     /// Client events sent, as `(event, target, args)`, in order.
     pub client_events: RefCell<Vec<(String, ClientTarget, Vec<Value>)>>,
     /// Players dropped, as `(id, reason)`, in order.
@@ -320,6 +322,15 @@ impl ServerHost for TestHost {
             .iter()
             .find(|(id, _)| *id == player)
             .map(|(_, info)| info.clone())
+    }
+
+    fn player_identifiers(&self, player: u32) -> Vec<String> {
+        self.identifiers
+            .borrow()
+            .iter()
+            .find(|(id, _)| *id == player)
+            .map(|(_, identifiers)| identifiers.clone())
+            .unwrap_or_default()
     }
 
     fn drop_player(&self, player: u32, reason: &str) {

@@ -10,15 +10,17 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use sixm_client::{Client, ClientRuntime, Input};
-use sixm_net::Fingerprint;
+use sixm_net::{Fingerprint, Identity};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 /// Usage line printed on bad arguments.
-const USAGE: &str =
-    "usage: sixm-client <addr> <name> [--fingerprint HEX] [--cache DIR] [+command args...]";
+const USAGE: &str = "usage: sixm-client <addr> <name> [--fingerprint HEX] [--cache DIR] [--identity FILE] [+command args...]";
 /// Cache folder used when `--cache` is not given.
 const DEFAULT_CACHE: &str = "sixm-cache";
+/// File inside the cache folder that holds the client certificate, unless
+/// `--identity` names another one.
+const DEFAULT_IDENTITY: &str = "identity.bin";
 /// Folder inside the cache that holds each resource's data folder.
 const DATA_FOLDER: &str = "data";
 /// Longest the handshake and the resource list may take.
@@ -31,6 +33,9 @@ struct Options {
     name: String,
     fingerprint: Option<Fingerprint>,
     cache: PathBuf,
+    /// The client certificate. The server derives the player's identifiers
+    /// from it, so the file keeps the player's `license` stable.
+    identity: Identity,
     /// Console commands given as `+name args...`, each one its words, name first.
     commands: Vec<Vec<String>>,
 }
@@ -61,6 +66,7 @@ fn main() -> ExitCode {
         options.addr,
         &options.name,
         options.fingerprint,
+        &options.identity,
         &options.cache,
         CONNECT_TIMEOUT,
     ) {
@@ -70,6 +76,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    info!("Client fingerprint: {}", client.fingerprint());
     log_sync(&client);
 
     let runtime = ClientRuntime::new(client, options.cache.join(DATA_FOLDER));
@@ -81,13 +88,15 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Parses `<addr> <name>` with optional `--fingerprint HEX` and `--cache DIR`,
-/// in any order. Arguments after the first `+command` belong to that command.
+/// Parses `<addr> <name>` with optional `--fingerprint HEX`, `--cache DIR` and
+/// `--identity FILE`, in any order. Arguments after the first `+command` belong
+/// to that command.
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {
     let mut args = args;
     let mut positional = Vec::new();
     let mut fingerprint = None;
     let mut cache = PathBuf::from(DEFAULT_CACHE);
+    let mut identity = None;
     let mut commands: Vec<Vec<String>> = Vec::new();
     while let Some(arg) = args.next() {
         if let Some(name) = arg.strip_prefix('+') {
@@ -108,6 +117,10 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {
             "--cache" => {
                 cache = PathBuf::from(args.next().ok_or("--cache needs a folder")?);
             }
+            "--identity" => {
+                let file = args.next().ok_or("--identity needs a file")?;
+                identity = Some(PathBuf::from(file));
+            }
             _ => match commands.last_mut() {
                 Some(command) => command.push(arg),
                 None => positional.push(arg),
@@ -119,11 +132,13 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {
     let addr = addr
         .parse()
         .map_err(|err| format!("invalid address `{addr}`: {err}"))?;
+    let identity = identity.unwrap_or_else(|| cache.join(DEFAULT_IDENTITY));
     Ok(Options {
         addr,
         name,
         fingerprint,
         cache,
+        identity: Identity::Persistent(identity),
         commands,
     })
 }

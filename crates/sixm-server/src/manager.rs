@@ -840,6 +840,10 @@ impl ServerHost for ResourceManager {
         self.player_details(player)
     }
 
+    fn player_identifiers(&self, player: u32) -> Vec<String> {
+        self.identifiers_of(player)
+    }
+
     fn drop_player(&self, player: u32, reason: &str) {
         self.queue_drop(player, reason);
     }

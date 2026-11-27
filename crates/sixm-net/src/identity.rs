@@ -1,5 +1,5 @@
-//! Server certificates: where they come from, how clients pin them, and how
-//! they are stored on disk.
+//! Certificates: where the server's and the clients' come from, how clients pin
+//! the server's, and how they are stored on disk.
 
 use std::fmt;
 use std::fs::{self, File};
@@ -17,16 +17,18 @@ const FINGERPRINT_LEN: usize = 32;
 /// Length of a fingerprint written as hexadecimal text.
 const FINGERPRINT_HEX_LEN: usize = 2 * FINGERPRINT_LEN;
 
-/// Where the server gets the certificate it presents to clients.
+/// Where a certificate comes from. A server presents one to its clients, and a
+/// client presents one to the server, which derives the player's `license`
+/// identifier from it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Identity {
-    /// A new self-signed certificate on every start. Its fingerprint changes
-    /// with every start, so clients cannot pin it.
+    /// A new self-signed certificate for every use: a server gets one per start
+    /// and a client one per connection. Its fingerprint changes every time.
     #[default]
     Ephemeral,
-    /// A certificate kept in this file. It is created on the first start and
-    /// reused afterwards, so clients can pin its fingerprint. Missing parent
-    /// folders are created.
+    /// A certificate kept in this file. It is created on first use and reused
+    /// afterwards, so its fingerprint stays the same. Missing parent folders are
+    /// created.
     Persistent(PathBuf),
 }
 
@@ -90,7 +92,7 @@ impl FromStr for Fingerprint {
     }
 }
 
-/// The certificate and private key the server presents.
+/// The certificate and private key of one side of a connection.
 pub(crate) struct Credentials {
     certificate: CertificateDer<'static>,
     key: PrivatePkcs8KeyDer<'static>,
@@ -106,7 +108,7 @@ impl Credentials {
         }
     }
 
-    /// The fingerprint clients must pin to trust this certificate.
+    /// The fingerprint of this certificate.
     pub(crate) fn fingerprint(&self) -> Fingerprint {
         Fingerprint::of(&self.certificate)
     }
@@ -195,20 +197,34 @@ fn temporary_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Creates `path` readable by its owner only, then writes `bytes` into it.
+/// Creates `path` readable by its owner only where the platform allows it, then
+/// writes `bytes` into it.
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut file = File::create(path)?;
-    #[cfg(unix)]
-    restrict_to_owner(path)?;
+    let mut file = create_private(path)?;
     file.write_all(bytes)?;
     file.sync_all()
 }
 
+/// Creates or truncates `path` with mode `0600`, so the key is never readable
+/// by other users, not even for a moment.
 #[cfg(unix)]
-fn restrict_to_owner(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
+fn create_private(path: &Path) -> io::Result<File> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
 
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+}
+
+/// Creates or truncates `path`. On Windows the file takes the access list of
+/// its folder, which usually keeps it to the current user.
+#[cfg(not(unix))]
+fn create_private(path: &Path) -> io::Result<File> {
+    File::create(path)
 }
 
 fn identity_error(path: &Path, reason: &str) -> NetError {

@@ -244,8 +244,15 @@ pub trait ServerHost {
     /// Server ids of the connected players, in join order.
     fn players(&self) -> Vec<u32>;
 
-    /// Name and network endpoint of a connected player.
+    /// Name and network endpoint of a connected player. A player who is
+    /// connecting is known from the start of `playerConnecting`.
     fn player_info(&self, player: u32) -> Option<PlayerInfo>;
+
+    /// The identifiers of a connected or connecting player, such as
+    /// `license:<hex>` and `ip:<address>`, in a fixed order. `license` comes
+    /// from the key the player's client proves it holds, so it stays the same
+    /// across connections from the same client. Empty for an unknown player.
+    fn player_identifiers(&self, player: u32) -> Vec<String>;
 
     /// Disconnects a player with a reason shown to them. Takes effect after
     /// the current script call returns.

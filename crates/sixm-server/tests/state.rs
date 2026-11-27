@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use common::{Fixture, manifest};
 use sixm_core::{Host, Value};
-use sixm_net::{ClientEvent, NetClient};
+use sixm_net::{ClientEvent, Identity, NetClient};
 use sixm_server::Input;
 
 /// Longest a test waits for something the server should do.
@@ -120,7 +120,8 @@ impl Harness {
     fn connect(&self, name: &str) -> NetClient {
         let addr = self.addr;
         let name = name.to_owned();
-        let handshake = thread::spawn(move || NetClient::connect(addr, &name, TIMEOUT));
+        let handshake =
+            thread::spawn(move || NetClient::connect(addr, &name, &Identity::Ephemeral, TIMEOUT));
         loop {
             self.pump();
             if handshake.is_finished() {

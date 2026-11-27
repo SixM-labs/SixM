@@ -7,7 +7,7 @@ until it is told to stop. Source: `crates/sixm-client/src/`.
 ## Command line
 
 ```text
-sixm-client <addr> <name> [--fingerprint HEX] [--cache DIR] [+command args...]
+sixm-client <addr> <name> [--fingerprint HEX] [--cache DIR] [--identity FILE] [+command args...]
 ```
 
 | Argument | Meaning |
@@ -16,6 +16,7 @@ sixm-client <addr> <name> [--fingerprint HEX] [--cache DIR] [+command args...]
 | `<name>` | Player name. Required. It must be 1 to 64 characters after trimming. |
 | `--fingerprint HEX` | The server's fingerprint, 64 hex characters. The client refuses any other certificate. |
 | `--cache DIR` | Cache folder. Default `sixm-cache`, relative to the working directory. |
+| `--identity FILE` | The client certificate. Default `identity.bin` in the cache folder. The file is created on first use. See [Identity](#identity). |
 | `+command args...` | A console command, run after the client connects. |
 
 - The two positional arguments and the options can come in any order before
@@ -34,8 +35,8 @@ sixm-client 127.0.0.1:30120 Tester --fingerprint <64 hex chars> +help
 
 ## Connecting
 
-1. Open the connection. The handshake and the resource list must finish within
-   10 seconds.
+1. Open the connection. The client presents its certificate from `--identity`.
+   The handshake and the resource list must finish within 10 seconds.
 2. If a fingerprint was given, the server's certificate must match it. Without
    a fingerprint the connection is encrypted but the server is not checked, so
    a man in the middle can impersonate the server.
@@ -92,6 +93,7 @@ sixm-cache/
     ab12...ef            a downloaded file, named by its SHA-256 hash
   data/
     <resource>/          the data folder of each synced resource
+  identity.bin           the client certificate and its key
 ```
 
 - Each file is stored under its hash. The first two hex digits make the folder
@@ -103,6 +105,21 @@ sixm-cache/
   renamed into place. A reader sees either no file or the whole file.
 - A file already in the cache is not downloaded again.
 - Each download waits at most 30 seconds.
+
+## Identity
+
+The client keeps a certificate and its private key in `identity.bin`, or in
+the file that `--identity` names. The server derives the player's `license`
+identifier from the certificate's fingerprint, so:
+
+- The file is created on the first connection. Later connections read it, and
+  the same player gets the same `license` every time.
+- Deleting the file, or using another one, gives the player a new `license`.
+- On Unix the file is created with mode `0600`. On Windows it takes the access
+  list of its folder.
+- A file that is not a SixM identity stops the connection with an error. Delete
+  it to create a new one.
+- The client logs its fingerprint at connect as `Client fingerprint`.
 
 ### Data folder
 

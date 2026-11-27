@@ -16,14 +16,14 @@ use std::path::{Path, PathBuf};
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use ring::digest;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use sixm_core::{FuncRef, Value};
 use sixm_net::{
     ClientEvent, ConnectionId, EntityEntry, FILE_KIND_CLIENT, FILE_KIND_FILE, FileEntry, FileHash,
-    MAX_EXPORT_NAME_LEN, MAX_FILE_SIZE, MAX_METADATA, MAX_METADATA_VALUE_LEN, NetClient, NetError,
-    NetEvent, NetServer, PROTOCOL_VERSION, PublishedFile, PublishedResource, ResourceEntry,
-    ServerConfig,
+    Fingerprint, Identity, MAX_EXPORT_NAME_LEN, MAX_FILE_SIZE, MAX_METADATA,
+    MAX_METADATA_VALUE_LEN, NetClient, NetError, NetEvent, NetServer, PROTOCOL_VERSION,
+    PublishedFile, PublishedResource, ResourceEntry, ServerConfig,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -83,7 +83,8 @@ fn client_event(client: &NetClient) -> ClientEvent {
 /// returns it once the handshake completes.
 fn join(server: &Server, name: &'static str, player: u32) -> NetClient {
     let addr = server.net.local_addr();
-    let handle = thread::spawn(move || NetClient::connect(addr, name, TIMEOUT));
+    let handle =
+        thread::spawn(move || NetClient::connect(addr, name, &Identity::Ephemeral, TIMEOUT));
     let (connection, _) = expect_connecting(server);
     server.net.accept(connection, player);
     handle
@@ -151,18 +152,36 @@ struct Raw {
     recv: RecvStream,
 }
 
-async fn raw_connect(addr: SocketAddr) -> Raw {
+/// A client endpoint that accepts any server certificate. It presents a
+/// certificate of its own when `with_certificate` is set, and none otherwise.
+fn raw_endpoint(with_certificate: bool) -> Endpoint {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
+    let builder = rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])
         .expect("TLS 1.3 is supported")
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(AcceptAny))
-        .with_no_client_auth();
+        .with_custom_certificate_verifier(Arc::new(AcceptAny));
+    let mut tls = if with_certificate {
+        let certified =
+            rcgen::generate_simple_self_signed(vec!["client".to_owned()]).expect("certificate");
+        let key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(
+            certified.signing_key.serialize_der(),
+        ));
+        builder
+            .with_client_auth_cert(vec![certified.cert.der().clone()], key)
+            .expect("client certificate is accepted")
+    } else {
+        builder.with_no_client_auth()
+    };
     tls.alpn_protocols = vec![b"sixm/1".to_vec()];
     let quic = quinn::crypto::rustls::QuicClientConfig::try_from(tls).expect("QUIC config");
     let mut endpoint = Endpoint::client(SocketAddr::from(([127, 0, 0, 1], 0))).expect("endpoint");
     endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(quic)));
+    endpoint
+}
+
+async fn raw_connect(addr: SocketAddr) -> Raw {
+    let endpoint = raw_endpoint(true);
     let connection = endpoint
         .connect(addr, "localhost")
         .expect("connect starts")
@@ -225,7 +244,8 @@ fn accepted_client_receives_its_player_id_and_server_name() {
 fn rejected_client_gets_the_reason() {
     let server = start();
     let addr = server.net.local_addr();
-    let handle = thread::spawn(move || NetClient::connect(addr, "bob", TIMEOUT));
+    let handle =
+        thread::spawn(move || NetClient::connect(addr, "bob", &Identity::Ephemeral, TIMEOUT));
     let (connection, name) = expect_connecting(&server);
     assert_eq!(name, "bob");
     server.net.reject(connection, "no room");
@@ -240,8 +260,9 @@ fn pinned_client_connects_with_the_servers_fingerprint() {
     let server = start();
     let addr = server.net.local_addr();
     let fingerprint = server.net.fingerprint();
-    let handle =
-        thread::spawn(move || NetClient::connect_pinned(addr, "carol", &fingerprint, TIMEOUT));
+    let handle = thread::spawn(move || {
+        NetClient::connect_pinned(addr, "carol", &fingerprint, &Identity::Ephemeral, TIMEOUT)
+    });
     let (connection, _) = expect_connecting(&server);
     server.net.accept(connection, 3);
     let client = handle
@@ -258,7 +279,9 @@ fn pinned_client_refuses_another_servers_certificate() {
     let actual = server.net.fingerprint();
     let other = start();
     let expected = other.net.fingerprint();
-    let handle = thread::spawn(move || NetClient::connect_pinned(addr, "dave", &expected, TIMEOUT));
+    let handle = thread::spawn(move || {
+        NetClient::connect_pinned(addr, "dave", &expected, &Identity::Ephemeral, TIMEOUT)
+    });
     match handle.join().expect("client thread does not panic") {
         Err(NetError::CertificateMismatch {
             expected: pinned,
@@ -278,7 +301,7 @@ fn client_rejects_invalid_names_before_connecting() {
     let long = "x".repeat(65);
     for name in ["", "   ", long.as_str()] {
         assert!(matches!(
-            NetClient::connect(addr, name, TIMEOUT),
+            NetClient::connect(addr, name, &Identity::Ephemeral, TIMEOUT),
             Err(NetError::InvalidInput(_))
         ));
     }
@@ -1047,7 +1070,8 @@ fn entity_creation_transforms_and_deletion_arrive_in_order() {
 fn entity_snapshot_reaches_a_joining_player() {
     let server = start();
     let addr = server.net.local_addr();
-    let handle = thread::spawn(move || NetClient::connect(addr, "ann", TIMEOUT));
+    let handle =
+        thread::spawn(move || NetClient::connect(addr, "ann", &Identity::Ephemeral, TIMEOUT));
     let (connection, _) = expect_connecting(&server);
     server.net.accept(connection, 1);
     let client = handle
@@ -1066,5 +1090,77 @@ fn entity_snapshot_reaches_a_joining_player() {
         ClientEvent::EntitySnapshot {
             entities: entities.to_vec()
         }
+    );
+}
+
+/// Connects a client with `identity` on a background thread and accepts it as
+/// `player`. Returns the client and the fingerprint the server verified.
+fn join_as(server: &Server, identity: Identity, player: u32) -> (NetClient, Fingerprint) {
+    let addr = server.net.local_addr();
+    let handle = thread::spawn(move || NetClient::connect(addr, "ida", &identity, TIMEOUT));
+    let (connection, verified) = match next_event(server) {
+        NetEvent::Connecting {
+            connection,
+            fingerprint,
+            ..
+        } => (connection, fingerprint),
+        other => panic!("expected Connecting, got {other:?}"),
+    };
+    server.net.accept(connection, player);
+    let client = handle
+        .join()
+        .expect("client thread does not panic")
+        .expect("client connects");
+    (client, verified)
+}
+
+#[test]
+fn persistent_identity_gives_the_same_fingerprint_on_every_connection() {
+    let server = start();
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().join("identity.bin");
+
+    let (first, first_seen) = join_as(&server, Identity::Persistent(path.clone()), 1);
+    let (second, second_seen) = join_as(&server, Identity::Persistent(path), 2);
+    assert_eq!(first_seen, second_seen);
+    assert_eq!(first.fingerprint(), first_seen);
+    assert_eq!(second.fingerprint(), second_seen);
+
+    let (_fresh_a, ephemeral_a) = join_as(&server, Identity::Ephemeral, 3);
+    let (_fresh_b, ephemeral_b) = join_as(&server, Identity::Ephemeral, 4);
+    assert_ne!(ephemeral_a, ephemeral_b, "every ephemeral identity is new");
+    assert_ne!(ephemeral_a, first_seen, "ephemeral and persistent differ");
+}
+
+#[test]
+fn raw_client_without_a_certificate_cannot_get_a_welcome() {
+    let server = start();
+    let addr = server.net.local_addr();
+    let runtime = new_runtime();
+    let attempt = async {
+        let endpoint = raw_endpoint(false);
+        let Ok(connecting) = endpoint.connect(addr, "localhost") else {
+            return Vec::new();
+        };
+        // TLS 1.3 lets the client finish first, so the refusal may come
+        // later, while it reads the reply.
+        let Ok(connection) = connecting.await else {
+            return Vec::new();
+        };
+        let Ok((mut send, mut recv)) = connection.open_bi().await else {
+            return Vec::new();
+        };
+        let hello = frame(&hello_payload(PROTOCOL_VERSION, "mallory"));
+        let _ = send.write_all(&hello).await;
+        recv.read_to_end(1 << 20).await.unwrap_or_default()
+    };
+    let reply = runtime
+        .block_on(async { tokio::time::timeout(TIMEOUT, attempt).await })
+        .expect("the attempt ends in time");
+
+    assert!(reply.is_empty(), "the server sent {} bytes", reply.len());
+    assert!(
+        server.events.try_recv().is_err(),
+        "the server reports no connection without a certificate"
     );
 }

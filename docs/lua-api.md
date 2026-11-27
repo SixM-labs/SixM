@@ -254,11 +254,26 @@ library can tell who called it. It is `nil` when no resource caused it.
 | `GetNumPlayerIndices` | `GetNumPlayerIndices()`. Returns the number of connected players as an integer. |
 | `GetPlayerName` | `GetPlayerName(player)`. Returns the name, or `nil` when the id is not connected. Accepts an id as a number or a string. |
 | `GetPlayerEndpoint` | `GetPlayerEndpoint(player)`. Returns the remote address (`ip:port`), or `nil`. |
+| `GetPlayerIdentifiers` | `GetPlayerIdentifiers(player)`. Returns an array of the player's identifiers, in order, or an empty table for an unknown player. |
+| `GetNumPlayerIdentifiers` | `GetNumPlayerIdentifiers(player)`. Returns the number of identifiers as an integer, `0` for an unknown player. |
+| `GetPlayerIdentifier` | `GetPlayerIdentifier(player, index)`. Returns the identifier at the 0-based `index`, or `nil`. |
+| `GetPlayerIdentifierByType` | `GetPlayerIdentifierByType(player, kind)`. Returns the first identifier whose text before `:` is `kind`, whole, for example `license:<hex>`, or `nil`. |
 | `DropPlayer` | `DropPlayer(player [, reason])`. Disconnects the player after the current call. The default reason is `Dropped by server`. |
 | `Player` | `Player(id)`. Returns a table with a `state` field: the player's state bag. Raises an error when the id is not a number or a numeric string. |
 
 Player ids are whole numbers from 1. A new player gets the next number, and
 the counter only goes up while the server runs.
+
+A player has two identifiers, in this order:
+
+- `license:<hex>`: the SHA-256 fingerprint of the client's certificate, as 64
+  lowercase hex digits. It is the same on every connection from the same
+  client identity file.
+- `ip:<address>`: the address the player connects from, without the port.
+
+The identifier functions and `GetPlayerName` work in `playerConnecting`, where
+the player is not yet listed by `GetPlayers`. `GetPlayers` and
+`GetNumPlayerIndices` count only admitted players.
 
 ## Players (client only)
 
