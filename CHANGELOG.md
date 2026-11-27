@@ -12,15 +12,19 @@ may change the protocol and the API.
 - Resource file APIs reject symbolic links, device names, and paths that
   would leave the resource directory on Linux or Windows.
 - `SaveResourceFile` refuses to overwrite resource manifests (`fxmanifest.lua`,
-  `__resource.lua`) and script files (`.lua`, `.js`).
-- `PerformHttpRequest` refuses loopback, link-local, and private IP targets
-  (including across redirects) unless the console-only `sv_httpAllowPrivate`
-  convar is set to `true` or `1`, and strips sensitive headers on cross-origin
-  redirects.
+  `__resource.lua`) and script files (`.lua`, `.js`), and limits writes to
+  4 MiB per file (plus a 16 MiB per-resource quota on clients).
+- Key-value storage (`KvpStore`) caps each resource namespace at 16 MiB of live
+  entries.
+- `PerformHttpRequest` pins DNS resolution and refuses loopback, link-local,
+  and private IP targets (including across redirects) unless the console-only
+  `sv_httpAllowPrivate` convar is set to `true` or `1`, and strips sensitive
+  headers on cross-origin redirects.
 - Security-critical and bootstrap convars (`rcon_password`,
   `sv_httpAllowPrivate`, `sv_httpEnabled`, `sv_exposePlayerIdentifiers`,
   `sixm_identityFile`, `sixm_resourcesPath`, `sixm_kvpPath`,
-  `endpoint_add_udp`) are console-only, and resources without read permission
+  `endpoint_add_udp`) are console-only, script `SetConvar*` writes are bounded
+  to 256-byte names and 64 KiB values, and resources without read permission
   cannot overwrite restricted convars.
 
 ### Added

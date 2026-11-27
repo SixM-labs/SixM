@@ -245,14 +245,15 @@ be a regular file.
 
 ### `SaveResourceFile`
 
-- **Server.** Writes only to the calling resource (the name must be its own).
-  The file goes into the resource folder, and an existing data file there is
-  overwritten. Resource manifests (`fxmanifest.lua`, `__resource.lua`) and
-  script files (`.lua`, `.js`) cannot be overwritten and return `false`. The
-  folders are created if needed.
-- **Client.** Writes only to the calling resource's data folder. A file name
-  that the server sent, or a manifest/script path, is refused so a saved file
-  never replaces a synced or executable one.
+- **Server.** Writes only to the calling resource (the name must be its own),
+  up to 4 MiB per call. The file goes into the resource folder, and an existing
+  data file there is overwritten. Resource manifests (`fxmanifest.lua`,
+  `__resource.lua`) and script files (`.lua`, `.js`) cannot be overwritten and
+  return `false`. The folders are created if needed.
+- **Client.** Writes only to the calling resource's data folder, up to 4 MiB per
+  call and 16 MiB total per resource data folder. A file name that the server
+  sent, or a manifest/script path, is refused so a saved file never replaces a
+  synced or executable one.
 
 The client keeps its data folders under the cache. See [client.md](client.md).
 
@@ -320,7 +321,8 @@ The `NoSync` variants (`SetResourceKvpNoSync`, `SetResourceKvpIntNoSync`,
 plain names, because every write is batched (see below).
 
 - A key is 1 to 256 bytes. A key that is not valid UTF-8 raises an error.
-  A value is at most 64 KiB. A write that breaks a limit is refused: nothing
+  A value is at most 64 KiB, and each resource namespace is capped at 16 MiB
+  of live KVP data. A write that breaks a limit is refused: nothing
   is stored and the function returns `false`.
 - Integers and floats are stored as text, so `GetResourceKvpString` returns
   `"42"` for a stored integer.

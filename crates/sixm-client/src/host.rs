@@ -5,9 +5,9 @@ use std::path::PathBuf;
 
 use sixm_core::{
     ClientHost, EntityInfo, EntityKind, EntityState, EventSource, FuncRef, GLOBAL_BAG, Host,
-    HttpRequest, MirrorChange, NativeRegistry, ResourceDirectory, ResourceName, ResourceState,
-    ScriptError, ServerHost, Value, entity_of_bag, is_finite, is_protected_resource_file,
-    player_of_bag,
+    HttpRequest, MAX_CLIENT_DATA_BYTES, MAX_RESOURCE_FILE_WRITE_BYTES, MirrorChange,
+    NativeRegistry, ResourceDirectory, ResourceName, ResourceState, ScriptError, ServerHost, Value,
+    entity_of_bag, is_finite, is_protected_resource_file, player_of_bag,
 };
 use tracing::warn;
 
@@ -185,7 +185,14 @@ impl Host for ClientRuntime {
             return false;
         };
         ResourceDirectory::open(&dir)
-            .and_then(|directory| directory.write(path, data))
+            .and_then(|directory| {
+                directory.write_bounded(
+                    path,
+                    data,
+                    MAX_RESOURCE_FILE_WRITE_BYTES,
+                    Some(MAX_CLIENT_DATA_BYTES),
+                )
+            })
             .is_ok()
     }
 

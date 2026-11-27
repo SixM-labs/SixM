@@ -158,8 +158,10 @@ Each resource runs in an isolated **Lua 5.4** state inside `sixm-lua`:
 For comparison with the [FiveM sandbox](https://docs.fivem.net/docs/developers/sandbox/),
 SixM uses resource-relative paths through its file natives, refuses symbolic
 links, cross-resource writes, and `SaveResourceFile` overwrites of manifests or
-script files (`.lua`/`.js`), and blocks `PerformHttpRequest` access or redirects
-to loopback, link-local, and private addresses unless `sv_httpAllowPrivate` is
+script files (`.lua`/`.js`), caps `SaveResourceFile` at 4 MiB per write (plus
+16 MiB total per resource on clients) and KVP at 16 MiB per resource, and
+blocks `PerformHttpRequest` access or redirects to loopback, link-local, and
+private addresses (with pinned DNS resolution) unless `sv_httpAllowPrivate` is
 enabled. Server operators use
 [`add_convar_permission`](../server.md#private-convar-readers) and
 `remove_convar_permission` to control access to plain server convars, while

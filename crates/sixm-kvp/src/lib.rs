@@ -37,6 +37,8 @@ use writer::{Job, Refused, Writer};
 pub const MAX_KEY_LEN: usize = 256;
 /// Largest value in bytes.
 pub const MAX_VALUE_LEN: usize = 64 * 1024;
+/// Largest live KVP footprint allowed for one resource namespace, in bytes.
+pub const MAX_NAMESPACE_BYTES: u64 = 16 * 1024 * 1024;
 /// Shortest time between two hand-overs of the pending changes to the writer.
 pub const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -110,12 +112,19 @@ impl KvpStore {
             return false;
         };
         let record = record_len(key, value);
+        let next_live_len = match namespace.entries.get(key) {
+            Some(current) => namespace.live_len - record_len(key, current) + record,
+            None => namespace.live_len + record,
+        };
+        if next_live_len > MAX_NAMESPACE_BYTES {
+            return false;
+        }
         if let Some(current) = namespace.entries.get_mut(key) {
-            namespace.live_len = namespace.live_len - record_len(key, current) + record;
+            namespace.live_len = next_live_len;
             current.clear();
             current.extend_from_slice(value);
         } else {
-            namespace.live_len += record;
+            namespace.live_len = next_live_len;
             namespace.entries.insert(key.to_owned(), value.to_vec());
         }
         encode(&mut namespace.pending, TAG_SET, key, value);
@@ -444,6 +453,25 @@ mod tests {
             store.get("res", "big").map(|value| value.len()),
             Some(MAX_VALUE_LEN)
         );
+    }
+
+    #[test]
+    fn namespace_byte_quota_caps_total_live_data_and_recovers_after_delete() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut store = KvpStore::new(dir.path());
+        let chunk = vec![0xAA_u8; MAX_VALUE_LEN];
+        let mut stored = 0_usize;
+        while store.set("res", &format!("k:{stored}"), &chunk) {
+            stored += 1;
+            assert!(stored <= 300, "quota never triggered");
+        }
+        assert!(stored > 200);
+        assert!(store.set("other", "isolated", b"ok"));
+        // Overwriting an existing key with a smaller value stays allowed.
+        assert!(store.set("res", "k:0", b"tiny"));
+        assert!(store.set("res", "extra", b"fits"));
+        assert!(store.delete("res", "k:1"));
+        assert!(store.set("res", "replacement", &chunk));
     }
 
     #[test]
