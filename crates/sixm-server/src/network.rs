@@ -15,8 +15,10 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use sixm_core::{ClientTarget, EventSource, FuncRef, PlayerInfo, ScriptError, Value};
-use sixm_net::{ConnectionId, Fingerprint, NetError, NetEvent, NetServer, ServerConfig, Traffic};
-use tracing::{debug, info, warn};
+use sixm_net::{
+    ConnectionId, Fingerprint, NetError, NetEvent, NetServer, ServerConfig, Traffic, WebServer,
+};
+use tracing::{debug, error, info, warn};
 
 use crate::commands::{self, CommandContext, CommandSource};
 use crate::host_functions::HostFn;
@@ -199,6 +201,8 @@ impl Players {
 pub(crate) struct Network {
     /// The listening socket, while the network runs.
     pub(crate) server: RefCell<Option<NetServer>>,
+    /// The HTTP listener on the same address, while the network runs.
+    pub(crate) web: RefCell<Option<WebServer>>,
     pub(crate) players: RefCell<Players>,
     /// Kicks requested by `DropPlayer`, applied by [`ResourceManager::apply_drops`].
     pub(crate) pending_drops: RefCell<Vec<(u32, String)>>,
@@ -219,12 +223,13 @@ impl ResourceManager {
                 "the network is already running".to_owned(),
             ));
         }
-        let (endpoint, server_name, identity) = {
+        let (endpoint, server_name, identity, http_enabled) = {
             let convars = self.convars.borrow();
             (
                 convars.endpoint().to_owned(),
                 convars.server_name().to_owned(),
                 convars.identity(),
+                convars.http_enabled(),
             )
         };
         let bind: SocketAddr = endpoint.parse().map_err(|_| {
@@ -232,8 +237,25 @@ impl ResourceManager {
                 "endpoint_add_udp `{endpoint}` is not an ip:port address"
             ))
         })?;
+        // TCP first, so that a port of 0 resolves to the same port for UDP. A
+        // TCP port in use must not stop the game: the server runs without HTTP.
+        let web = if http_enabled {
+            let web_input = input.clone();
+            match WebServer::bind(bind, move |exchange| {
+                let _ = web_input.send(Input::Web(exchange));
+            }) {
+                Ok(web) => Some(web),
+                Err(err) => {
+                    error!("HTTP is off: {err}");
+                    None
+                }
+            }
+        } else {
+            info!("HTTP is off: sv_httpEnabled is false");
+            None
+        };
         let config = ServerConfig {
-            bind,
+            bind: web.as_ref().map_or(bind, WebServer::local_addr),
             server_name,
             identity,
             ..ServerConfig::default()
@@ -243,6 +265,7 @@ impl ResourceManager {
             let _ = input.send(Input::Net(event));
         })?;
         let addr = server.local_addr();
+        *self.network.web.borrow_mut() = web;
         *self.network.server.borrow_mut() = Some(server);
         self.publish_advertised();
         Ok(addr)
@@ -264,6 +287,8 @@ impl ResourceManager {
         if let Some(server) = server {
             server.shutdown();
         }
+        let web = self.network.web.borrow_mut().take();
+        drop(web);
     }
 
     /// Handles one event from the network thread.

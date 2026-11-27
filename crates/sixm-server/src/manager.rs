@@ -10,7 +10,7 @@ use std::time::Instant;
 use sixm_core::{
     ClientHost, ClientTarget, ConvarKind, EntityInfo, EntityKind, EventContext, EventSource,
     FuncRef, Host, HttpRequest, PlayerInfo, ResourceName, ResourceState, ScriptError,
-    ScriptRuntime, ServerHost, Value,
+    ScriptRuntime, ServerHost, Value, WebReply,
 };
 use sixm_kvp::KvpStore;
 use sixm_lua::LuaRuntime;
@@ -32,6 +32,7 @@ use crate::perf::FrameHistory;
 use crate::resource_files::{FileHashes, listing};
 use crate::scope::Scopes;
 use crate::state::StateStore;
+use crate::web::WebState;
 
 /// Why a resource operation did not complete.
 #[derive(Debug, thiserror::Error)]
@@ -122,6 +123,8 @@ pub struct ResourceManager {
     transitions: RefCell<Vec<(ResourceName, ResourceState)>>,
     /// Outgoing HTTP requests started by the scripts.
     http: HttpClient,
+    /// HTTP handlers of the resources and the requests they are answering.
+    pub(crate) web: WebState,
     /// The key-value store of the resources, opened on first use in `sixm_kvpPath`.
     kvp: RefCell<Option<KvpStore>>,
 }
@@ -154,6 +157,7 @@ impl ResourceManager {
             hashes: RefCell::default(),
             transitions: RefCell::default(),
             http: HttpClient::default(),
+            web: WebState::default(),
             kvp: RefCell::default(),
         })
     }
@@ -452,7 +456,7 @@ impl ResourceManager {
     }
 
     /// The running runtime that owns `func`, if this exact instance is still up.
-    fn runtime_of(&self, func: &FuncRef) -> Option<Rc<LuaRuntime>> {
+    pub(crate) fn runtime_of(&self, func: &FuncRef) -> Option<Rc<LuaRuntime>> {
         self.running
             .borrow()
             .iter()
@@ -660,6 +664,7 @@ impl ResourceManager {
         self.dispatch_local("onResourceStop", &name);
         self.dispatch_local("onServerResourceStop", &name);
         self.release_commands_of(&name);
+        self.forget_web(&name);
         self.running
             .borrow_mut()
             .retain(|candidate| !Rc::ptr_eq(candidate, runtime));
@@ -1077,5 +1082,13 @@ impl ServerHost for ResourceManager {
 
     fn player_ped(&self, player: u32) -> Option<u32> {
         self.ped_of_player(player)
+    }
+
+    fn set_web_handler(&self, resource: &ResourceName, handler: FuncRef) {
+        self.install_web_handler(resource, handler);
+    }
+
+    fn web_reply(&self, request: u64, reply: WebReply) -> Result<(), ScriptError> {
+        self.reply_web(request, reply)
     }
 }

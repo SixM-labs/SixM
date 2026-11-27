@@ -30,8 +30,9 @@ The log goes to standard output. `RUST_LOG` sets the filter, and defaults to
 1. Parse the command line and set up logging.
 2. Run the `+commands`, or `server.cfg`, in order. Resources start here if the
    config asks for them. Players cannot connect yet.
-3. Start the network on `endpoint_add_udp`. If it fails, the error is logged
-   and the server runs without networking.
+3. Start the network on `endpoint_add_udp`: the HTTP listener on TCP first, then
+   the game transport on UDP, both on that address. If it fails, the error is
+   logged and the server runs without networking.
 4. Log `Listening on <address>` and `Server fingerprint: <hex>`.
 5. Run the frame loop until a quit is requested.
 6. Stop resources in reverse start order, then stop the network. Connected
@@ -80,7 +81,7 @@ same name is never reached.
 | `ensure <resource>` | Restarts the resource if it is running, otherwise starts it. |
 | `refresh` | Scans `sixm_resourcesPath` again. Running resources are not affected. `start` scans on its own if no scan has run yet. |
 | `endpoint_add_udp <ip:port>` | Stores the listen address in `endpoint_add_udp`. It applies at the next start. The address must parse. |
-| `endpoint_add_tcp <ip:port>` | The same as `endpoint_add_udp`. SixM speaks only UDP, and the command logs a note. |
+| `endpoint_add_tcp <ip:port>` | The same as `endpoint_add_udp`: TCP (HTTP) and UDP (the game) share one address, so this sets both. |
 | `perf` | Prints the frame times of the last 1200 frames: count, average, p50, p99 and max, in milliseconds. Then the tick rate and the budget per frame, the players, entities and running resources, and the network rate in KiB/s and frames/s since the previous `perf` call, or since the server started. See [Load testing](#load-testing). |
 | `players` | Lists connected players with their id, name, `license` identifier and endpoint. |
 | `entities` | Lists every entity with its id, kind, model hash, position and heading. |
@@ -217,7 +218,10 @@ Convar names are case-insensitive. Scripts read them with `GetConvar` and
 | `sixm_identityFile` | `cache/server-identity.bin` | File that holds the server certificate. Empty means a new certificate on every start. Relative to the working directory. |
 | `sixm_kvpPath` | `cache/kvp` | Folder of the resource key-value stores, one `<resource>.kvp` file each. Relative to the working directory. Read the first time a resource uses key-value storage. See [Key-value storage](lua-api.md#key-value-storage). |
 | `sixm_tickRate` | `20` | Frames per second, clamped to 1 to 1000. A value that is not a number gives 20. |
-| `endpoint_add_udp` | `0.0.0.0:30120` | Listen address. Read when the network starts. An address that does not parse stops the network. |
+| `endpoint_add_udp` | `0.0.0.0:30120` | Listen address, for TCP (HTTP) and UDP (the game). Read when the network starts. An address that does not parse stops the network. A TCP port that is in use does not: the error is logged and the server runs without HTTP. |
+| `sv_httpEnabled` | `true` | Whether the HTTP listener runs. `false` or `0` turns it off. Read when the network starts. |
+| `sixm_httpHandlerTimeout` | `25` | Seconds a `SetHttpHandler` handler may take to complete its response before the client gets `504`, clamped to 1 to 120. A value that is not a number gives 25. |
+| `sv_exposePlayerIdentifiers` | `false` | Whether `/players.json` lists each player's identifiers. Only `true` turns it on. See [HTTP endpoints](#http-endpoints). |
 | `sv_maxclients` | `32` | Player limit, clamped to 1 to 1024. A value that is not a number gives 32. |
 | `sixm_deferralTimeout` | `120` | Seconds a connection that `playerConnecting` deferred may wait for `done`, clamped to 1 to 3600. A deferral that runs longer is refused with `connection timed out`. A value that is not a number gives 120. |
 | `sixm_httpTimeout` | `30` | Seconds an HTTP request from `PerformHttpRequest` may take, clamped to 1 to 600, unless its `options.timeout` gives another. A value that is not a number gives 30. See [HTTP](lua-api.md#http-server-only). |
@@ -289,6 +293,34 @@ The server presents a self-signed certificate. Its file is set by
   lowercase hex characters. It is logged at startup as `Server fingerprint`.
 - A client that passes that fingerprint with `--fingerprint` refuses any other
   certificate. See [client.md](client.md).
+
+## HTTP endpoints
+
+The server answers plain HTTP/1.1 on the TCP port of `endpoint_add_udp`. Each
+connection carries one request and is closed after its answer.
+
+| Path | Answer |
+|---|---|
+| `/info.json` | JSON: `server`, the running `resources`, and `vars`, the server-info convars (`sets`). |
+| `/players.json` | JSON array of `{id, name, ping}` per player. `identifiers` is added only with `sv_exposePlayerIdentifiers true`. |
+| `/dynamic.json` | JSON: `hostname`, `clients`, `maxclients` and `server`. |
+| `/<resource>/...` | The `SetHttpHandler` function of that resource, if it has one. See [HTTP handlers](lua-api.md#http-handlers-server-only). |
+
+A request is routed by the first segment of its raw path. It is not decoded or
+normalized, so `/app%2Fother` and `/app/../other` never reach the handler of
+`other`; the handler of `app` receives the path as sent. Other paths get `404`. The built-in documents accept `GET` and `HEAD`; other
+methods get `405`.
+
+Limits: a request body of 1 MiB at most (`413` above it), 128 connections at
+once (further ones are closed on arrival), 10 seconds to send the request head,
+130 seconds from the first byte to the answer at most (`503`), and 20 requests a second
+per client address with bursts of 60 (`429`). A handler that does not complete
+its response within `sixm_httpHandlerTimeout` (25 seconds) gets `504`; a request whose resource stops gets
+`503`.
+
+The listener speaks plain HTTP. Put a reverse proxy with TLS in front of it when
+the endpoints must be reached over the internet, and open the TCP port in the
+firewall with the UDP port.
 
 ## Players
 

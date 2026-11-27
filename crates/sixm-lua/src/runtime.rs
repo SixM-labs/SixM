@@ -8,7 +8,9 @@ use std::rc::{Rc, Weak};
 use std::time::Instant;
 
 use mlua::{FromLuaMulti, Function, IntoLuaMulti, Lua, MultiValue, Table, Value as LuaValue};
-use sixm_core::{EventContext, EventSource, Host, ResourceName, ScriptError, ScriptRuntime, Value};
+use sixm_core::{
+    EventContext, EventSource, Host, ResourceName, ScriptError, ScriptRuntime, Value, WebRequest,
+};
 
 use crate::events::Events;
 use crate::exports::Exports;
@@ -266,6 +268,16 @@ impl ScriptRuntime for LuaRuntime {
     fn call_ref(&self, id: u32, args: &[Value]) -> Result<Vec<Value>, ScriptError> {
         self.ensure_running()?;
         self.invoke_ref(id, args)
+    }
+
+    fn call_web_handler(
+        &self,
+        id: u32,
+        request: u64,
+        data: &WebRequest,
+    ) -> Result<(), ScriptError> {
+        self.ensure_running()?;
+        self.invoke_web(id, request, data)
     }
 
     fn retain_ref(&self, id: u32) -> bool {

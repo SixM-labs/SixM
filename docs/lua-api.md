@@ -609,6 +609,36 @@ The client does not have `PerformHttpRequest`. A request from a player's
 machine would expose the player's address and could reach hosts the server
 operator never chose. A client asks the server for the data instead.
 
+## HTTP handlers (server only)
+
+`SetHttpHandler(function(req, res) ... end)` registers the HTTP handler of the
+calling resource. Requests to `/<resource>` and `/<resource>/...` on the server's
+TCP port call it, after the built-in routes of the server. Calling it again
+replaces the handler. The handler is removed when the resource stops.
+
+- `req.method`, `req.path` (the full path, such as `/res/page`), `req.query`
+  (without the `?`) and `req.headers` (lower-case names). The path is the raw one sent by the client: it is not decoded or normalized. The body is not in
+  `req`: `req.setDataHandler(function(data) ... end)` registers a function that
+  is called with the whole body after the handler returns. The body is at most
+  1 MiB; a larger request is refused before the handler runs.
+- `res.writeHead(status, headers)` sets the status and headers. Optional, and
+  the default is `200`.
+- `res.write(data)` adds to the body, and `res.send(data)` adds the last part and
+  completes the response. `data` is optional in `send`.
+
+Both `res.send(...)` and `res:send(...)` work. The handler may complete the
+response later, from another handler or a frame, so it can keep the `res` it was
+given. A response left incomplete for `sixm_httpHandlerTimeout` seconds (default 25) gets `504`. A handler that
+raises an error before it completes gets `500`. A response body is limited to
+16 MiB.
+
+```lua
+SetHttpHandler(function(req, res)
+  res.writeHead(200, { ['Content-Type'] = 'text/plain' })
+  res.send('hello ' .. req.query)
+end)
+```
+
 ## JSON
 
 | Name | Side | Signature and result |

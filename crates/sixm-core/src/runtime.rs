@@ -137,6 +137,49 @@ pub struct HttpRequest {
     pub timeout: Option<Duration>,
 }
 
+/// An incoming HTTP request on the server's TCP listener, as a resource handler
+/// sees it. The body is read in full before the handler runs, and it is limited
+/// to 1 MiB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebRequest {
+    /// The request method, such as `GET`.
+    pub method: String,
+    /// The path of the request, without the query, such as `/res/page`.
+    pub path: String,
+    /// The query string, without the `?`. Empty when there is none.
+    pub query: String,
+    /// Request headers, in the order they were sent. Names are lower case.
+    pub headers: Vec<(String, String)>,
+    /// The request body.
+    pub body: Vec<u8>,
+}
+
+/// What a resource sends back for a request, once its response is complete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebResponse {
+    /// The status code, such as `200`.
+    pub status: u16,
+    /// Response headers. Names and values are validated by the listener.
+    pub headers: Vec<(String, String)>,
+    /// The response body.
+    pub body: Vec<u8>,
+}
+
+/// One step of a resource's answer to a request: its head, a piece of the
+/// body, or the last piece, which completes the response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebReply {
+    /// Sets the status and headers. Replaces any earlier head.
+    Head {
+        status: u16,
+        headers: Vec<(String, String)>,
+    },
+    /// Appends to the body; the response is not complete yet.
+    Write(Vec<u8>),
+    /// Appends the last piece of the body and completes the response.
+    End(Vec<u8>),
+}
+
 /// How the server treats a convar's value, decided by the command or function
 /// that stored it last.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,6 +370,15 @@ pub trait ServerHost {
         bps: u64,
     ) -> Result<(), ScriptError>;
 
+    /// Registers the HTTP handler of `resource` (`SetHttpHandler`), replacing
+    /// the one it had. The host removes it when the resource stops.
+    fn set_web_handler(&self, resource: &ResourceName, handler: FuncRef);
+
+    /// Applies one step of the answer to the request `request`. The last step
+    /// completes the response. Fails when the request is unknown, which means
+    /// it was already answered or timed out.
+    fn web_reply(&self, request: u64, reply: WebReply) -> Result<(), ScriptError>;
+
     /// Server ids of the connected players, in join order.
     fn players(&self) -> Vec<u32>;
 
@@ -475,6 +527,13 @@ pub trait ScriptRuntime {
     ) -> Result<Vec<Value>, ScriptError>;
 
     fn call_ref(&self, id: u32, args: &[Value]) -> Result<Vec<Value>, ScriptError>;
+
+    /// Runs the HTTP handler `id` for the request `request`, which the host
+    /// answers through [`ServerHost::web_reply`]. The handler receives the
+    /// request and its response object; a body handler it registered gets the
+    /// body afterwards.
+    fn call_web_handler(&self, id: u32, request: u64, data: &WebRequest)
+    -> Result<(), ScriptError>;
 
     /// See [`Host::retain_ref`]. Returns `false` for an unknown id.
     fn retain_ref(&self, id: u32) -> bool;
