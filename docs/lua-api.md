@@ -228,6 +228,8 @@ The rules that follow from these:
 | `GetResourceByFindIndex` | both | `GetResourceByFindIndex(index)`. Returns the name at the 0-based `index` of the resource list, or `nil`. |
 | `GetResourceMetadata` | both | `GetResourceMetadata(resource, key, index)`. Returns the value at the 0-based `index` of the metadata `key` of `resource`, or `nil`. |
 | `GetNumResourceMetadata` | both | `GetNumResourceMetadata(resource, key)`. Returns how many values the metadata `key` of `resource` has. |
+| `StartResource` | server | `StartResource(name)`. Starts `name` if allowed (`command.start` ACE permission for `resource.<caller>`), returning whether it was started. |
+| `StopResource` | server | `StopResource(name)`. Stops `name` if allowed (`command.stop` ACE permission for `resource.<caller>`), returning whether it was stopped. |
 
 `path` is normalised first. It must be relative, must not contain `..`, and
 must not contain a colon. Backslashes are accepted as separators.
@@ -341,8 +343,11 @@ plain names, because every write is batched (see below).
 | `SetConvar` | server | `SetConvar(name, value)`. Stores a plain convar, which only the server keeps. |
 | `SetConvarReplicated` | server | `SetConvarReplicated(name, value)`. Stores a replicated convar. Every connected player gets it at once, and players who join later get it too. Fails, and changes nothing, when the name is longer than 256 bytes or the value longer than 4096 bytes. |
 | `SetConvarServerInfo` | server | `SetConvarServerInfo(name, value)`. Stores a convar marked as server information. Nothing sends it anywhere yet. |
+| `AddConvarChangeListener` | both | `AddConvarChangeListener(filter, fn)`. Calls `fn(convarName, reserved)` when a matching convar changes (`*`/`?` globs, case-insensitive, `nil` or `""` matches all). Returns a numeric cookie. |
+| `RemoveConvarChangeListener` | both | `RemoveConvarChangeListener(cookie)`. Removes the listener returned by `AddConvarChangeListener`. |
 | `ExecuteCommand` | both | `ExecuteCommand(line)`. Queues a console line. It runs after the current script call returns. On a server it runs with the rights of the calling resource, as its principal `resource.<name>`. On a client it runs locally, as a typed console line. |
 | `RegisterCommand` | both | `RegisterCommand(name, fn [, restricted])`. Registers a console command. `fn` is called as `fn(source, args, raw)`, where `source` is the player's id or `0` (the console), `args` is an array of strings and `raw` is the line. |
+| `GetRegisteredCommands` | both | `GetRegisteredCommands()`. Returns a sorted array of `{ name = ... }` tables for built-in and script commands. |
 
 - Convar names are case-insensitive.
 - The setters take effect at once, not after the current call, and follow the
@@ -380,6 +385,9 @@ plain names, because every write is batched (see below).
 | `GetNumPlayerIdentifiers` | `GetNumPlayerIdentifiers(player)`. Returns the number of identifiers as an integer, `0` for an unknown player. |
 | `GetPlayerIdentifier` | `GetPlayerIdentifier(player, index)`. Returns the identifier at the 0-based `index`, or `nil`. |
 | `GetPlayerIdentifierByType` | `GetPlayerIdentifierByType(player, kind)`. Returns the first identifier whose text before `:` is `kind`, whole, for example `license:<hex>`, or `nil`. |
+| `GetPlayerLastMsg` | `GetPlayerLastMsg(player)`. Returns milliseconds since the last message from the player, or `-1`. |
+| `GetNumPlayerTokens` | `GetNumPlayerTokens(player)`. Returns the number of client identity tokens (`1` for a connected player, `0` when unknown). |
+| `GetPlayerToken` | `GetPlayerToken(player, index)`. Returns the token at 0-based `index` (`0:<fingerprint>`), or `nil`. |
 | `DropPlayer` | `DropPlayer(player [, reason])`. Disconnects the player after the current call. The default reason is `Dropped by server`. |
 | `IsPlayerAceAllowed` | `IsPlayerAceAllowed(player, object)`. Returns whether the player may use `object`, as the principal `player.<id>` with the identifiers it has. `false` for an id that is not connected. See [server.md](server.md#permissions). |
 | `IsPrincipalAceAllowed` | `IsPrincipalAceAllowed(principal, object)`. Returns whether the principal, such as `group.admin`, may use `object`. Names are case-insensitive. |
@@ -452,6 +460,7 @@ Behaviour:
 | `vector2` / `vec2` | both | `vector2(x, y)`. Returns a 2D vector. |
 | `vector3` / `vec3` | both | `vector3(x, y, z)`. Returns a 3D vector. |
 | `vector4` / `vec4` | both | `vector4(x, y, z, w)`. Returns a 4D vector. |
+| `quat` | both | `quat(w, x, y, z)`, `quat(w, vector3)` or `quat(other)`. Returns a quaternion with `.w`, `.x`, `.y`, `.z`, `*` composition/rotation and `json.encode`. |
 
 - Arguments can be numbers or vectors, flattened in order:
   `vector3(vector2(1, 2), 3)`. A single number fills every component:
@@ -467,6 +476,7 @@ Behaviour:
 - `#v` is the length, so `#(a - b)` is the distance between two points.
 - `==` compares size and components. `tostring(v)` gives `vector3(1.0, 2.0, 3.0)`.
 - `type(v)` returns `"vector2"`, `"vector3"` or `"vector4"`.
+- Lua backtick hash literals such as `` `adder` `` are rewritten at load time outside comments and strings into signed 32-bit `joaat` integers matching `GetHashKey`.
 - Vectors cross exports, events, state bags and the network as vectors.
 - Unlike FiveM, a vector is shared, not copied: after `local b = a`, setting
   `b.x` also changes `a`. Arithmetic always returns a new vector.
@@ -489,18 +499,23 @@ see [Scoping](#scoping).
 | `SetEntityCoords` / `SetEntityCoordsNoOffset` | both | `SetEntityCoords(entity, x, y, z, ...)`. Extra arguments are ignored. On the server it moves any entity. On a client it moves only an entity the client owns. |
 | `SetEntityHeading` | both | `SetEntityHeading(entity, heading)`. Keeps pitch and roll. Same rules as `SetEntityCoords`. |
 | `SetEntityRotation` | both | `SetEntityRotation(entity, pitch, roll, yaw, ...)`. Same rules as `SetEntityCoords`. |
+| `SetEntityQuaternion` | both | `SetEntityQuaternion(entity, x, y, z, w)`. Same rules as `SetEntityCoords`. |
 | `NetworkGetEntityOwner` | both | `NetworkGetEntityOwner(entity)`. Returns the id of the player that owns the entity, or `-1` for a server-owned or unknown entity. |
+| `NetworkGetFirstEntityOwner` | server | `NetworkGetFirstEntityOwner(entity)`. Returns the player id that originally created the entity, or `-1` for server-created or unknown entities. |
 | `NetworkRequestControlOfEntity` | client | `NetworkRequestControlOfEntity(entity)`. Asks the server for control of an unowned entity in scope. Returns `true` if the request was sent, or `false` if unknown or already owned. |
 | `SetEntityOwner` | server | `SetEntityOwner(entity, player)` (SixM extension). Gives `entity` to `player`, or `0` for the server, keeping its teleport epoch. Returns `true` if updated. |
 | `SetEntityOrphanMode` | server | `SetEntityOrphanMode(entity, mode)`. Sets what happens when a client-created entity's creator leaves: `'delete'` (default) or `'migrate'`. |
+| `SetEntityDistanceCullingRadius` | server | `SetEntityDistanceCullingRadius(entity, radius)`. Overrides the scoping radius in metres for `entity` (`<= 0` resets to global). |
 | `GetAllVehicles` / `GetAllPeds` / `GetAllObjects` | server | Return arrays of entity ids, ascending. |
 | `GetGamePool` | client | `GetGamePool(name)` with `'CVehicle'`, `'CPed'` or `'CObject'`. Returns an array of ids. Other names give an empty array. |
 | `DoesEntityExist` | both | `DoesEntityExist(entity)`. Returns a boolean. |
 | `GetEntityCoords` | both | Returns a `vector3`. |
 | `GetEntityHeading` | both | Returns the yaw in degrees. |
 | `GetEntityRotation` | both | `GetEntityRotation(entity [, order])`. Returns `vector3(pitch, roll, yaw)`. `order` is ignored. |
+| `GetEntityQuaternion` | both | `GetEntityQuaternion(entity)`. Returns four floats `x, y, z, w`. |
 | `GetEntityModel` | both | Returns the model hash as a signed integer, like `GetHashKey`. |
 | `GetEntityType` | both | Returns `1` for a ped, `2` for a vehicle, `3` for an object and `0` for none. |
+| `GetEntityScript` | both | Returns the name of the resource that created `entity`, or `nil`. |
 | `NetworkGetNetworkIdFromEntity` | both | Returns the id, or `0` when the entity does not exist. |
 | `NetworkGetEntityFromNetworkId` | both | Returns the id, or `0` when it does not exist. |
 | `NetworkDoesNetworkIdExist` | both | Returns a boolean. |

@@ -81,6 +81,7 @@ pub(crate) struct Rejections {
 
 pub(crate) type QueuedEvent = (String, EventSource, Vec<Value>, Option<ResourceName>);
 pub(crate) type QueuedStateChange = (String, String, Value, bool);
+pub(crate) type QueuedConvarChange = (String, Option<String>, bool);
 
 /// A sandboxed `QuickJS` state running one resource instance.
 ///
@@ -106,10 +107,12 @@ pub struct JsRuntime {
     pub(crate) skip_self_state: Cell<bool>,
     pub(crate) pending_events: RefCell<VecDeque<QueuedEvent>>,
     pub(crate) pending_state_changes: RefCell<VecDeque<QueuedStateChange>>,
+    pub(crate) pending_convar_changes: RefCell<VecDeque<QueuedConvarChange>>,
     pub(crate) func_ref_symbol: RefCell<Option<Persistent<Symbol<'static>>>>,
     pub(crate) sched: RefCell<Sched>,
     pub(crate) events: RefCell<Events>,
     pub(crate) state: RefCell<ChangeHandlers>,
+    pub(crate) convar_listeners: RefCell<natives::ConvarListeners>,
     pub(crate) exports: RefCell<Exports>,
     pub(crate) refs: RefCell<RefTable>,
     pub(crate) deferred_releases: RefCell<Vec<u32>>,
@@ -156,10 +159,12 @@ impl JsRuntime {
             skip_self_state: Cell::new(false),
             pending_events: RefCell::default(),
             pending_state_changes: RefCell::default(),
+            pending_convar_changes: RefCell::default(),
             func_ref_symbol: RefCell::new(Some(sym)),
             sched: RefCell::default(),
             events: RefCell::default(),
             state: RefCell::default(),
+            convar_listeners: RefCell::default(),
             exports: RefCell::default(),
             refs: RefCell::default(),
             deferred_releases: RefCell::default(),
@@ -215,6 +220,11 @@ impl JsRuntime {
     /// Drains any events or state changes queued while this runtime was active.
     fn flush_pending(&self) {
         while !self.shut.get() {
+            let next_convar = self.pending_convar_changes.borrow_mut().pop_front();
+            if let Some((name, value, replicated)) = next_convar {
+                self.dispatch_convar_change(&name, value.as_deref(), replicated);
+                continue;
+            }
             let next_state = self.pending_state_changes.borrow_mut().pop_front();
             if let Some((bag, key, value, replicated)) = next_state {
                 self.dispatch_state_change(&bag, &key, &value, replicated);
@@ -367,6 +377,7 @@ impl JsRuntime {
         let sched = std::mem::take(&mut *self.sched.borrow_mut());
         let events = std::mem::take(&mut *self.events.borrow_mut());
         let state = std::mem::take(&mut *self.state.borrow_mut());
+        let convar_listeners = std::mem::take(&mut *self.convar_listeners.borrow_mut());
         let exports = std::mem::take(&mut *self.exports.borrow_mut());
         let refs = std::mem::take(&mut *self.refs.borrow_mut());
         let deferred = std::mem::take(&mut *self.deferred_releases.borrow_mut());
@@ -374,7 +385,16 @@ impl JsRuntime {
         let rejections = std::mem::take(&mut *self.rejections.borrow_mut());
         let sym = self.func_ref_symbol.borrow_mut().take();
         drop((
-            sched, events, state, exports, refs, deferred, kvp_finds, rejections, sym,
+            sched,
+            events,
+            state,
+            convar_listeners,
+            exports,
+            refs,
+            deferred,
+            kvp_finds,
+            rejections,
+            sym,
         ));
 
         self.ctx.with(|ctx| {
@@ -493,6 +513,12 @@ impl ScriptRuntime for JsRuntime {
     fn deliver_state_change(&self, bag: &str, key: &str, value: &Value, replicated: bool) {
         if !self.shut.get() {
             self.dispatch_state_change(bag, key, value, replicated);
+        }
+    }
+
+    fn deliver_convar_change(&self, name: &str, value: Option<&str>, replicated: bool) {
+        if !self.shut.get() {
+            self.dispatch_convar_change(name, value, replicated);
         }
     }
 

@@ -129,6 +129,8 @@ pub struct ClientRuntime {
     pub(crate) state: RefCell<StateMirror>,
     /// The entities the server has created and not yet deleted, by id.
     pub(crate) entities: RefCell<BTreeMap<u32, ClientEntity>>,
+    /// Creating script name per client-created entity id.
+    pub(crate) entity_scripts: RefCell<BTreeMap<u32, String>>,
     /// The id blocks the server leased to this client, in the order they are
     /// used, each `(next, end)` as in the server.
     pub(crate) leases: RefCell<VecDeque<(u32, u32)>>,
@@ -197,6 +199,7 @@ impl ClientRuntime {
             queued: RefCell::default(),
             state: RefCell::default(),
             entities: RefCell::default(),
+            entity_scripts: RefCell::default(),
             leases: RefCell::default(),
             own_created: RefCell::default(),
             local_ped: Cell::default(),
@@ -490,6 +493,7 @@ impl ClientRuntime {
             self.local_ped.set(None);
         }
         self.own_created.borrow_mut().remove(&id);
+        self.entity_scripts.borrow_mut().remove(&id);
         if self.entities.borrow_mut().remove(&id).is_some() {
             self.push_mirror_change(MirrorChange::Removed { id });
         }
@@ -777,7 +781,10 @@ impl ClientRuntime {
                 rotation,
             } => self.apply_owner(id, owner, epoch, position, rotation),
             ClientNotice::Convars { entries } => {
-                self.convars.borrow_mut().apply_replicated(entries);
+                let changes = self.convars.borrow_mut().apply_replicated(entries);
+                for (name, value, replicated) in changes {
+                    self.deliver_convar_change(&name, value.as_deref(), replicated);
+                }
             }
             ClientNotice::Kicked { reason } => {
                 info!("kicked: {reason}");
@@ -1162,6 +1169,13 @@ impl ClientRuntime {
     pub(crate) fn deliver_state(&self, bag: &str, key: &str, value: &Value, replicated: bool) {
         for runtime in self.snapshot().iter() {
             runtime.deliver_state_change(bag, key, value, replicated);
+        }
+    }
+
+    /// Runs the convar change listeners of every runtime for one changed convar.
+    pub(crate) fn deliver_convar_change(&self, name: &str, value: Option<&str>, replicated: bool) {
+        for runtime in self.snapshot().iter() {
+            runtime.deliver_convar_change(name, value, replicated);
         }
     }
 }

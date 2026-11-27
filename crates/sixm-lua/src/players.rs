@@ -116,6 +116,41 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
     for (name, function) in functions {
         globals.raw_set(name, function)?;
     }
+    install_tokens_and_last_msg(lua, weak, globals)
+}
+
+fn install_tokens_and_last_msg(
+    lua: &Lua,
+    weak: &Weak<LuaRuntime>,
+    globals: &Table,
+) -> mlua::Result<()> {
+    let get_player_last_msg = bind_fn(lua, weak, |rt, (player,): (LuaValue,)| {
+        let Some(id) = player_id(&player) else {
+            return Ok(-1_i64);
+        };
+        let msg = server(&*rt.host()?)?.player_last_msg(id);
+        Ok(msg.map_or(-1, |duration| {
+            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+        }))
+    })?;
+    let get_num_player_tokens = bind_fn(lua, weak, |rt, (player,): (LuaValue,)| {
+        let Some(id) = player_id(&player) else {
+            return Ok(0_i64);
+        };
+        let count = server(&*rt.host()?)?.player_tokens(id).len();
+        i64::try_from(count).map_err(mlua::Error::runtime)
+    })?;
+    let get_player_token = bind_fn(lua, weak, |rt, (player, index): (LuaValue, LuaValue)| {
+        let Some(id) = player_id(&player) else {
+            return Ok(None);
+        };
+        let tokens = server(&*rt.host()?)?.player_tokens(id);
+        let index = whole_number(&index).and_then(|idx| usize::try_from(idx).ok());
+        Ok(index.and_then(|idx| tokens.get(idx).cloned()))
+    })?;
+    globals.raw_set("GetPlayerLastMsg", get_player_last_msg)?;
+    globals.raw_set("GetNumPlayerTokens", get_num_player_tokens)?;
+    globals.raw_set("GetPlayerToken", get_player_token)?;
     Ok(())
 }
 

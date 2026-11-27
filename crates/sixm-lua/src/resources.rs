@@ -5,6 +5,7 @@ use std::rc::Weak;
 
 use mlua::{Lua, Table};
 
+use crate::players::server;
 use crate::runtime::{LuaRuntime, bind_fn};
 
 /// Installs `GetInvokingResource`, `GetResourceState`, `GetNumResources`,
@@ -53,6 +54,23 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
     for (name, function) in functions {
         globals.raw_set(name, function)?;
     }
+    Ok(())
+}
+
+/// Installs server-only resource lifecycle natives: `StartResource`, `StopResource`.
+pub(crate) fn install_server(
+    lua: &Lua,
+    weak: &Weak<LuaRuntime>,
+    globals: &Table,
+) -> mlua::Result<()> {
+    let start_resource = bind_fn(lua, weak, |rt, (name,): (String,)| {
+        Ok(server(&*rt.host()?)?.start_resource(rt.resource.as_ref(), &name))
+    })?;
+    let stop_resource = bind_fn(lua, weak, |rt, (name,): (String,)| {
+        Ok(server(&*rt.host()?)?.stop_resource(rt.resource.as_ref(), &name))
+    })?;
+    globals.raw_set("StartResource", start_resource)?;
+    globals.raw_set("StopResource", stop_resource)?;
     Ok(())
 }
 

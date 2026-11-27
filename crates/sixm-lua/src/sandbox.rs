@@ -77,6 +77,11 @@ pub(crate) fn prepare(lua: &Lua) -> mlua::Result<Helpers> {
 
     let text_load = lua.create_function(move |lua, args: MultiValue| {
         let mut args = args.into_vec();
+        if let Some(LuaValue::String(chunk)) = args.first() {
+            let bytes = chunk.as_bytes();
+            let processed = crate::preprocess::lua_backticks(&bytes);
+            args[0] = LuaValue::String(lua.create_string(processed.as_ref())?);
+        }
         if args.len() < 3 {
             args.resize(3, LuaValue::Nil);
         }

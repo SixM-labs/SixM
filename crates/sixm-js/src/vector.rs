@@ -19,6 +19,8 @@ use sixm_core::Value;
 const MAX_LEN: usize = 4;
 const LETTERS: &[u8; MAX_LEN] = b"xyzw";
 const NAMES: [&str; MAX_LEN] = ["x", "y", "z", "w"];
+const QUAT_LETTERS: &[u8; MAX_LEN] = b"wxyz";
+const QUAT_NAMES: [&str; MAX_LEN] = ["w", "x", "y", "z"];
 
 /// Underlying class stored behind each vector `Proxy`.
 #[derive(Debug, Clone, Copy, PartialEq, Trace, JsLifetime)]
@@ -340,6 +342,15 @@ pub(crate) fn install<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
         )?;
         globals.set(name, func)?;
     }
+    globals.set(
+        "quat",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'js>, args: Rest<JsValue<'js>>| -> rquickjs::Result<JsValue<'js>> {
+                construct_quat(&ctx, &args.0)
+            },
+        )?,
+    )?;
     Ok(())
 }
 
@@ -391,4 +402,213 @@ fn construct<'js>(
         ));
     }
     wrap_vector(ctx, JsVector { len, c })
+}
+
+/// Underlying class stored behind each quaternion `Proxy`, in `[w, x, y, z]` order.
+#[derive(Debug, Clone, Copy, PartialEq, Trace, JsLifetime)]
+#[rquickjs::class]
+pub(crate) struct JsQuat {
+    #[qjs(skip_trace)]
+    c: [f32; 4],
+}
+
+impl JsQuat {
+    pub(crate) fn new(c: [f32; 4]) -> Self {
+        Self { c }
+    }
+
+    pub(crate) fn to_value(self) -> Value {
+        Value::Quat(self.c)
+    }
+}
+
+impl fmt::Display for JsQuat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "quat({:?}, {:?}, {:?}, {:?})",
+            self.c[0], self.c[1], self.c[2], self.c[3]
+        )
+    }
+}
+
+pub(crate) fn make_quat<'js>(ctx: &Ctx<'js>, c: [f32; 4]) -> rquickjs::Result<JsValue<'js>> {
+    wrap_quat(ctx, JsQuat::new(c))
+}
+
+fn wrap_quat<'js>(ctx: &Ctx<'js>, q: JsQuat) -> rquickjs::Result<JsValue<'js>> {
+    let target = Class::instance(ctx.clone(), q)?;
+    let handler = ProxyHandler::new(ctx.clone())?
+        .with_getter(quat_get)?
+        .with_setter(quat_set)?
+        .with_has(quat_has)?;
+    Ok(Proxy::new(ctx.clone(), target, handler)?.into_value())
+}
+
+pub(crate) fn read_quat(value: &JsValue<'_>) -> Option<JsQuat> {
+    if let Some(proxy) = value.as_proxy() {
+        let target = proxy.target().ok()?;
+        let cls = target.as_class::<JsQuat>()?;
+        return Some(*cls.borrow());
+    }
+    value
+        .as_object()
+        .and_then(|obj| obj.as_class::<JsQuat>())
+        .map(|cls| *cls.borrow())
+}
+
+fn quat_field_index(key: &str) -> Option<usize> {
+    if let Some(idx) = parse_zero_index(key, 4) {
+        return Some(idx);
+    }
+    let [letter] = key.as_bytes() else {
+        return None;
+    };
+    QUAT_LETTERS.iter().position(|known| known == letter)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn quat_get<'js>(
+    target: ProxyTarget<'js>,
+    prop: ProxyProperty<'js>,
+    _recv: rquickjs::proxy::ProxyReceiver<'js>,
+) -> rquickjs::Result<JsValue<'js>> {
+    let ctx = target.0.ctx().clone();
+    let cls = target
+        .0
+        .as_class::<JsQuat>()
+        .ok_or_else(|| Exception::throw_type(&ctx, "expected quat"))?;
+    let q = *cls.borrow();
+
+    if prop.is_symbol() {
+        if prop.0 == *Symbol::iterator(ctx.clone()).as_value() {
+            return make_slice_iterator(&ctx, &q.c).map(Function::into_value);
+        }
+        return Ok(JsValue::new_undefined(ctx));
+    }
+
+    let Ok(key) = prop.to_string() else {
+        return Ok(JsValue::new_undefined(ctx));
+    };
+
+    match key.as_str() {
+        "length" => return Ok(JsValue::new_int(ctx, 4)),
+        "toString" => {
+            let text = q.to_string();
+            return Function::new(ctx, move || text.clone()).map(Function::into_value);
+        }
+        "toJSON" => {
+            return Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'js>| -> rquickjs::Result<Object<'js>> {
+                    let obj = Object::new(ctx)?;
+                    for (name, comp) in QUAT_NAMES.iter().zip(q.c) {
+                        obj.set(*name, f64::from(comp))?;
+                    }
+                    Ok(obj)
+                },
+            )
+            .map(Function::into_value);
+        }
+        _ => {}
+    }
+
+    Ok(quat_field_index(&key).map_or_else(
+        || JsValue::new_undefined(ctx.clone()),
+        |idx| JsValue::new_float(ctx.clone(), f64::from(q.c[idx])),
+    ))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn quat_set<'js>(
+    target: ProxyTarget<'js>,
+    prop: ProxyProperty<'js>,
+    value: JsValue<'js>,
+    _recv: rquickjs::proxy::ProxyReceiver<'js>,
+) -> rquickjs::Result<bool> {
+    let ctx = target.0.ctx().clone();
+    let cls = target
+        .0
+        .as_class::<JsQuat>()
+        .ok_or_else(|| Exception::throw_type(&ctx, "expected quat"))?;
+    let mut q = cls.borrow_mut();
+    let key = prop
+        .to_string()
+        .map_err(|_| Exception::throw_type(&ctx, "quat has no such field"))?;
+    let idx = quat_field_index(&key)
+        .ok_or_else(|| Exception::throw_type(&ctx, &format!("quat has no field '{key}'")))?;
+    let num = number_of(&value).ok_or_else(|| {
+        Exception::throw_type(
+            &ctx,
+            &format!("quat component must be a number, got {}", value.type_name()),
+        )
+    })?;
+    q.c[idx] = num;
+    Ok(true)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "ProxyHandler::with_has requires rquickjs::Result<bool>"
+)]
+fn quat_has<'js>(target: ProxyTarget<'js>, prop: ProxyProperty<'js>) -> rquickjs::Result<bool> {
+    let ctx = target.0.ctx().clone();
+    if prop.is_symbol() {
+        return Ok(prop.0 == *Symbol::iterator(ctx).as_value());
+    }
+    let Ok(key) = prop.to_string() else {
+        return Ok(false);
+    };
+    Ok(
+        matches!(key.as_str(), "length" | "toString" | "toJSON")
+            || quat_field_index(&key).is_some(),
+    )
+}
+
+fn make_slice_iterator<'js>(ctx: &Ctx<'js>, slice: &[f32]) -> rquickjs::Result<Function<'js>> {
+    let components: Vec<f64> = slice.iter().map(|c| f64::from(*c)).collect();
+    Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>| -> rquickjs::Result<Object<'js>> {
+            let arr = Array::new(ctx.clone())?;
+            for (i, c) in components.iter().enumerate() {
+                arr.set(i, *c)?;
+            }
+            let values_fn: Function<'js> = Object::get(&arr, Symbol::iterator(ctx))?;
+            values_fn.call((rquickjs::function::This(arr),))
+        },
+    )
+}
+
+fn construct_quat<'js>(ctx: &Ctx<'js>, args: &[JsValue<'js>]) -> rquickjs::Result<JsValue<'js>> {
+    match args {
+        [single] => {
+            if let Some(q) = read_quat(single) {
+                return wrap_quat(ctx, q);
+            }
+            if let Some(n) = number_of(single) {
+                return wrap_quat(ctx, JsQuat::new([n, n, n, n]));
+            }
+        }
+        [w, v] => {
+            if let (Some(w), Some(vec)) = (number_of(w), read_vector(v))
+                && vec.len == 3
+            {
+                return wrap_quat(ctx, JsQuat::new([w, vec.c[0], vec.c[1], vec.c[2]]));
+            }
+        }
+        [w, x, y, z] => {
+            if let (Some(w), Some(x), Some(y), Some(z)) =
+                (number_of(w), number_of(x), number_of(y), number_of(z))
+            {
+                return wrap_quat(ctx, JsQuat::new([w, x, y, z]));
+            }
+        }
+        _ => {}
+    }
+    Err(Exception::throw_type(
+        ctx,
+        "quat: expected (w, x, y, z), (w, vector3), or (quat)",
+    ))
 }

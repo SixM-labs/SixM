@@ -456,3 +456,68 @@ fn get_hash_key_is_available_on_the_client() {
     );
     assert_eq!(first(&rt, "hash"), Value::Int(-1_216_765_807));
 }
+
+#[test]
+fn lua_backtick_hash_literals_match_get_hash_key() {
+    assert_eq!(
+        run("local commented = '-- `sultan`' .. \"`adder`\"\n\
+             local a = `adder`\n\
+             local fn = assert(load('return `sultan`'))\n\
+             return a == GetHashKey('adder'), fn() == GetHashKey('sultan'), commented"),
+        vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::from("-- `sultan``adder`"),
+        ]
+    );
+}
+
+#[test]
+fn quat_supports_arithmetic_rotation_json_and_cross_resource_values() {
+    assert_eq!(
+        run("local q = quat(1, 0, 0, 0)\n\
+             local q2 = quat(0, vector3(0, 0, 1))\n\
+             local rot = q2 * vector3(1, 0, 0)\n\
+             local decoded = json.decode(json.encode(quat(0.5, -0.5, 0.25, -0.25)))\n\
+             return type(q), tostring(q), #q, (q * q2).z, rot.x, decoded.w, decoded.x"),
+        vec![
+            Value::from("quat"),
+            Value::from("quat(1.0, 0.0, 0.0, 0.0)"),
+            Value::Float(1.0),
+            Value::Float(1.0),
+            Value::Float(-1.0),
+            Value::Float(0.5),
+            Value::Float(-0.5),
+        ]
+    );
+
+    let host = new_host();
+    let rt = start(
+        &host,
+        "quat_test",
+        &["echo", "entity_quat"],
+        &[(
+            "main.lua",
+            "exports('echo', function(q) return q end)\n\
+             exports('entity_quat', function()\n\
+               local v = CreateVehicle(`adder`, 0, 0, 0, 90.0, true, false)\n\
+               local x, y, z, w = GetEntityQuaternion(v)\n\
+               SetEntityQuaternion(v, 0.0, 0.0, 0.0, 1.0)\n\
+               return x, y, z, w, GetEntityHeading(v), GetEntityScript(v)\n\
+             end)\n",
+        )],
+    );
+    assert_eq!(
+        call(&rt, "echo", &[Value::Quat([1.0, 0.0, -0.5, 0.25])]),
+        vec![Value::Quat([1.0, 0.0, -0.5, 0.25])]
+    );
+    let res = call(&rt, "entity_quat", &[]);
+    assert!(
+        matches!(res[2], Value::Float(z) if (z - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-4)
+    );
+    assert!(
+        matches!(res[3], Value::Float(w) if (w - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-4)
+    );
+    assert_eq!(res[4], Value::Float(0.0));
+    assert_eq!(res[5], Value::Nil); // TestHost uses default EntityStoreless Host::entity_script
+}

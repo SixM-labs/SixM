@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 
 use rquickjs::function::Opt;
-use rquickjs::{Ctx, Exception, Function, Value as JsValue};
-use sixm_core::{ConvarKind, game_timer_ms, joaat, normalize_resource_path};
+use rquickjs::{Ctx, Exception, Function, Object, Persistent, Value as JsValue};
+use sixm_core::{ConvarKind, convar_filter_matches, game_timer_ms, joaat, normalize_resource_path};
 
 use crate::client;
 use crate::convert::{bytes_to_js, read_bytes};
@@ -17,8 +17,8 @@ use crate::http;
 use crate::kvp;
 use crate::players::{self, server};
 use crate::resources;
-use crate::runtime::{JsRuntime, Side};
-use crate::sandbox;
+use crate::runtime::{CALLBACK_BUDGET, JsRuntime, Side};
+use crate::sandbox::{self, catch_script};
 use crate::scheduler;
 use crate::state;
 use crate::vector;
@@ -40,6 +40,7 @@ pub(crate) fn install(runtime: &Rc<JsRuntime>) -> Result<(), sixm_core::ScriptEr
             Side::Server => {
                 players::install(&ctx, weak)?;
                 entities::install_server(&ctx, weak)?;
+                resources::install_server(&ctx, weak)?;
                 http::install(&ctx, weak)?;
                 web::install(&ctx, weak)?;
                 install_server_convars(&ctx, weak)?;
@@ -55,12 +56,13 @@ pub(crate) fn install(runtime: &Rc<JsRuntime>) -> Result<(), sixm_core::ScriptEr
         exports::install(&ctx, weak)?;
         Ok::<(), rquickjs::Error>(())
     });
-    runtime.ctx.with(|ctx| sandbox::catch_script(&ctx, outcome))
+    runtime.ctx.with(|ctx| catch_script(&ctx, outcome))
 }
 
 fn install_host(ctx: &Ctx<'_>, weak: &Weak<JsRuntime>, side: Side) -> rquickjs::Result<()> {
     install_resource_files(ctx, weak)?;
     install_convars_and_commands(ctx, weak)?;
+    install_convar_listeners(ctx, weak)?;
     install_misc(ctx, weak, side)?;
     Ok(())
 }
@@ -247,6 +249,72 @@ fn install_convars_and_commands<'js>(
     Ok(())
 }
 
+fn install_convar_listeners<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::Result<()> {
+    let globals = ctx.globals();
+    {
+        let weak = weak.clone();
+        globals.set(
+            "AddConvarChangeListener",
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'js>,
+                      filter: JsValue<'js>,
+                      func: Function<'js>|
+                      -> rquickjs::Result<i64> {
+                    let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                    let pattern = if filter.is_null() || filter.is_undefined() {
+                        String::new()
+                    } else if let Some(text) = filter.as_string() {
+                        text.to_string()?
+                    } else {
+                        return Err(Exception::throw_type(
+                            &ctx,
+                            "AddConvarChangeListener expects a string or null filter",
+                        ));
+                    };
+                    Ok(rt.convar_listeners.borrow_mut().add(&ctx, pattern, func))
+                },
+            )?,
+        )?;
+    }
+    {
+        let weak = weak.clone();
+        globals.set(
+            "RemoveConvarChangeListener",
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'js>, cookie: i64| -> rquickjs::Result<()> {
+                    let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                    let removed = rt.convar_listeners.borrow_mut().remove(cookie);
+                    drop(removed);
+                    Ok(())
+                },
+            )?,
+        )?;
+    }
+    {
+        let weak = weak.clone();
+        globals.set(
+            "GetRegisteredCommands",
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'js>| -> rquickjs::Result<Vec<Object<'js>>> {
+                    let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                    let names = rt.host(&ctx)?.registered_commands();
+                    let mut out = Vec::with_capacity(names.len());
+                    for name in names {
+                        let obj = Object::new(ctx.clone())?;
+                        obj.set("name", name)?;
+                        out.push(obj);
+                    }
+                    Ok(out)
+                },
+            )?,
+        )?;
+    }
+    Ok(())
+}
+
 fn install_misc<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>, side: Side) -> rquickjs::Result<()> {
     let globals = ctx.globals();
     globals.set(
@@ -331,4 +399,89 @@ fn resource_root(rt: &JsRuntime, ctx: &Ctx<'_>, name: &str) -> rquickjs::Result<
         return Ok(Some(rt.root.clone()));
     }
     Ok(rt.host(ctx)?.resource_path(name))
+}
+
+struct ConvarListener {
+    cookie: i64,
+    filter: String,
+    func: Persistent<Function<'static>>,
+}
+
+#[derive(Default)]
+pub(crate) struct ConvarListeners {
+    listeners: Vec<ConvarListener>,
+    last_cookie: i64,
+}
+
+impl ConvarListeners {
+    fn add<'js>(&mut self, ctx: &Ctx<'js>, filter: String, func: Function<'js>) -> i64 {
+        self.last_cookie += 1;
+        let cookie = self.last_cookie;
+        self.listeners.push(ConvarListener {
+            cookie,
+            filter,
+            func: Persistent::save(ctx, func),
+        });
+        cookie
+    }
+
+    fn remove(&mut self, cookie: i64) -> Option<Persistent<Function<'static>>> {
+        let idx = self.listeners.iter().position(|l| l.cookie == cookie)?;
+        Some(self.listeners.remove(idx).func)
+    }
+
+    fn matching(&self, name: &str) -> Vec<Persistent<Function<'static>>> {
+        self.listeners
+            .iter()
+            .filter(|l| convar_filter_matches(&l.filter, name))
+            .map(|l| l.func.clone())
+            .collect()
+    }
+}
+
+impl JsRuntime {
+    pub(crate) fn dispatch_convar_change(&self, name: &str, value: Option<&str>, replicated: bool) {
+        if self.in_ctx.get() {
+            self.pending_convar_changes.borrow_mut().push_back((
+                name.to_owned(),
+                value.map(str::to_owned),
+                replicated,
+            ));
+            return;
+        }
+        self.with_ctx(|ctx| {
+            self.dispatch_convar_change_in_ctx(ctx, name);
+        });
+    }
+
+    fn dispatch_convar_change_in_ctx(&self, ctx: &Ctx<'_>, name: &str) {
+        let functions = self.convar_listeners.borrow().matching(name);
+        if functions.is_empty() {
+            return;
+        }
+        let outer_source = self.current_source.get();
+        let outer_invoker = self.current_invoker();
+
+        for func in functions {
+            let _budget = self.enter_budget(CALLBACK_BUDGET);
+            let outcome = (|| -> Result<(), sixm_core::ScriptError> {
+                let func = func
+                    .restore(ctx)
+                    .map_err(|err| crate::runtime::js_err(ctx, err))?;
+                catch_script(ctx, func.call::<_, ()>((name, "")))
+            })();
+            if let Err(err) = outcome {
+                tracing::error!(
+                    target: "sixm::script",
+                    "[{}] convar change of `{name}`: {err}",
+                    self.resource
+                );
+            }
+            self.drain_jobs();
+        }
+
+        let _ = Self::set_source_global(ctx, outer_source);
+        *self.current_invoker.borrow_mut() = outer_invoker;
+        self.current_source.set(outer_source);
+    }
 }

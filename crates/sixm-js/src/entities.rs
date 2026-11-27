@@ -6,7 +6,8 @@ use std::rc::Weak;
 use rquickjs::function::{Flat, Opt};
 use rquickjs::{Ctx, Exception, Function, Object, Value as JsValue};
 use sixm_core::{
-    EntityAttachment, EntityInfo, EntityKind, EntityState, entity_bag, entity_of_bag, joaat,
+    EntityAttachment, EntityInfo, EntityKind, EntityState, entity_bag, entity_of_bag,
+    euler_to_quat, joaat, quat_to_euler,
 };
 
 use crate::client::client;
@@ -70,6 +71,18 @@ fn install_entity_queries<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquick
             },
         )?
     };
+    let quaternion = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, entity: JsValue<'js>| -> rquickjs::Result<Vec<f64>> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                let [w, x, y, z] = existing(&rt, &ctx, &entity)?
+                    .map_or([0.0; 4], |(_, info)| euler_to_quat(info.rotation));
+                Ok(vec![f64::from(x), f64::from(y), f64::from(z), f64::from(w)])
+            },
+        )?
+    };
     let model = {
         let weak = weak.clone();
         Function::new(
@@ -97,6 +110,7 @@ fn install_entity_queries<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquick
         ("GetEntityCoords", coords),
         ("GetEntityHeading", heading),
         ("GetEntityRotation", rotation),
+        ("GetEntityQuaternion", quaternion),
         ("GetEntityModel", model),
         ("GetEntityType", entity_type),
     ] {
@@ -175,6 +189,19 @@ fn install_entity_meta<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs:
             },
         )?
     };
+    let entity_script = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, entity: JsValue<'js>| -> rquickjs::Result<Option<String>> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                let Some(id) = entity_id(&entity) else {
+                    return Ok(None);
+                };
+                Ok(rt.host(&ctx)?.entity_script(id))
+            },
+        )?
+    };
     for (name, func) in [
         ("NetworkGetNetworkIdFromEntity", network_id),
         ("NetworkGetEntityFromNetworkId", entity_from_net_id),
@@ -182,6 +209,7 @@ fn install_entity_meta<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs:
         ("GetEntityFromStateBagName", entity_from_bag),
         ("Entity", entity_obj),
         ("NetworkGetEntityOwner", owner),
+        ("GetEntityScript", entity_script),
     ] {
         globals.set(name, func)?;
     }
@@ -663,11 +691,40 @@ fn movement_functions<'js>(
             },
         )?
     };
+    let set_quaternion = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>,
+                  entity: JsValue<'js>,
+                  x: JsValue<'js>,
+                  y: JsValue<'js>,
+                  z: JsValue<'js>,
+                  w: JsValue<'js>|
+                  -> rquickjs::Result<()> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                let q = [
+                    real(&ctx, &w, "w")?,
+                    real(&ctx, &x, "x")?,
+                    real(&ctx, &y, "y")?,
+                    real(&ctx, &z, "z")?,
+                ];
+                move_entity(
+                    &rt,
+                    &ctx,
+                    &entity,
+                    Transform::Rotation(quat_to_euler(q)),
+                    apply,
+                )
+            },
+        )?
+    };
     Ok(vec![
         ("SetEntityCoords", set_coords),
         ("SetEntityCoordsNoOffset", set_coords_no_offset),
         ("SetEntityHeading", set_heading),
         ("SetEntityRotation", set_rotation),
+        ("SetEntityQuaternion", set_quaternion),
     ])
 }
 
@@ -715,9 +772,45 @@ fn server_owner_functions<'js>(
             },
         )?
     };
+    let first_owner = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, entity: JsValue<'js>| -> rquickjs::Result<i64> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                let Some(id) = entity_id(&entity) else {
+                    return Ok(-1);
+                };
+                Ok(server(&ctx, &*rt.host(&ctx)?)?
+                    .entity_first_owner(id)
+                    .map_or(-1, i64::from))
+            },
+        )?
+    };
+    let set_cull_radius = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>,
+                  entity: JsValue<'js>,
+                  radius: JsValue<'js>|
+                  -> rquickjs::Result<()> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                let radius = real(&ctx, &radius, "radius")?;
+                let Some(id) = existing_id(&rt, &ctx, &entity)? else {
+                    return Ok(());
+                };
+                server(&ctx, &*rt.host(&ctx)?)?
+                    .set_entity_cull_radius(id, radius)
+                    .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))
+            },
+        )?
+    };
     Ok(vec![
         ("SetEntityOwner", set_owner),
         ("SetEntityOrphanMode", orphan_mode),
+        ("NetworkGetFirstEntityOwner", first_owner),
+        ("SetEntityDistanceCullingRadius", set_cull_radius),
     ])
 }
 
@@ -1194,9 +1287,11 @@ fn spawn(
         owner: None,
     };
     let host = rt.host(ctx)?;
-    let id = server(ctx, &*host)?
+    let srv = server(ctx, &*host)?;
+    let id = srv
         .create_entity(info)
         .map_err(|err| Exception::throw_message(ctx, &err.to_string()))?;
+    srv.set_entity_script(id, rt.resource.as_ref());
     Ok(i64::from(id))
 }
 
@@ -1216,9 +1311,12 @@ fn client_spawn(
         ));
     }
     let model = model_of(ctx, model)?;
-    let id = client(ctx, &*rt.host(ctx)?)?
+    let host = rt.host(ctx)?;
+    let cli = client(ctx, &*host)?;
+    let id = cli
         .create_network_entity(kind, model, position, rotation)
         .map_err(|err| Exception::throw_message(ctx, &err.to_string()))?;
+    cli.set_entity_script(id, rt.resource.as_ref());
     Ok(i64::from(id))
 }
 

@@ -154,6 +154,7 @@ impl fmt::Display for Shown<'_> {
             Value::Vector2(components) => write_vector(f, "vector2", components),
             Value::Vector3(components) => write_vector(f, "vector3", components),
             Value::Vector4(components) => write_vector(f, "vector4", components),
+            Value::Quat(components) => write_vector(f, "quat", components),
             Value::FuncRef(_) => f.write_str("<function>"),
         }
     }

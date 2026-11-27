@@ -54,19 +54,31 @@ impl Convars {
 
     /// Applies the convars the server sent, as `(name, value)`. A `None` value
     /// means the server no longer replicates the convar, so the client forgets
-    /// it and reads the local value again.
-    pub(crate) fn apply_replicated(&mut self, entries: Vec<(String, Option<String>)>) {
+    /// it and reads the local value again. Returns `(key, effective_value, replicated)`
+    /// for each convar whose effective value changed.
+    pub(crate) fn apply_replicated(
+        &mut self,
+        entries: Vec<(String, Option<String>)>,
+    ) -> Vec<(String, Option<String>, bool)> {
+        let mut changed = Vec::new();
         for (name, value) in entries {
             let key = name.to_ascii_lowercase();
+            let prev = self.get(&key).map(str::to_owned);
+            let is_replicated = value.is_some();
             match value {
                 Some(value) => {
-                    self.replicated.insert(key, value);
+                    self.replicated.insert(key.clone(), value);
                 }
                 None => {
                     self.replicated.remove(&key);
                 }
             }
+            let next = self.get(&key).map(str::to_owned);
+            if prev != next {
+                changed.push((key, next, is_replicated));
+            }
         }
+        changed
     }
 
     /// Frames per second, clamped to `1..=1000`.

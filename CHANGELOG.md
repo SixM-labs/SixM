@@ -7,6 +7,14 @@ may change the protocol and the API.
 
 ## [Unreleased]
 
+### Added
+
+- FiveM scripting compatibility (`PROTOCOL_VERSION` 14):
+  - Lua compile-time backtick JOAAT hash literals (`` `adder` ``) with comment/string awareness and line-number preservation.
+  - `quat(w, x, y, z)` (`Value::Quat`) across Lua, JavaScript, exports/state bags/network, plus `GetEntityQuaternion` and `SetEntityQuaternion`.
+  - Convar change listeners (`AddConvarChangeListener` with `*`/`?` glob filtering and `RemoveConvarChangeListener`) on server and client.
+  - CFX and OneSync natives on Lua & JS: `GetRegisteredCommands`, `StartResource`/`StopResource` (server, ACE-gated via `resource.<caller>`), `GetEntityScript`, `NetworkGetFirstEntityOwner`, `SetEntityDistanceCullingRadius`, `GetPlayerLastMsg`, `GetNumPlayerTokens`, and `GetPlayerToken`.
+
 ## [0.1.0]
 
 First release. There is no GTA VI game client yet (waiting on a PC release);

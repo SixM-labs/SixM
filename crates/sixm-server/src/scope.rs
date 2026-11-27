@@ -402,7 +402,9 @@ impl ResourceManager {
             }
             return;
         }
-        let limit = scopes.radius * scopes.radius;
+        let limit = entities
+            .cull_radius(id)
+            .map_or(scopes.radius * scopes.radius, |r| r * r);
         for (&player, scope) in &mut scopes.players {
             if bucket_in(&scopes.buckets, player) != bucket {
                 continue;
@@ -556,7 +558,7 @@ impl ResourceManager {
         let mut guard = self.scopes.borrow_mut();
         let scopes = &mut *guard;
         let mut entities = self.entities.borrow_mut();
-        let all_dirty = scopes.all_dirty;
+        let all_dirty = scopes.all_dirty || entities.has_custom_cull_dirty();
         scopes.all_dirty = false;
         let has_dirty_owners = entities.has_dirty_owners();
         for (&player, scope) in &mut scopes.players {

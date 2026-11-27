@@ -6,6 +6,7 @@ use std::rc::Weak;
 
 use rquickjs::{Ctx, Exception, Function, IntoJs, Value as JsValue};
 
+use crate::players::server;
 use crate::runtime::JsRuntime;
 
 pub(crate) fn install<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::Result<()> {
@@ -104,6 +105,37 @@ pub(crate) fn install<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::
         )?;
     }
 
+    Ok(())
+}
+
+pub(crate) fn install_server<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::Result<()> {
+    let globals = ctx.globals();
+    {
+        let weak = weak.clone();
+        globals.set(
+            "StartResource",
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'js>, name: String| -> rquickjs::Result<bool> {
+                    let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                    Ok(server(&ctx, &*rt.host(&ctx)?)?.start_resource(rt.resource.as_ref(), &name))
+                },
+            )?,
+        )?;
+    }
+    {
+        let weak = weak.clone();
+        globals.set(
+            "StopResource",
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'js>, name: String| -> rquickjs::Result<bool> {
+                    let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                    Ok(server(&ctx, &*rt.host(&ctx)?)?.stop_resource(rt.resource.as_ref(), &name))
+                },
+            )?,
+        )?;
+    }
     Ok(())
 }
 

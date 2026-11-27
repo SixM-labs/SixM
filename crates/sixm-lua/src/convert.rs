@@ -5,7 +5,7 @@ use sixm_core::{FuncRef, ScriptError, Value};
 
 use crate::refs::FuncHandle;
 use crate::runtime::{IntoScriptResult, LuaRuntime, lua_err};
-use crate::vector::Vector;
+use crate::vector::{Quat, Vector};
 
 /// Whether functions may be converted into references.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -98,6 +98,9 @@ impl LuaRuntime {
             LuaValue::UserData(data) if data.is::<Vector>() => {
                 data.borrow::<Vector>().into_script()?.to_value()
             }
+            LuaValue::UserData(data) if data.is::<Quat>() => {
+                data.borrow::<Quat>().into_script()?.to_value()
+            }
             LuaValue::Function(_) | LuaValue::UserData(_) if functions == Functions::Refuse => {
                 return Err(ScriptError::Runtime(
                     "functions cannot be sent over the network".to_owned(),
@@ -189,6 +192,9 @@ impl LuaRuntime {
             }
             Value::Vector4(components) => {
                 LuaValue::UserData(self.lua.create_userdata(Vector::new(*components))?)
+            }
+            Value::Quat(components) => {
+                LuaValue::UserData(self.lua.create_userdata(Quat::new(*components))?)
             }
             Value::FuncRef(func) => self.lua_function(func)?,
         })

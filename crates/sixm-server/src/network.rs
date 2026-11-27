@@ -76,6 +76,10 @@ pub(crate) struct Player {
     /// The player's own ped, created when it is admitted and deleted when it
     /// leaves.
     ped: Option<u32>,
+    /// When the last message arrived from this player.
+    last_msg: Instant,
+    /// Deterministic client tokens derived from the player's TLS certificate fingerprint.
+    tokens: Vec<String>,
 }
 
 impl Player {
@@ -93,6 +97,7 @@ impl Player {
             .iter()
             .map(|identifier| format!("identifier.{identifier}"))
             .collect();
+        let tokens = vec![format!("0:{fingerprint}")];
         Self {
             name: name.to_owned(),
             endpoint,
@@ -103,6 +108,8 @@ impl Player {
             deferral: None,
             functions: Vec::new(),
             ped: None,
+            last_msg: Instant::now(),
+            tokens,
         }
     }
 }
@@ -318,9 +325,16 @@ impl ResourceManager {
                 endpoint,
                 fingerprint,
             } => self.connecting(connection, &name, endpoint, fingerprint),
-            NetEvent::Event { player, name, args } => self.player_event(player, &name, &args),
-            NetEvent::Command { player, line } => self.player_command(player, &line),
+            NetEvent::Event { player, name, args } => {
+                self.touch_player(player);
+                self.player_event(player, &name, &args);
+            }
+            NetEvent::Command { player, line } => {
+                self.touch_player(player);
+                self.player_command(player, &line);
+            }
             NetEvent::EntityTransforms { player, updates } => {
+                self.touch_player(player);
                 self.player_transforms(player, &updates);
             }
             NetEvent::CreateEntity {
@@ -330,8 +344,12 @@ impl ResourceManager {
                 model,
                 position,
                 rotation,
-            } => self.client_create_entity(player, id, kind, model, position, rotation),
+            } => {
+                self.touch_player(player);
+                self.client_create_entity(player, id, kind, model, position, rotation);
+            }
             NetEvent::RequestEntityControl { player, id } => {
+                self.touch_player(player);
                 self.client_request_control(player, id);
             }
             NetEvent::Disconnected { player, reason } => self.player_dropped(player, &reason),
@@ -829,6 +847,29 @@ impl ResourceManager {
     pub(crate) fn player_round_trip(&self, player: u32) -> Option<Duration> {
         let id = self.network.players.borrow().get(player)?.connection;
         self.network.server.borrow().as_ref()?.connection_ping(id)
+    }
+
+    fn touch_player(&self, player: u32) {
+        if let Some(found) = self.network.players.borrow_mut().get_mut(player) {
+            found.last_msg = Instant::now();
+        }
+    }
+
+    pub(crate) fn player_last_message(&self, player: u32) -> Option<Duration> {
+        self.network
+            .players
+            .borrow()
+            .get(player)
+            .map(|found| Instant::now().saturating_duration_since(found.last_msg))
+    }
+
+    pub(crate) fn player_tokens_of(&self, player: u32) -> Vec<String> {
+        self.network
+            .players
+            .borrow()
+            .get(player)
+            .map(|found| found.tokens.clone())
+            .unwrap_or_default()
     }
 
     /// Server ids of the connected players, in join order.

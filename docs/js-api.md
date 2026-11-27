@@ -111,6 +111,7 @@ On the client, writes with `replicated = true` throw an error.
 | `vector2(x, y)` / `Vector2(x, y)` | Mutable `vec2` proxy |
 | `vector3(x, y, z)` / `Vector3(x, y, z)` | Mutable `vec3` proxy |
 | `vector4(x, y, z, w)` / `Vector4(x, y, z, w)` | Mutable `vec4` proxy |
+| `quat(w, x, y, z)` | Mutable quaternion proxy (`[w, x, y, z]`) |
 
 Vectors are 32-bit float wrappers supporting:
 
@@ -125,14 +126,16 @@ Vectors are 32-bit float wrappers supporting:
 All core utility, command, convar, resource, and KVP functions match
 [lua-api.md](lua-api.md):
 
-- **General & Commands:** `GetHashKey`, `RegisterCommand`, `ExecuteCommand`,
-  `GetConvar`, `GetConvarInt`, `GetConvarBool`, `SetConvar`,
-  `SetConvarReplicated`, `SetConvarServerInfo`.
+- **General & Commands:** `GetHashKey`, `RegisterCommand`,
+  `GetRegisteredCommands`, `ExecuteCommand`, `GetConvar`, `GetConvarInt`,
+  `GetConvarBool`, `SetConvar`, `SetConvarReplicated`, `SetConvarServerInfo`,
+  `AddConvarChangeListener`, `RemoveConvarChangeListener`.
 - **Resources:** `GetCurrentResourceName`, `GetInvokingResource` (returns `null`
   when called without a resource invoker), `GetResourceState`, `GetNumResources`,
   `GetResourceByFindIndex`, `GetResourceMetadata`, `GetNumResourceMetadata`,
   `GetResourcePath`, `LoadResourceFile` (returns `null` if missing),
-  `SaveResourceFile`.
+  `SaveResourceFile`, `StartResource` (server, ACE-gated),
+  `StopResource` (server, ACE-gated).
 - **KVP:** `GetResourceKvpString`, `GetResourceKvpInt`, `GetResourceKvpFloat`,
   `SetResourceKvp`, `SetResourceKvpInt`, `SetResourceKvpFloat`,
   `DeleteResourceKvp`, `SetResourceKvpNoSync`, `SetResourceKvpIntNoSync`,
@@ -143,13 +146,15 @@ All core utility, command, convar, resource, and KVP functions match
 ## Players, entities, routing buckets, and HTTP
 
 - **Players (server):** `getPlayers()` / `GetPlayers()`, `GetNumPlayerIndices()`,
-  `GetPlayerName`, `GetPlayerEndpoint`, `GetPlayerPing`, `GetPlayerPed`,
-  `GetPlayerIdentifiers`, `GetNumPlayerIdentifiers`, `GetPlayerIdentifier`,
-  `GetPlayerIdentifierByType`, `DropPlayer`, `IsPlayerAceAllowed`.
+  `GetPlayerName`, `GetPlayerEndpoint`, `GetPlayerPing`, `GetPlayerLastMsg`,
+  `GetPlayerPed`, `GetPlayerIdentifiers`, `GetNumPlayerIdentifiers`,
+  `GetPlayerIdentifier`, `GetPlayerIdentifierByType`, `GetNumPlayerTokens`,
+  `GetPlayerToken`, `DropPlayer`, `IsPlayerAceAllowed`.
 - **Client identity & pool:** `PlayerId()` (`0`), `GetPlayerServerId`,
   `PlayerPedId`, `GetGamePool`, `IsDuplicityVersion()`.
 - **Entities (server & shared readers):** `DoesEntityExist`, `GetEntityCoords`,
-  `GetEntityHeading`, `GetEntityRotation`, `GetEntityModel`, `GetEntityType`,
+  `GetEntityHeading`, `GetEntityRotation`, `GetEntityQuaternion`,
+  `GetEntityModel`, `GetEntityType`, `GetEntityScript`,
   `NetworkGetNetworkIdFromEntity`, `NetworkGetEntityFromNetworkId`,
   `NetworkDoesNetworkIdExist`, `NetworkGetEntityOwner`,
   `IsEntityPositionFrozen`, `GetEntityVelocity`, `GetEntityHealth`,
@@ -157,14 +162,15 @@ All core utility, command, convar, resource, and KVP functions match
   `GetEntityAttachedTo`, `IsEntityAttached`.
 - **Server-only entity control:** `CreateVehicle`, `CreateVehicleServerSetter`,
   `CreatePed`, `CreateObject`, `CreateObjectNoOffset`, `DeleteEntity`,
-  `SetEntityOwner`, `SetEntityOrphanMode`, `FreezeEntityPosition`,
+  `SetEntityOwner`, `NetworkGetFirstEntityOwner`, `SetEntityOrphanMode`,
+  `SetEntityDistanceCullingRadius`, `FreezeEntityPosition`,
   `SetEntityVelocity`, `SetEntityHealth`, `SetEntityMaxHealth`,
   `SetEntityVisible`, `SetEntityAlpha`, `ResetEntityAlpha`,
   `AttachEntityToEntity`, `DetachEntity`.
 - **Server & Client movement:** `SetEntityCoords`, `SetEntityCoordsNoOffset`,
-  `SetEntityHeading`, `SetEntityRotation`, plus client-side `CreateVehicle`,
-  `CreatePed`, `CreateObject` (`isNetwork = true`), and
-  `NetworkRequestControlOfEntity`.
+  `SetEntityHeading`, `SetEntityRotation`, `SetEntityQuaternion`, plus
+  client-side `CreateVehicle`, `CreatePed`, `CreateObject` (`isNetwork = true`),
+  and `NetworkRequestControlOfEntity`.
 - **Routing buckets (server):** `SetPlayerRoutingBucket`,
   `GetPlayerRoutingBucket`, `SetEntityRoutingBucket`, `GetEntityRoutingBucket`,
   `GetPlayersInRoutingBucket`, `SetRoutingBucketPopulationEnabled`,

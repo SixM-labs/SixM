@@ -20,6 +20,7 @@ pub(crate) fn install(ctx: &Ctx<'_>, weak: &Weak<JsRuntime>) -> rquickjs::Result
     install_event_senders(ctx, weak)?;
     install_roster(ctx, weak)?;
     install_identifiers(ctx, weak)?;
+    install_tokens_and_last_msg(ctx, weak)?;
     install_acl_and_player(ctx, weak)?;
     Ok(())
 }
@@ -167,6 +168,67 @@ fn install_identifiers<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs:
         ("GetNumPlayerIdentifiers", get_num_player_identifiers),
         ("GetPlayerIdentifier", get_player_identifier),
         ("GetPlayerIdentifierByType", get_player_identifier_by_type),
+    ] {
+        globals.set(name, func)?;
+    }
+    Ok(())
+}
+
+fn install_tokens_and_last_msg<'js>(
+    ctx: &Ctx<'js>,
+    weak: &Weak<JsRuntime>,
+) -> rquickjs::Result<()> {
+    let globals = ctx.globals();
+    let get_player_last_msg = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, player: JsValue<'js>| -> rquickjs::Result<i64> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                let Some(id) = player_id(&player) else {
+                    return Ok(-1);
+                };
+                let msg = server(&ctx, &*rt.host(&ctx)?)?.player_last_msg(id);
+                Ok(msg.map_or(-1, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX)))
+            },
+        )?
+    };
+    let get_num_player_tokens = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, player: JsValue<'js>| -> rquickjs::Result<i64> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                let Some(id) = player_id(&player) else {
+                    return Ok(0);
+                };
+                let count = server(&ctx, &*rt.host(&ctx)?)?.player_tokens(id).len();
+                i64::try_from(count).map_err(|err| Exception::throw_message(&ctx, &err.to_string()))
+            },
+        )?
+    };
+    let get_player_token = {
+        let weak = weak.clone();
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>,
+                  player: JsValue<'js>,
+                  index: JsValue<'js>|
+                  -> rquickjs::Result<Option<String>> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                let Some(id) = player_id(&player) else {
+                    return Ok(None);
+                };
+                let tokens = server(&ctx, &*rt.host(&ctx)?)?.player_tokens(id);
+                let idx = whole_number(&index).and_then(|i| usize::try_from(i).ok());
+                Ok(idx.and_then(|i| tokens.get(i).cloned()))
+            },
+        )?
+    };
+    for (name, func) in [
+        ("GetPlayerLastMsg", get_player_last_msg),
+        ("GetNumPlayerTokens", get_num_player_tokens),
+        ("GetPlayerToken", get_player_token),
     ] {
         globals.set(name, func)?;
     }

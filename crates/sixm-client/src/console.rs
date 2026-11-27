@@ -11,7 +11,7 @@ use crate::runtime::ClientRuntime;
 const MAX_QUEUED_COMMANDS: usize = 1000;
 
 /// Built-in command names, as listed by `help`.
-const BUILT_IN: [&str; 5] = ["help", "quit", "set", "setr", "sets"];
+pub(crate) const BUILT_IN: [&str; 5] = ["help", "quit", "set", "setr", "sets"];
 
 impl ClientRuntime {
     /// Runs one console line, then every command it or the scripts queued.
@@ -95,7 +95,15 @@ impl ClientRuntime {
             warn!("{name} is replicated by the server and cannot be set here");
             return;
         }
-        self.convars.borrow_mut().set(name, value);
+        let changed = {
+            let mut convars = self.convars.borrow_mut();
+            let prev = convars.get(name).map(str::to_owned);
+            convars.set(name, value);
+            prev.as_deref() != Some(value)
+        };
+        if changed {
+            self.deliver_convar_change(name, Some(value), false);
+        }
     }
 
     /// Sends a line no client command or convar claims to the server, which

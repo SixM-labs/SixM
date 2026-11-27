@@ -15,6 +15,7 @@ mod json;
 mod kvp;
 mod natives;
 mod players;
+mod preprocess;
 mod promise;
 mod refs;
 mod resources;

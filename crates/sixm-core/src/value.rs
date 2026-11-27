@@ -28,6 +28,8 @@ pub enum Value {
     Vector3([f32; 3]),
     /// `vector4` of a script.
     Vector4([f32; 4]),
+    /// `quat` of a script in `[w, x, y, z]` order.
+    Quat([f32; 4]),
     /// A callable owned by another resource (or the same one).
     FuncRef(FuncRef),
 }
@@ -56,7 +58,8 @@ impl Value {
             | Self::String(_)
             | Self::Vector2(_)
             | Self::Vector3(_)
-            | Self::Vector4(_) => false,
+            | Self::Vector4(_)
+            | Self::Quat(_) => false,
         }
     }
 }
