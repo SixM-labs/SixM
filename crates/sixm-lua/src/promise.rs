@@ -359,8 +359,11 @@ impl LuaRuntime {
                     LuaValue::Boolean(ok),
                     value,
                 ]);
-                let (slot, seq) =
-                    self.spawn(self.promise_reaction()?, self.current_source.get())?;
+                let (slot, seq) = self.spawn(
+                    self.promise_reaction()?,
+                    self.current_source.get(),
+                    self.current_invoker(),
+                )?;
                 self.schedule_wake(slot, seq, args);
                 Ok(())
             }

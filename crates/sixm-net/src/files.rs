@@ -27,6 +27,15 @@ pub const MAX_EXPORT_NAME_LEN: usize = 256;
 /// Most exports one resource declares.
 pub const MAX_EXPORTS: usize = 256;
 
+/// Most metadata pairs one resource declares.
+pub const MAX_METADATA: usize = 1024;
+
+/// Longest metadata key in bytes.
+pub const MAX_METADATA_KEY_LEN: usize = 256;
+
+/// Longest metadata value in bytes.
+pub const MAX_METADATA_VALUE_LEN: usize = 4096;
+
 /// [`FileEntry::kind`] of a file declared in `shared_scripts`.
 pub const FILE_KIND_SHARED: u8 = 0;
 
@@ -59,6 +68,9 @@ pub struct ResourceEntry {
     /// Names of the client exports the manifest declares with `export`. A global
     /// function with one of these names is callable as an export.
     pub exports: Vec<String>,
+    /// The manifest's metadata pairs, such as `("version", "1.2.0")`, in
+    /// declaration order.
+    pub metadata: Vec<(String, String)>,
 }
 
 /// A file a server advertises: its wire entry and where it is on disk.
@@ -80,6 +92,8 @@ pub struct PublishedResource {
     /// Names of the client exports the manifest declares with `export`. A global
     /// function with one of these names is callable as an export.
     pub exports: Vec<String>,
+    /// The manifest's metadata pairs, in declaration order.
+    pub metadata: Vec<(String, String)>,
 }
 
 /// Lowercase hexadecimal text of `hash`, as used in logs and cache paths.
@@ -92,8 +106,9 @@ pub fn hash_hex(hash: &FileHash) -> String {
 }
 
 /// Checks that `resources` can be advertised: names within their limits, known
-/// kinds, sizes within [`MAX_FILE_SIZE`], absolute paths and export counts
-/// within [`MAX_EXPORTS`].
+/// kinds, sizes within [`MAX_FILE_SIZE`], absolute paths, export counts within
+/// [`MAX_EXPORTS`] and metadata within [`MAX_METADATA`], [`MAX_METADATA_KEY_LEN`]
+/// and [`MAX_METADATA_VALUE_LEN`]. A metadata value may be empty.
 pub(crate) fn check_published(resources: &[PublishedResource]) -> Result<(), NetError> {
     for resource in resources {
         validate_length("resource name", &resource.name, MAX_RESOURCE_NAME_LEN)?;
@@ -107,6 +122,7 @@ pub(crate) fn check_published(resources: &[PublishedResource]) -> Result<(), Net
         for export in &resource.exports {
             validate_length("export name", export, MAX_EXPORT_NAME_LEN)?;
         }
+        check_metadata(&resource.name, &resource.metadata)?;
         for file in &resource.files {
             validate_length("file name", &file.entry.name, MAX_FILE_NAME_LEN)?;
             if file.entry.kind > FILE_KIND_FILE {
@@ -128,6 +144,31 @@ pub(crate) fn check_published(resources: &[PublishedResource]) -> Result<(), Net
                     file.path.display()
                 )));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Checks the metadata of `resource` against its limits: at most
+/// [`MAX_METADATA`] pairs, keys of 1 to [`MAX_METADATA_KEY_LEN`] bytes and
+/// values of at most [`MAX_METADATA_VALUE_LEN`] bytes.
+pub(crate) fn check_metadata(
+    resource: &str,
+    metadata: &[(String, String)],
+) -> Result<(), NetError> {
+    if metadata.len() > MAX_METADATA {
+        return Err(NetError::InvalidInput(format!(
+            "resource `{resource}` declares {} metadata pairs, more than the {MAX_METADATA} limit",
+            metadata.len()
+        )));
+    }
+    for (key, value) in metadata {
+        validate_length("metadata key", key, MAX_METADATA_KEY_LEN)?;
+        if value.len() > MAX_METADATA_VALUE_LEN {
+            return Err(NetError::InvalidInput(format!(
+                "metadata `{key}` of resource `{resource}` is {} bytes, more than the {MAX_METADATA_VALUE_LEN} byte limit",
+                value.len()
+            )));
         }
     }
     Ok(())

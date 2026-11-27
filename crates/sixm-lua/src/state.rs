@@ -204,7 +204,7 @@ impl LuaRuntime {
         let globals = self.lua.globals();
         let saved: LuaValue = globals.raw_get("source")?;
         let outcome = functions.into_iter().try_for_each(|function| {
-            let (slot, _) = self.spawn(function, EventSource::Local)?;
+            let (slot, _) = self.spawn(function, EventSource::Local, None)?;
             self.run(slot, Instant::now(), args.clone());
             Ok(())
         });

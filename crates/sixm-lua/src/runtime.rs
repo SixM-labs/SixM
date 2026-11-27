@@ -52,6 +52,9 @@ pub struct LuaRuntime {
     pub(crate) current_source: Cell<EventSource>,
     /// `(slot, sequence)` of the task being resumed, the one `Await` parks.
     pub(crate) current_task: Cell<Option<(usize, u64)>>,
+    /// Invoker of the task being resumed, `None` for host-fired work. Tasks
+    /// created while it runs inherit it, and synchronous export calls set it.
+    pub(crate) current_invoker: RefCell<Option<ResourceName>>,
     pub(crate) shut: Cell<bool>,
     pub(crate) sched: RefCell<Sched>,
     pub(crate) promises: RefCell<Promises>,
@@ -93,6 +96,7 @@ impl LuaRuntime {
             empty_string,
             current_source: Cell::new(EventSource::Local),
             current_task: Cell::new(None),
+            current_invoker: RefCell::default(),
             shut: Cell::new(false),
             sched: RefCell::default(),
             promises: RefCell::default(),
@@ -123,7 +127,7 @@ impl LuaRuntime {
             .set_name(chunk_name)
             .into_function()
             .into_script()?;
-        let (slot, _) = self.spawn(main, EventSource::Local).into_script()?;
+        let (slot, _) = self.spawn(main, EventSource::Local, None).into_script()?;
         self.run(slot, Instant::now(), MultiValue::new());
         Ok(())
     }
@@ -245,9 +249,14 @@ impl ScriptRuntime for LuaRuntime {
         }
     }
 
-    fn call_export(&self, export: &str, args: &[Value]) -> Result<Vec<Value>, ScriptError> {
+    fn call_export(
+        &self,
+        export: &str,
+        args: &[Value],
+        invoker: Option<&ResourceName>,
+    ) -> Result<Vec<Value>, ScriptError> {
         self.ensure_running()?;
-        self.invoke_export(export, args)
+        self.invoke_export(export, args, invoker)
     }
 
     fn call_ref(&self, id: u32, args: &[Value]) -> Result<Vec<Value>, ScriptError> {

@@ -75,7 +75,7 @@ fn json_encodes_arrays_maps_and_numbers() {
     );
     assert_eq!(encode(Value::Float(1.5)).as_deref(), Some("1.5"));
     assert!(matches!(
-        rt.call_export("enc", &[Value::Float(f64::NAN)]),
+        rt.call_export("enc", &[Value::Float(f64::NAN)], None),
         Err(ScriptError::Runtime(message)) if message.contains("NaN")
     ));
 }
@@ -103,7 +103,7 @@ fn json_decodes_and_keeps_integers() {
     )));
     assert!(pairs.contains(&(Value::from("b"), Value::Int(3))));
     assert_eq!(text(&rt, "number"), "integer");
-    assert!(rt.call_export("dec", &[Value::from("{")]).is_err());
+    assert!(rt.call_export("dec", &[Value::from("{")], None).is_err());
 }
 
 #[test]

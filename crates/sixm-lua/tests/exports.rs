@@ -49,7 +49,7 @@ fn a_missing_export_is_no_such_export() {
     let host = new_host();
     let rt = start(&host, "lonely", &[], &[("main.lua", "")]);
     assert!(matches!(
-        rt.call_export("nothing", &[]),
+        rt.call_export("nothing", &[], None),
         Err(ScriptError::NoSuchExport { .. })
     ));
 }
@@ -64,7 +64,8 @@ fn a_declared_global_function_is_callable_as_an_export() {
         &[("main.lua", "function double(x) return x * 2 end\n")],
     );
     assert_eq!(
-        rt.call_export("double", &[Value::Int(21)]).expect("double"),
+        rt.call_export("double", &[Value::Int(21)], None)
+            .expect("double"),
         vec![Value::Int(42)]
     );
 }
@@ -96,13 +97,13 @@ fn a_callback_passed_across_resources_is_called_and_released() {
 
     assert_eq!(
         provider
-            .call_export("fire", &[Value::Int(21)])
+            .call_export("fire", &[Value::Int(21)], None)
             .expect("fire"),
         vec![Value::Int(42)]
     );
 
     assert!(host.released.borrow().is_empty());
-    provider.call_export("drop", &[]).expect("drop");
+    provider.call_export("drop", &[], None).expect("drop");
     let released = host.released.borrow().clone();
     assert_eq!(
         released.len(),
@@ -114,7 +115,7 @@ fn a_callback_passed_across_resources_is_called_and_released() {
     // Unretained references are freed at the owner's next frame.
     tick(&host, Instant::now());
     let owner = host
-        .call_export("owner", "missing", &[])
+        .call_export("owner", "missing", &[], None)
         .expect_err("owner has no exports");
     assert!(matches!(owner, ScriptError::NoSuchExport { .. }));
     assert!(matches!(
@@ -141,7 +142,7 @@ fn values_nested_too_deep_are_rejected() {
         )],
     );
     assert!(matches!(
-        rt.call_export("deep", &[]),
+        rt.call_export("deep", &[], None),
         Err(ScriptError::TooDeep(64))
     ));
 }
@@ -158,7 +159,7 @@ fn threads_cannot_cross_resources() {
             "exports('co', function() return coroutine.create(function() end) end)\n",
         )],
     );
-    match rt.call_export("co", &[]) {
+    match rt.call_export("co", &[], None) {
         Err(ScriptError::Runtime(message)) => {
             assert!(message.contains("cannot pass a thread value"), "{message}");
         }
@@ -187,16 +188,16 @@ fn a_callback_held_by_two_resources_survives_one_release() {
         )],
     );
 
-    first_holder.call_export("drop", &[]).expect("drop");
+    first_holder.call_export("drop", &[], None).expect("drop");
     tick(&host, Instant::now());
     assert_eq!(
         second_holder
-            .call_export("fire", &[Value::Int(1)])
+            .call_export("fire", &[Value::Int(1)], None)
             .expect("the second holder still owns a retain"),
         vec![Value::Int(2)]
     );
 
-    second_holder.call_export("drop", &[]).expect("drop");
+    second_holder.call_export("drop", &[], None).expect("drop");
     tick(&host, Instant::now());
     let released = host.released.borrow().clone();
     assert_eq!(released.len(), 2);
@@ -228,8 +229,8 @@ fn an_unkept_callback_is_freed_at_the_owners_next_frame() {
             "function send() exports.sink.ignore(function() end) end\n",
         )],
     );
-    owner.call_export("send", &[]).expect("send");
-    sink.call_export("gc", &[]).expect("gc");
+    owner.call_export("send", &[], None).expect("send");
+    sink.call_export("gc", &[], None).expect("gc");
     let sent = sixm_core::FuncRef {
         owner: owner.resource().clone(),
         instance: owner.instance(),

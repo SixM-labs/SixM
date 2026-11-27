@@ -26,8 +26,8 @@ pub use entity::{EntityInfo, EntityKind, MAX_ENTITIES, entity_bag, entity_of_bag
 pub use files::normalize_resource_path;
 pub use hash::joaat;
 pub use runtime::{
-    ClientHost, ClientTarget, EventContext, EventSource, Host, PlayerInfo, ScriptError,
-    ScriptRuntime, ServerHost,
+    ClientHost, ClientTarget, EventContext, EventSource, Host, PlayerInfo, ResourceState,
+    ScriptError, ScriptRuntime, ServerHost,
 };
 pub use state::{GLOBAL_BAG, MAX_STATE_NAME_LEN, player_bag, player_of_bag};
 pub use value::{FuncRef, ResourceName, Value};

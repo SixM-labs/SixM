@@ -354,7 +354,7 @@ fn await_outside_a_task_raises_an_error() {
         )],
     );
     let err = rt
-        .call_export("try", &[])
+        .call_export("try", &[], None)
         .expect_err("Await outside a task must fail");
     assert!(
         err.to_string()
@@ -492,7 +492,7 @@ fn a_promise_cannot_cross_an_export() {
         )],
     );
     let err = sender
-        .call_export("send", &[])
+        .call_export("send", &[], None)
         .expect_err("a promise must not cross an export");
     assert!(
         err.to_string().contains("cannot pass a userdata value"),

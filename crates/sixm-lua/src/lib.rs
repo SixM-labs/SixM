@@ -15,6 +15,7 @@ mod natives;
 mod players;
 mod promise;
 mod refs;
+mod resources;
 mod runtime;
 mod sandbox;
 mod scheduler;

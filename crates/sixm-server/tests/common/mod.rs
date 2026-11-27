@@ -61,7 +61,7 @@ impl Fixture {
     pub fn text(&self, resource: &str, export: &str) -> String {
         let values = self
             .manager()
-            .call_export(resource, export, &[])
+            .call_export(resource, export, &[], None)
             .unwrap_or_else(|err| panic!("export `{export}` of `{resource}`: {err}"));
         match values.first() {
             Some(sixm_core::Value::String(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
