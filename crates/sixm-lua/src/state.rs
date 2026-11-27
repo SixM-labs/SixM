@@ -8,7 +8,7 @@ use std::rc::Weak;
 use std::time::Instant;
 
 use mlua::{
-    AnyUserData, Function, Lua, MetaMethod, MultiValue, Table, UserData, UserDataMethods,
+    AnyUserData, FromLua, Function, Lua, MetaMethod, MultiValue, Table, UserData, UserDataMethods,
     Value as LuaValue,
 };
 use sixm_core::{EventSource, GLOBAL_BAG, Value, player_of_bag};
@@ -126,6 +126,33 @@ fn write(
         .map_err(lua_err)
 }
 
+/// The FiveM form of `SetStateBagValue`: `value` is msgpack bytes and only its
+/// first `length` bytes are decoded. The decoded value is stored like any write.
+fn write_packed(
+    runtime: &LuaRuntime,
+    bag: &str,
+    key: &str,
+    value: &LuaValue,
+    length: i64,
+    replicated: bool,
+) -> mlua::Result<()> {
+    let LuaValue::String(text) = value else {
+        return Err(mlua::Error::runtime(
+            "SetStateBagValue: valueData must be a msgpack string",
+        ));
+    };
+    let data = text.as_bytes();
+    let len = usize::try_from(length)
+        .ok()
+        .filter(|len| *len <= data.len())
+        .ok_or_else(|| mlua::Error::runtime("SetStateBagValue: valueLength exceeds data"))?;
+    let decoded = sixm_core::msgpack::unpack(&data[..len]).map_err(lua_err)?;
+    runtime
+        .host()?
+        .state_set(bag, key, decoded, replicated)
+        .map_err(lua_err)
+}
+
 /// A handle to `bag` for `runtime`.
 pub(crate) fn state_bag(runtime: &LuaRuntime, bag: &str) -> mlua::Result<AnyUserData> {
     runtime.lua.create_userdata(StateBag {
@@ -135,8 +162,13 @@ pub(crate) fn state_bag(runtime: &LuaRuntime, bag: &str) -> mlua::Result<AnyUser
 }
 
 /// Installs `GlobalState`, `AddStateBagChangeHandler`,
-/// `RemoveStateBagChangeHandler` and `GetPlayerFromStateBagName`. These exist on
-/// both sides. `Player(id)` is server-only and lives in `players`.
+/// `RemoveStateBagChangeHandler`, `GetPlayerFromStateBagName` and the FiveM
+/// name-based natives `GetStateBagValue`, `StateBagHasKey`, `GetStateBagKeys`,
+/// `SetStateBagValue` and `EnsureEntityStateBag`. These exist on both sides.
+/// `Player(id)` is server-only and lives in `players`.
+///
+/// `EnsureEntityStateBag` does nothing: an entity's bag exists for the whole
+/// life of the entity, so it is accepted for compatibility only.
 pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::Result<()> {
     let global = lua.create_userdata(StateBag {
         bag: GLOBAL_BAG.to_owned(),
@@ -157,11 +189,46 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
     let player_from_bag = bind_fn(lua, weak, |_, (bag,): (String,)| {
         Ok(i64::from(player_of_bag(&bag).unwrap_or(0)))
     })?;
+    let get_value = bind_fn(lua, weak, |rt, (bag, key): (String, String)| {
+        match rt.host()?.state_get(&bag, &key) {
+            Some(value) => rt.to_lua(&value),
+            None => Ok(LuaValue::Nil),
+        }
+    })?;
+    let has_key = bind_fn(lua, weak, |rt, (bag, key): (String, String)| {
+        Ok(rt.host()?.state_get(&bag, &key).is_some())
+    })?;
+    let get_keys = bind_fn(lua, weak, |rt, (bag,): (String,)| {
+        rt.host()?
+            .state_keys(&bag)
+            .map(|keys| rt.lua.create_sequence_from(keys))
+            .transpose()
+    })?;
+    let set_value = bind_fn(
+        lua,
+        weak,
+        |rt, (bag, key, value, fourth, fifth): (String, String, LuaValue, LuaValue, LuaValue)| {
+            if let LuaValue::Integer(length) = fourth
+                && !fifth.is_nil()
+            {
+                let replicated = bool::from_lua(fifth, &rt.lua)?;
+                return write_packed(rt, &bag, &key, &value, length, replicated);
+            }
+            let replicated = bool::from_lua(fourth, &rt.lua)?;
+            write(rt, &bag, &key, &value, replicated)
+        },
+    )?;
+    let ensure_entity = bind_fn(lua, weak, |_, (_entity,): (i64,)| Ok(()))?;
 
     globals.raw_set("GlobalState", global)?;
     globals.raw_set("AddStateBagChangeHandler", add_change_handler)?;
     globals.raw_set("RemoveStateBagChangeHandler", remove_change_handler)?;
     globals.raw_set("GetPlayerFromStateBagName", player_from_bag)?;
+    globals.raw_set("GetStateBagValue", get_value)?;
+    globals.raw_set("StateBagHasKey", has_key)?;
+    globals.raw_set("GetStateBagKeys", get_keys)?;
+    globals.raw_set("SetStateBagValue", set_value)?;
+    globals.raw_set("EnsureEntityStateBag", ensure_entity)?;
     Ok(())
 }
 

@@ -521,3 +521,139 @@ fn quat_supports_arithmetic_rotation_json_and_cross_resource_values() {
     assert_eq!(res[4], Value::Float(0.0));
     assert_eq!(res[5], Value::Nil); // TestHost uses default EntityStoreless Host::entity_script
 }
+
+/// Runs `body` and returns the message of each error it raises. Lua's
+/// `runtime error:` prefix and the traceback are removed.
+fn errors(body: &str) -> Vec<String> {
+    lines(body)
+        .into_iter()
+        .map(|text| {
+            let message = text.split("\nstack traceback").next().unwrap_or_default();
+            message.trim_start_matches("runtime error: ").to_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn vector_picks_its_size_from_the_argument_count() {
+    assert_eq!(
+        lines(
+            "return type(vector(1, 2)), type(vector(1, 2, 3)), \
+             type(vector(vector2(1, 2), 3, 4))"
+        ),
+        ["vector2", "vector3", "vector4"]
+    );
+    assert_eq!(
+        errors(
+            "local _, e1 = pcall(vector, 1)\n\
+             local _, e2 = pcall(vector, 1, 2, 3, 4, 5)\n\
+             local _, e3 = pcall(vector, 'a')\n\
+             return e1, e2, e3"
+        ),
+        [
+            "vector: expected 2 to 4 components, got 1",
+            "vector: expected 2 to 4 components, got 5",
+            "vector: expected numbers or vectors, got string",
+        ]
+    );
+}
+
+#[test]
+fn dot_multiplies_components_and_needs_equal_sizes() {
+    assert_eq!(
+        run("return dot(vector3(1, 2, 3), vector3(4, 5, 6)), dot(vec2(1, 0), vec2(0, 1))"),
+        vec![Value::Float(32.0), Value::Float(0.0)]
+    );
+    assert_eq!(
+        errors(
+            "local _, e1 = pcall(dot, vector2(1, 2), vector3(1, 2, 3))\n\
+             local _, e2 = pcall(dot, 1, 2)\n\
+             return e1, e2"
+        ),
+        [
+            "dot: expected two vectors of the same size, got vector2 and vector3",
+            "dot: expected two vectors of the same size, got number and number",
+        ]
+    );
+}
+
+#[test]
+fn cross_is_the_vector3_product() {
+    assert_eq!(
+        lines("return tostring(cross(vector3(1, 0, 0), vector3(0, 1, 0)))"),
+        ["vector3(0.0, 0.0, 1.0)"]
+    );
+    assert_eq!(
+        errors("local _, e = pcall(cross, vec2(1, 0), vec2(0, 1))\nreturn e"),
+        ["cross: expected two vector3, got vector2 and vector2"]
+    );
+}
+
+#[test]
+fn norm_scales_to_length_one_and_keeps_zero() {
+    assert_eq!(
+        lines("return tostring(norm(vector3(3, 0, 4))), tostring(norm(vector3(0)))"),
+        ["vector3(0.6, 0.0, 0.8)", "vector3(0.0, 0.0, 0.0)"]
+    );
+    assert_eq!(
+        errors("local _, e = pcall(norm, 5)\nreturn e"),
+        ["norm: expected a vector or quat, got number"]
+    );
+    assert_eq!(
+        run("return #norm(quat(2, 0, 0, 0))"),
+        vec![Value::Float(1.0)]
+    );
+}
+
+#[test]
+fn inv_inverts_a_quat() {
+    assert_eq!(
+        run("local q = quat(0.5, 0.5, 0.5, 0.5)\n\
+             local r = q * inv(q)\n\
+             return r.w, r.x"),
+        vec![Value::Float(1.0), Value::Float(0.0)]
+    );
+    assert_eq!(
+        errors(
+            "local _, e1 = pcall(inv, quat(0, 0, 0, 0))\n\
+             local _, e2 = pcall(inv, vector3(1))\n\
+             return e1, e2"
+        ),
+        [
+            "inv: quat has zero length",
+            "inv: expected a quat, got vector3",
+        ]
+    );
+}
+
+#[test]
+fn slerp_interpolates_quats() {
+    assert_eq!(
+        run("local a, b = quat(1, 0, 0, 0), quat(0, 0, 0, 1)\n\
+             local near = math.abs(slerp(a, b, 0.5).w - 0.70710678) < 1e-6\n\
+             return slerp(a, b, 0.0).w, slerp(a, b, 1.0).z, near"),
+        vec![Value::Float(1.0), Value::Float(1.0), Value::Bool(true)]
+    );
+    assert_eq!(
+        errors("local _, e = pcall(slerp, 1, 2, 3)\nreturn e"),
+        ["slerp: expected (quat, quat, number), got number, number and number"]
+    );
+}
+
+#[test]
+fn vector_helpers_exist_on_the_client() {
+    let client = new_client_host(1);
+    let rt: Rc<LuaRuntime> = start(
+        &client,
+        "client",
+        &["helpers"],
+        &[(
+            "main.lua",
+            "exports('helpers', function() return type(dot), type(vector) end)\n",
+        )],
+    );
+    assert_eq!(
+        call(&rt, "helpers", &[]),
+        vec![Value::from("function"), Value::from("function")]
+    );
+}

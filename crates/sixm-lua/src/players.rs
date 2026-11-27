@@ -1,5 +1,6 @@
 //! Server-only player functions: client events, the connected-player list,
-//! names, endpoints, identifiers, drops, access control checks and `Player(id)`.
+//! names, endpoints, identifiers, connection info, drops, access control checks
+//! and `Player(id)`.
 
 use std::rc::Weak;
 
@@ -17,8 +18,9 @@ const DEFAULT_DROP_REASON: &str = "Dropped by server";
 const EXACT_FLOAT_LIMIT: f64 = 9_007_199_254_740_992.0;
 
 /// Installs `TriggerClientEvent`, `GetPlayers`, `GetNumPlayerIndices`, `DoesPlayerExist`,
-/// `GetPlayerName`, `GetPlayerPed`, `GetPlayerEndpoint`, the identifier functions, `DropPlayer`,
-/// `IsPlayerAceAllowed`, `IsPrincipalAceAllowed` and `Player`. Only server
+/// `GetPlayerName`, `GetPlayerPed`, `GetPlayerEndpoint`, the identifier functions,
+/// `GetPlayerGuid`, `GetPlayerTimeOnline`, `GetPlayerFromIndex`, `GetHostId`, `DropPlayer`,
+/// `IsAceAllowed`, `IsPlayerAceAllowed`, `IsPrincipalAceAllowed` and `Player`. Only server
 /// runtimes call this.
 pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::Result<()> {
     install_event_senders(lua, weak, globals)?;
@@ -78,7 +80,7 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
         |rt, (player, reason): (LuaValue, Option<String>)| {
             let id = player_id(&player).ok_or_else(|| invalid_player("DropPlayer"))?;
             let reason = reason.as_deref().unwrap_or(DEFAULT_DROP_REASON);
-            server(&*rt.host()?)?.drop_player(id, reason);
+            server(&*rt.host()?)?.drop_player(id, reason, &rt.resource);
             Ok(())
         },
     )?;
@@ -108,10 +110,58 @@ pub(crate) fn install(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> ml
         globals.raw_set(name, function)?;
     }
     install_ace(lua, weak, globals)?;
+    install_connection_info(lua, weak, globals)?;
     install_tokens_and_last_msg(lua, weak, globals)
 }
 
+/// Installs `GetPlayerGuid`, `GetPlayerTimeOnline`, `GetPlayerFromIndex` and `GetHostId`.
+fn install_connection_info(
+    lua: &Lua,
+    weak: &Weak<LuaRuntime>,
+    globals: &Table,
+) -> mlua::Result<()> {
+    let get_player_guid = bind_fn(lua, weak, |rt, (player,): (LuaValue,)| {
+        let identifiers = identifiers_of_player(rt, &player)?;
+        Ok(identifiers
+            .iter()
+            .find(|identifier| identifier_kind(identifier) == Some("license"))
+            .and_then(|identifier| identifier.split_once(':'))
+            .map(|(_, guid)| guid.to_owned()))
+    })?;
+    let get_player_time_online = bind_fn(lua, weak, |rt, (player,): (LuaValue,)| {
+        let Some(id) = player_id(&player) else {
+            return Ok(None);
+        };
+        let online = server(&*rt.host()?)?.player_time_online(id);
+        online
+            .map(|duration| i64::try_from(duration.as_secs()).map_err(mlua::Error::runtime))
+            .transpose()
+    })?;
+    let get_player_from_index = bind_fn(lua, weak, |rt, (index,): (LuaValue,)| {
+        let index = whole_number(&index).and_then(|index| usize::try_from(index).ok());
+        let players = server(&*rt.host()?)?.players();
+        Ok(index.and_then(|index| players.get(index).map(u32::to_string)))
+    })?;
+    let get_host_id = bind_fn(lua, weak, |rt, (): ()| {
+        let players = server(&*rt.host()?)?.players();
+        Ok(players.iter().min().map(u32::to_string))
+    })?;
+    for (name, function) in [
+        ("GetPlayerGuid", get_player_guid),
+        ("GetPlayerTimeOnline", get_player_time_online),
+        ("GetPlayerFromIndex", get_player_from_index),
+        ("GetHostId", get_host_id),
+    ] {
+        globals.raw_set(name, function)?;
+    }
+    Ok(())
+}
+
 fn install_ace(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::Result<()> {
+    let is_ace_allowed = bind_fn(lua, weak, |rt, (object,): (String,)| {
+        let principal = format!("resource.{}", rt.resource);
+        Ok(server(&*rt.host()?)?.is_ace_allowed(&principal, &object))
+    })?;
     let is_player_ace_allowed = bind_fn(lua, weak, |rt, (player, object): (LuaValue, String)| {
         let Some(id) = player_id(&player) else {
             return Ok(false);
@@ -127,6 +177,7 @@ fn install_ace(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::Res
         bind_fn(lua, weak, |rt, (principal, object): (String, String)| {
             Ok(server(&*rt.host()?)?.is_ace_allowed(&principal, &object))
         })?;
+    globals.raw_set("IsAceAllowed", is_ace_allowed)?;
     globals.raw_set("IsPlayerAceAllowed", is_player_ace_allowed)?;
     globals.raw_set("IsPrincipalAceAllowed", is_principal_ace_allowed)
 }

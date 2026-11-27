@@ -77,13 +77,21 @@ stored as `this_i`. A plain string with an unknown name keeps its spelling.
 | `provide` / `provides` | `provides` | Virtual resource names this resource provides as aliases. See below. |
 | `export` / `exports` | `exports` | Client exports, sent to clients. See below. |
 | `server_export` / `server_exports` | `server_exports` | Server exports. See below. |
+| `server_only 'yes'` | `server_only` | Never offered to clients: no files, scripts, exports or metadata are sent, and clients are not told it started or stopped. It still runs on the server and can `provide` and be depended on. Any value other than `'yes'` is false. |
 | `fx_version` | `fx_version` | Stored only. The host does not read it. |
 | `game` / `games` | `games` | Stored only. The host does not read it. |
 | `lua54 'yes'` | `lua54` | Stored only. Any value other than `'yes'` is false. The host does not read it. |
 | anything else | `metadata` | Stored in order as `(name, value)`. The host does not read it. |
 
-Only the first group changes behaviour. `fx_version`, `game`, `lua54` and
-metadata are parsed and kept, but nothing in SixM uses them yet.
+The first group and `server_only` change behaviour. `fx_version`, `game`, `lua54`
+and metadata are parsed and kept, but nothing in SixM uses them yet.
+
+The server does not directly sync a `server_only` resource to clients. A
+different, client-synced resource may explicitly reference one of its files
+with a path such as `@server_only_res/data/config.json` in `files`,
+`client_scripts`, or `shared_scripts`. That file is sent as part of the
+referencing resource; this does not advertise or start the `server_only`
+resource on clients.
 
 ## Script load order
 

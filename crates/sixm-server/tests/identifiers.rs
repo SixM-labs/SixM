@@ -9,6 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::{Fixture, manifest};
+use sixm_core::{Host, Value};
 use sixm_net::{Identity, NetClient, NetError};
 use sixm_server::Input;
 use tempfile::TempDir;
@@ -44,6 +45,18 @@ end)
 function log()
     return table.concat(LOG, '\n')
 end
+
+function online(id)
+    return GetPlayerTimeOnline(id)
+end
+
+function guid(id)
+    return GetPlayerGuid(id)
+end
+
+function host_id()
+    return GetHostId()
+end
 ";
 
 /// A server on loopback with the `ids` resource running.
@@ -58,7 +71,7 @@ impl Harness {
         let fx = Fixture::new();
         fx.add_resource(
             "ids",
-            &manifest(&["server.lua"], &["log"], &[]),
+            &manifest(&["server.lua"], &["log", "online", "guid", "host_id"], &[]),
             &[("server.lua", IDS_SCRIPT)],
         );
         fx.server.execute("endpoint_add_udp 127.0.0.1:0");
@@ -162,4 +175,44 @@ fn license_comes_from_the_client_identity_and_ip_from_the_endpoint() {
     h.wait_for_log(&format!(
         "joining 3 name=Carol identifiers={carol_license} ip:127.0.0.1"
     ));
+}
+
+#[test]
+fn time_online_guid_and_host_id_for_a_connected_player() {
+    let h = Harness::new();
+    let alice = h
+        .connect("Alice", &Identity::Ephemeral)
+        .expect("Alice is admitted");
+    let alice_license = license(&alice);
+    h.wait_for_log(&format!(
+        "joining 1 name=Alice identifiers={alice_license} ip:127.0.0.1"
+    ));
+
+    let manager = h.fx.manager();
+    match manager
+        .call_export("ids", "online", &[Value::Int(1)], None)
+        .expect("online is callable")
+        .as_slice()
+    {
+        [Value::Int(seconds)] => assert!(
+            (0..=5).contains(seconds),
+            "a fresh connection is a few seconds old, got {seconds}"
+        ),
+        other => panic!("unexpected online result {other:?}"),
+    }
+    let hex = alice_license
+        .strip_prefix("license:")
+        .expect("the license identifier has the prefix");
+    assert_eq!(
+        manager
+            .call_export("ids", "guid", &[Value::Int(1)], None)
+            .expect("guid is callable"),
+        vec![Value::from(hex)]
+    );
+    assert_eq!(
+        manager
+            .call_export("ids", "host_id", &[], None)
+            .expect("host_id is callable"),
+        vec![Value::from("1")]
+    );
 }

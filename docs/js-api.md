@@ -70,6 +70,9 @@ for synchronous continuations and across event/timer boundaries.
 | `RemoveEventHandler` | both | `RemoveEventHandler(handle)`. Removes the listener returned by `on` / `AddEventHandler`. |
 | `onNet` | both | `onNet(name, fn)`. Marks `name` as a network event and attaches `fn`. |
 | `RegisterNetEvent` / `RegisterServerEvent` | both | `RegisterNetEvent(name [, fn])`. Allows `name` to arrive over the network, optionally registering `fn`. |
+| `addEventListener` | both | `addEventListener(name, fn, netSafe?)`. Same as `on`. With `netSafe` true, `name` also becomes a network event, as with `onNet`. Returns `{ key, name }`. |
+| `addNetEventListener` | both | `addNetEventListener(name, fn)`. Same as `onNet`. |
+| `addRawEventListener` / `addRawEventHandler` | both | `addRawEventListener(name, fn)`. `fn` receives `(payload, source)`, where `payload` is a `Uint8Array` of the msgpack array of the arguments. Network events still need `onNet` / `RegisterNetEvent`. |
 | `emit` / `TriggerEvent` | both | `emit(name, ...args)`. Triggers every local handler of `name` synchronously. |
 | `emitNet` / `TriggerClientEvent` | server | `emitNet(name, target, ...args)`. Sends an event to a player id (`number` or decimal string), an array of player ids (e.g. `[1, 2]`; `[]` sends to nobody, and `-1` is not allowed inside an array), or `-1` for all players. Functions cannot be sent. |
 | `emitNet` / `TriggerServerEvent` | client | `emitNet(name, ...args)`. Sends an event to the server. Functions cannot be sent. |
@@ -81,6 +84,10 @@ for synchronous continuations and across event/timer boundaries.
 Inside an event handler, `globalThis.source` holds the sender (`""` for local
 server events, player id as string/number for client-to-server events, `65535`
 for server-to-client events).
+
+The host events (`playerJoining`, `playerDropped`, `onPlayerBucketChange`,
+`onEntityBucketChange`, `onResourceListRefresh` and the others) take the same
+names and arguments as in the lifecycle table of [`lua-api.md`](lua-api.md#lifecycle-events-fired-by-the-host).
 
 ## Exports
 
@@ -115,6 +122,12 @@ const sum = exports.myresource.add(2, 3);
 - `RemoveStateBagChangeHandler(cookie)` removes a handler.
 - `GetPlayerFromStateBagName(bag)` and `GetEntityFromStateBagName(bag)` map
   bag names back to server/entity ids (`0` if invalid/missing).
+- `GetStateBagValue(bag, key)` returns the value, or `undefined` for an unknown bag or key.
+- `StateBagHasKey(bag, key)` returns a boolean.
+- `GetStateBagKeys(bag)` returns the sorted key names, or `undefined` for an unknown bag.
+- `SetStateBagValue(bag, key, value, replicated)` writes like `.set`; `replicated` defaults to `false`.
+  The FiveM form `SetStateBagValue(bag, key, valueData, valueLength, replicated)` takes msgpack bytes (a `Uint8Array` or string from `msgpack.pack`), decodes only the first `valueLength` bytes and stores the result.
+- `EnsureEntityStateBag(entity)` does nothing; an entity's bag exists for the whole life of the entity.
 
 On the client, writes with `replicated = true` throw an error.
 
@@ -157,11 +170,13 @@ All core utility, command, convar, resource, and KVP functions match
 - **General & Commands:** `GetHashKey`, `RegisterCommand`,
   `GetRegisteredCommands`, `ExecuteCommand`, `GetConvar`, `GetConvarInt`,
   `GetConvarFloat`, `GetConvarBool`, `SetConvar`, `SetConvarReplicated`,
-  `SetConvarServerInfo`, `AddConvarChangeListener`, `RemoveConvarChangeListener`.
+  `SetConvarServerInfo`, `SetGameType` and `SetMapName` (server, set the
+  `gametype` / `mapname` server-info convars), `GetGameName`, `GetGameBuildNumber`,
+  `GetInstanceId`, `AddConvarChangeListener`, `RemoveConvarChangeListener`.
 - **Resources:** `GetCurrentResourceName`, `GetInvokingResource` (returns `null`
   when called without a resource invoker), `GetResourceState`, `GetNumResources`,
   `GetResourceByFindIndex`, `GetResourceMetadata`, `GetNumResourceMetadata`,
-  `GetResourcePath`, `LoadResourceFile` (returns `null` if missing),
+  `GetResourceCommands`, `GetResourcePath`, `LoadResourceFile` (returns `null` if missing),
   `SaveResourceFile`, `StartResource` (server, ACE-gated),
   `StopResource` (server, ACE-gated), `RestartResource` (server, ACE-gated).
 - **KVP:** `GetResourceKvpString`, `GetResourceKvpInt`, `GetResourceKvpFloat`,
@@ -178,7 +193,9 @@ All core utility, command, convar, resource, and KVP functions match
   `GetPlayerLastMsg`, `GetPlayerPed`, `GetPlayerIdentifiers`,
   `GetNumPlayerIdentifiers`, `GetPlayerIdentifier`,
   `GetPlayerIdentifierByType`, `GetNumPlayerTokens`, `GetPlayerToken`,
-  `DropPlayer`, `IsPlayerAceAllowed`, `IsPrincipalAceAllowed`.
+  `GetPlayerGuid`, `GetPlayerTimeOnline`, `GetPlayerFromIndex`, `GetHostId`
+  (these return `undefined` for nil), `DropPlayer`, `IsAceAllowed`,
+  `IsPlayerAceAllowed`, `IsPrincipalAceAllowed`.
 - **Client identity & pool:** `PlayerId()` (`0`), `GetPlayerServerId`,
   `PlayerPedId`, `GetGamePool`, `IsDuplicityVersion()`.
 - **Entities (server & shared readers):** `DoesEntityExist`, `GetEntityCoords`,

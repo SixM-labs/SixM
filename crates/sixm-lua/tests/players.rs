@@ -3,11 +3,12 @@
 mod common;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use common::{TestHost, call, first, new_client_host, new_host, start};
 use sixm_core::{
-    ClientTarget, EventContext, EventSource, FuncRef, PlayerInfo, ScriptError, ScriptRuntime,
-    ServerHost, Value,
+    ClientTarget, ConvarKind, EventContext, EventSource, FuncRef, PlayerInfo, ScriptError,
+    ScriptRuntime, ServerHost, Value,
 };
 
 /// Replaces the host's player list with `(id, name)` pairs, each on its own address.
@@ -231,7 +232,10 @@ fn drop_player_uses_a_default_reason_and_accepts_a_custom_one() {
 
     assert_eq!(
         *host.dropped.borrow(),
-        vec![(4, "Dropped by server".to_owned()), (5, "bye".to_owned()),]
+        vec![
+            (4, "Dropped by server".to_owned(), "drops".to_owned()),
+            (5, "bye".to_owned(), "drops".to_owned()),
+        ]
     );
 }
 
@@ -589,4 +593,88 @@ fn trigger_client_and_latent_events_accept_batch_target_arrays_and_reject_invali
 
     assert!(host.client_events.borrow().is_empty());
     assert!(host.latent_client_events.borrow().is_empty());
+}
+
+#[test]
+fn is_ace_allowed_uses_the_calling_resources_principal() {
+    let host = new_host();
+    let rt = start(
+        &host,
+        "aces",
+        &["check"],
+        &[(
+            "main.lua",
+            "exports('check', function(object) return IsAceAllowed(object) end)\n",
+        )],
+    );
+    host.grants
+        .borrow_mut()
+        .push(("resource.aces".to_owned(), "command.x".to_owned()));
+
+    assert_eq!(
+        call(&rt, "check", &[Value::from("command.x")]),
+        vec![Value::Bool(true)]
+    );
+    assert_eq!(
+        call(&rt, "check", &[Value::from("command.y")]),
+        vec![Value::Bool(false)]
+    );
+}
+
+#[test]
+fn player_guid_time_online_index_and_host_id() {
+    let host = new_host();
+    let rt = start(
+        &host,
+        "ids",
+        &["guid", "online", "index", "host"],
+        &[(
+            "main.lua",
+            "exports('guid', function(p) return GetPlayerGuid(p) end)\n\
+             exports('online', function(p) return GetPlayerTimeOnline(p) end)\n\
+             exports('index', function(i) return GetPlayerFromIndex(i) end)\n\
+             exports('host', function() return GetHostId() end)\n",
+        )],
+    );
+    join(&host, &[(7, "a"), (3, "b")]);
+    identify(&host, 7, &["license:abc", "ip:1.2.3.4"]);
+    host.time_online
+        .borrow_mut()
+        .insert(7, Duration::from_secs(125));
+
+    assert_eq!(
+        call(&rt, "guid", &[Value::Int(7)]),
+        vec![Value::from("abc")]
+    );
+    assert_eq!(call(&rt, "guid", &[Value::Int(3)]), vec![Value::Nil]);
+    assert_eq!(call(&rt, "guid", &[Value::Int(99)]), vec![Value::Nil]);
+    assert_eq!(call(&rt, "online", &[Value::Int(7)]), vec![Value::Int(125)]);
+    assert_eq!(call(&rt, "online", &[Value::Int(99)]), vec![Value::Nil]);
+    assert_eq!(call(&rt, "index", &[Value::Int(0)]), vec![Value::from("7")]);
+    assert_eq!(call(&rt, "index", &[Value::Int(1)]), vec![Value::from("3")]);
+    assert_eq!(call(&rt, "index", &[Value::Int(2)]), vec![Value::Nil]);
+    assert_eq!(call(&rt, "index", &[Value::Int(-1)]), vec![Value::Nil]);
+    assert_eq!(call(&rt, "host", &[]), vec![Value::from("3")]);
+
+    host.players.borrow_mut().clear();
+    assert_eq!(call(&rt, "host", &[]), vec![Value::Nil]);
+}
+
+#[test]
+fn set_game_type_and_map_name_set_server_info_convars() {
+    let host = new_host();
+    let _rt = start(
+        &host,
+        "info",
+        &[],
+        &[("main.lua", "SetGameType('race')\nSetMapName('x')\n")],
+    );
+
+    let sets = host.convar_sets.borrow();
+    assert!(sets.contains(&(
+        "gametype".to_owned(),
+        "race".to_owned(),
+        ConvarKind::ServerInfo
+    )));
+    assert!(sets.contains(&("mapname".to_owned(), "x".to_owned(), ConvarKind::ServerInfo)));
 }

@@ -155,6 +155,40 @@ declare function RemoveEventHandler(handle: EventHandlerHandle): void;
 declare function removeEventListener(name: string, fn: (...args: any[]) => void): void;
 
 /**
+ * Alias for `on`. With `netSafe` true, `name` is also marked as a network-safe event.
+ */
+declare function addEventListener(
+    name: string,
+    fn: (...args: any[]) => void | Promise<void>,
+    netSafe?: boolean
+): EventHandlerHandle;
+
+/**
+ * Alias for `onNet`. Marks `name` as a network-safe event and attaches `fn`.
+ */
+declare function addNetEventListener(
+    name: string,
+    fn: (...args: any[]) => void | Promise<void>
+): EventHandlerHandle;
+
+/**
+ * Registers a raw handler for `name`. `fn` receives the msgpack bytes of the arguments and the source.
+ * Network events still need `onNet` / `RegisterNetEvent`.
+ */
+declare function addRawEventListener(
+    name: string,
+    fn: (payload: Uint8Array, source: number | string) => void | Promise<void>
+): EventHandlerHandle;
+
+/**
+ * Alias for `addRawEventListener`.
+ */
+declare function addRawEventHandler(
+    name: string,
+    fn: (payload: Uint8Array, source: number | string) => void | Promise<void>
+): EventHandlerHandle;
+
+/**
  * Marks `name` as a network-safe event and attaches `fn`.
  */
 declare function onNet(
@@ -305,6 +339,36 @@ declare function GetPlayerFromStateBagName(bagName: string): number;
  * Extracts the entity id from an `entity:<id>` state bag name if it exists, or `0`.
  */
 declare function GetEntityFromStateBagName(bagName: string): number;
+
+/**
+ * The value of `key` in state bag `bagName`, or `undefined` when unset.
+ */
+declare function GetStateBagValue(bagName: string, key: string): any;
+
+/**
+ * Whether state bag `bagName` has a value for `key`.
+ */
+declare function StateBagHasKey(bagName: string, key: string): boolean;
+
+/**
+ * The sorted key names of state bag `bagName`, or `undefined` for an unknown bag.
+ */
+declare function GetStateBagKeys(bagName: string): string[] | undefined;
+
+/**
+ * Writes `value` under `key` in state bag `bagName`. `replicated` defaults to false.
+ */
+declare function SetStateBagValue(bagName: string, key: string, value: any, replicated?: boolean): void;
+
+/**
+ * FiveM form: `valueData` is msgpack bytes and only its first `valueLength` bytes are decoded.
+ */
+declare function SetStateBagValue(bagName: string, key: string, valueData: Uint8Array | string, valueLength: number, replicated?: boolean): void;
+
+/**
+ * Compatibility call; does nothing, since an entity's bag lives as long as the entity.
+ */
+declare function EnsureEntityStateBag(entity: number): void;
 
 // =============================================================================
 // Vectors, quaternions, and msgpack
@@ -461,6 +525,10 @@ declare function SetConvar(name: string, value: string): void;
 declare function SetConvarReplicated(name: string, value: string): void;
 /** Sets a convar marked as server info. (Server only) */
 declare function SetConvarServerInfo(name: string, value: string): void;
+/** Sets the `gametype` server info convar. (Server only) */
+declare function SetGameType(name: string): void;
+/** Sets the `mapname` server info convar. (Server only) */
+declare function SetMapName(name: string): void;
 
 declare function AddConvarChangeListener(
     filter: string | null | undefined,
@@ -475,6 +543,12 @@ declare function RegisterCommand(
     restricted?: boolean
 ): void;
 declare function GetRegisteredCommands(): Array<{ name: string }>;
+/** Returns `"sixm"` on a server and `"headless"` on a client. */
+declare function GetGameName(): string;
+/** Returns the game build number, always `0`. */
+declare function GetGameBuildNumber(): number;
+/** Returns the process id, stable for the life of the process. */
+declare function GetInstanceId(): number;
 
 // =============================================================================
 // Resources and files
@@ -489,6 +563,7 @@ declare function GetNumResources(): number;
 declare function GetResourceByFindIndex(index: number): string | null;
 declare function GetResourceMetadata(resource: string, key: string, index: number): string | null;
 declare function GetNumResourceMetadata(resource: string, key: string): number;
+declare function GetResourceCommands(resource: string): string[];
 declare function GetResourcePath(name: string): string | null;
 declare function LoadResourceFile(resource: string, path: string): string | null;
 declare function SaveResourceFile(
@@ -543,12 +618,22 @@ declare function GetPlayerIdentifiers(player: number | string): string[];
 declare function GetNumPlayerIdentifiers(player: number | string): number;
 declare function GetPlayerIdentifier(player: number | string, index: number): string | null;
 declare function GetPlayerIdentifierByType(player: number | string, kind: string): string | null;
+/** Returns the hex part of the player's `license:` identifier. (Server only) */
+declare function GetPlayerGuid(player: number | string): string | undefined;
+/** Returns whole seconds since the player was admitted. (Server only) */
+declare function GetPlayerTimeOnline(player: number | string): number | undefined;
+/** Returns the player at 0-based `index` of the join-order list as a string. (Server only) */
+declare function GetPlayerFromIndex(index: number): string | undefined;
+/** Returns the lowest connected player id as a string. (Server only) */
+declare function GetHostId(): string | undefined;
 declare function GetNumPlayerTokens(player: number | string): number;
 declare function GetPlayerToken(player: number | string, index: number): string | null;
 declare function DropPlayer(player: number | string, reason?: string): void;
 declare function DoesPlayerExist(player: number | string): boolean;
 declare function IsPlayerAceAllowed(player: number | string, object: string): boolean;
 declare function IsPrincipalAceAllowed(principal: string, object: string): boolean;
+/** Returns whether the calling resource (`resource.<name>`) is allowed ACE `object`. (Server only) */
+declare function IsAceAllowed(object: string): boolean;
 
 /** Returns the local client player handle (`0`). (Client only) */
 declare function PlayerId(): number;

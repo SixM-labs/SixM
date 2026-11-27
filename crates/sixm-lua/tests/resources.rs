@@ -248,3 +248,32 @@ fn restart_resource_delegates_to_server_host_and_is_server_only() {
     );
     assert_eq!(first(&client_rt, "probe"), Value::from("nil"));
 }
+
+#[test]
+fn get_resource_commands_lists_sorted_names() {
+    let host = new_host();
+    host.command_owners.borrow_mut().extend([
+        ("r".to_owned(), "zeta".to_owned()),
+        ("r".to_owned(), "alpha".to_owned()),
+        ("o".to_owned(), "beta".to_owned()),
+    ]);
+    let rt = start(
+        &host,
+        "r",
+        &["list", "none"],
+        &[(
+            "main.lua",
+            "exports('list', function(name) return GetResourceCommands(name) end)\n\
+             exports('none', function() return GetResourceCommands('none') end)\n",
+        )],
+    );
+
+    assert_eq!(
+        call(&rt, "list", &[Value::from("r")]),
+        vec![Value::Array(vec![
+            Value::from("alpha"),
+            Value::from("zeta")
+        ])]
+    );
+    assert_eq!(call(&rt, "none", &[]), vec![Value::Array(Vec::new())]);
+}

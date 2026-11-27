@@ -335,6 +335,30 @@ fn install_convar_listeners<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rqui
             )?,
         )?;
     }
+    {
+        let weak = weak.clone();
+        globals.set(
+            "GetGameName",
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'js>| -> rquickjs::Result<&'static str> {
+                    let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                    let is_server = rt.host(&ctx)?.server().is_some();
+                    Ok(if is_server { "sixm" } else { "headless" })
+                },
+            )?,
+        )?;
+    }
+    globals.set(
+        "GetGameBuildNumber",
+        Function::new(ctx.clone(), || -> rquickjs::Result<i64> { Ok(0) })?,
+    )?;
+    globals.set(
+        "GetInstanceId",
+        Function::new(ctx.clone(), || -> rquickjs::Result<i64> {
+            Ok(i64::from(std::process::id()))
+        })?,
+    )?;
     Ok(())
 }
 
@@ -376,6 +400,19 @@ fn install_server_convars<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquick
                 let rt = JsRuntime::upgrade(&ctx, &weak)?;
                 server(&ctx, &*rt.host(&ctx)?)?
                     .set_convar_for_resource(&rt.resource, &convar, &value, kind)
+                    .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))
+            },
+        )?;
+        globals.set(name, setter)?;
+    }
+    for (name, convar) in [("SetGameType", "gametype"), ("SetMapName", "mapname")] {
+        let weak = weak.clone();
+        let setter = Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, value: String| -> rquickjs::Result<()> {
+                let rt = JsRuntime::upgrade(&ctx, &weak)?;
+                server(&ctx, &*rt.host(&ctx)?)?
+                    .set_convar_for_resource(&rt.resource, convar, &value, ConvarKind::ServerInfo)
                     .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))
             },
         )?;

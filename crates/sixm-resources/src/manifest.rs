@@ -80,6 +80,8 @@ pub struct Manifest {
     pub exports: Vec<String>,
     /// Whether the resource opts into Lua 5.4 (`lua54 'yes'`).
     pub lua54: bool,
+    /// Whether clients never receive the resource (`server_only 'yes'`).
+    pub server_only: bool,
     /// Every other directive in declaration order, e.g. `("author", "me")`.
     /// Chained arguments are stored under the directive name plus `_extra`.
     pub metadata: Vec<(String, String)>,
@@ -286,6 +288,10 @@ fn build(entries: Vec<(String, String)>) -> Result<Manifest, ManifestError> {
             "server_export" => manifest.server_exports.push(value),
             "export" => manifest.exports.push(value),
             "lua54" => manifest.lua54 = value == "yes",
+            "server_only" => {
+                manifest.server_only = value == "yes";
+                manifest.metadata.push((key, value));
+            }
             _ => manifest.metadata.push((key, value)),
         }
     }
@@ -423,6 +429,15 @@ mod tests {
     #[test]
     fn lua54_is_true_only_for_yes() {
         assert!(!parse("lua54 'no'").lua54);
+    }
+
+    #[test]
+    fn server_only_is_true_only_for_yes() {
+        let manifest = parse("server_only 'yes'");
+        assert!(manifest.server_only);
+        assert_eq!(metadata_of(&manifest, "server_only"), ["yes"]);
+        assert!(!parse("server_only 'no'").server_only);
+        assert!(!parse("server_only 'true'").server_only);
     }
 
     #[test]

@@ -347,6 +347,10 @@ pub trait Host {
     /// the key is not set.
     fn state_get(&self, bag: &str, key: &str) -> Option<Value>;
 
+    /// Names of the keys set in state bag `bag`, sorted ascending, or `None` when
+    /// the bag does not exist (the same rule `state_set` uses to reject a bag).
+    fn state_keys(&self, bag: &str) -> Option<Vec<String>>;
+
     /// Stores `value` under `key` in state bag `bag`, or deletes the key when
     /// `value` is nil. Every write runs the change handlers. A replicated write
     /// is also sent to every client. Fails for an unknown bag, a key that is
@@ -361,6 +365,11 @@ pub trait Host {
 
     /// Names of every built-in and script-registered console command.
     fn registered_commands(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Names of the console commands that `resource` registered, sorted ascending.
+    fn resource_commands(&self, _resource: &str) -> Vec<String> {
         Vec::new()
     }
 
@@ -431,9 +440,10 @@ pub trait ServerHost {
     /// its identifiers, so entries can name a player by `license`.
     fn is_ace_allowed(&self, principal: &str, object: &str) -> bool;
 
-    /// Disconnects a player with a reason shown to them. Takes effect after
+    /// Disconnects a player with a reason shown to them. `resource` is the
+    /// resource that asked; `playerDropped` reports it. Takes effect after
     /// the current script call returns.
-    fn drop_player(&self, player: u32, reason: &str);
+    fn drop_player(&self, player: u32, reason: &str, resource: &str);
 
     /// Creates an entity and returns its id. Ids count up from 1 and are not
     /// reused while the server runs. The entity's state bag exists from now on,
@@ -599,6 +609,12 @@ pub trait ServerHost {
     /// Deterministic tokens proving a player's client certificate identity.
     fn player_tokens(&self, _player: u32) -> Vec<String> {
         Vec::new()
+    }
+
+    /// How long `player` has been connected, counted from when the server accepted the
+    /// connection. `None` for an unknown player.
+    fn player_time_online(&self, _player: u32) -> Option<Duration> {
+        None
     }
 }
 

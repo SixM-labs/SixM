@@ -110,6 +110,34 @@ impl Vector {
         Self::from_fn(self.len, |index| -self.c[index])
     }
 
+    /// The sum of the component products. The caller checks that the sizes match.
+    fn dot(&self, other: &Self) -> f64 {
+        self.components()
+            .iter()
+            .zip(other.components())
+            .map(|(a, b)| f64::from(*a) * f64::from(*b))
+            .sum()
+    }
+
+    /// The cross product. Only meaningful for `vector3`, so the caller checks the size.
+    fn cross3(&self, other: &Self) -> Self {
+        let [ax, ay, az] = [self.c[0], self.c[1], self.c[2]];
+        let [bx, by, bz] = [other.c[0], other.c[1], other.c[2]];
+        Self::new([ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx])
+    }
+
+    /// The vector scaled to length 1. A zero vector is returned unchanged.
+    fn normalized(&self) -> Self {
+        let length = self.length();
+        if length > 0.0 {
+            Self::from_fn(self.len, |index| {
+                float_to_f32(f64::from(self.c[index]) / length)
+            })
+        } else {
+            *self
+        }
+    }
+
     /// The letters `letters` name, in order, as a vector of that length. `None`
     /// when a letter names a component this vector does not have.
     fn swizzle(&self, letters: &[u8]) -> Option<Self> {
@@ -217,6 +245,32 @@ pub(crate) fn install(lua: &Lua, globals: &Table, original_type: Function) -> ml
         "quat",
         lua.create_function(|_, args: MultiValue| construct_quat(args))?,
     )?;
+    globals.raw_set(
+        "vector",
+        lua.create_function(|_, args: MultiValue| vector_values(args))?,
+    )?;
+    globals.raw_set(
+        "dot",
+        lua.create_function(|_, (left, right): (LuaValue, LuaValue)| dot_values(&left, &right))?,
+    )?;
+    globals.raw_set(
+        "cross",
+        lua.create_function(|_, (left, right): (LuaValue, LuaValue)| cross_values(&left, &right))?,
+    )?;
+    globals.raw_set(
+        "norm",
+        lua.create_function(|lua, value: LuaValue| norm_value(lua, &value))?,
+    )?;
+    globals.raw_set(
+        "inv",
+        lua.create_function(|_, value: LuaValue| inv_value(&value))?,
+    )?;
+    globals.raw_set(
+        "slerp",
+        lua.create_function(|lua, (a, b, t): (LuaValue, LuaValue, LuaValue)| {
+            slerp_value(lua, &a, &b, &t)
+        })?,
+    )?;
 
     // `type` is called constantly, so the usual types are answered here instead
     // of calling back into the original. It only handles what this mapping
@@ -264,6 +318,18 @@ fn construct(name: &str, len: u8, args: MultiValue) -> mlua::Result<Vector> {
         return Ok(Vector { len, c });
     }
 
+    let (c, count) = flatten(name, &args)?;
+    if count != usize::from(len) {
+        return Err(mlua::Error::runtime(format!(
+            "{name}: expected {len} components, got {count}"
+        )));
+    }
+    Ok(Vector { len, c })
+}
+
+/// Flattens numbers and vectors into components, in order. Returns the first
+/// `MAX_LEN` components and the total count, which may be larger.
+fn flatten(name: &str, args: &[LuaValue]) -> mlua::Result<([f32; MAX_LEN], usize)> {
     let mut c = [0.0; MAX_LEN];
     let mut count = 0_usize;
     let mut push = |number: f32| {
@@ -272,7 +338,7 @@ fn construct(name: &str, len: u8, args: MultiValue) -> mlua::Result<Vector> {
         }
         count += 1;
     };
-    for arg in &args {
+    for arg in args {
         if let Some(number) = number_of(arg) {
             push(number);
         } else if let Some(vector) = read(arg) {
@@ -286,12 +352,90 @@ fn construct(name: &str, len: u8, args: MultiValue) -> mlua::Result<Vector> {
             )));
         }
     }
-    if count != usize::from(len) {
+    Ok((c, count))
+}
+
+/// `vector(...)`: a vector2, vector3 or vector4 chosen by the total component count.
+fn vector_values(args: MultiValue) -> mlua::Result<Vector> {
+    let (c, count) = flatten("vector", &args.into_vec())?;
+    if !(2..=MAX_LEN).contains(&count) {
         return Err(mlua::Error::runtime(format!(
-            "{name}: expected {len} components, got {count}"
+            "vector: expected 2 to 4 components, got {count}"
         )));
     }
-    Ok(Vector { len, c })
+    Ok(Vector {
+        len: u8::try_from(count).unwrap_or(0),
+        c,
+    })
+}
+
+/// `dot(a, b)`: the sum of the component products of two vectors of the same size.
+fn dot_values(left: &LuaValue, right: &LuaValue) -> mlua::Result<f64> {
+    match (read(left), read(right)) {
+        (Some(a), Some(b)) if a.len == b.len => Ok(a.dot(&b)),
+        _ => Err(mlua::Error::runtime(format!(
+            "dot: expected two vectors of the same size, got {} and {}",
+            describe(left),
+            describe(right)
+        ))),
+    }
+}
+
+/// `cross(a, b)`: the cross product of two vector3.
+fn cross_values(left: &LuaValue, right: &LuaValue) -> mlua::Result<Vector> {
+    match (read(left), read(right)) {
+        (Some(a), Some(b)) if a.len == 3 && b.len == 3 => Ok(a.cross3(&b)),
+        _ => Err(mlua::Error::runtime(format!(
+            "cross: expected two vector3, got {} and {}",
+            describe(left),
+            describe(right)
+        ))),
+    }
+}
+
+/// `norm(v)`: `v` scaled to length 1, as a vector or a quat.
+fn norm_value(lua: &Lua, value: &LuaValue) -> mlua::Result<LuaValue> {
+    if let Some(vector) = read(value) {
+        return Ok(LuaValue::UserData(
+            lua.create_userdata(vector.normalized())?,
+        ));
+    }
+    match read_quat(value) {
+        Some(quat) => Ok(LuaValue::UserData(lua.create_userdata(quat.normalized())?)),
+        None => Err(mlua::Error::runtime(format!(
+            "norm: expected a vector or quat, got {}",
+            describe(value)
+        ))),
+    }
+}
+
+/// `inv(q)`: the inverse of a quat, which is its conjugate divided by its squared length.
+fn inv_value(value: &LuaValue) -> mlua::Result<Quat> {
+    let Some(quat) = read_quat(value) else {
+        return Err(mlua::Error::runtime(format!(
+            "inv: expected a quat, got {}",
+            describe(value)
+        )));
+    };
+    quat.inverse()
+        .ok_or_else(|| mlua::Error::runtime("inv: quat has zero length"))
+}
+
+/// `slerp(a, b, t)`: the spherical interpolation between two quats.
+fn slerp_value(lua: &Lua, a: &LuaValue, b: &LuaValue, t: &LuaValue) -> mlua::Result<LuaValue> {
+    match (read_quat(a), read_quat(b), number_of(t)) {
+        (Some(a), Some(b), Some(t)) => Ok(LuaValue::UserData(lua.create_userdata(Quat::slerp(
+            a,
+            b,
+            f64::from(t),
+        ))?)),
+        _ => Err(mlua::Error::runtime(format!(
+            "slerp: expected (quat, quat, number), got {}, {} and {}",
+            describe(a),
+            describe(b),
+            describe(t)
+        ))),
+    }
 }
 
 /// Applies `op` to two operands, where at least one is a vector.
@@ -333,9 +477,14 @@ fn unsupported(op: Op, left: &LuaValue, right: &LuaValue) -> mlua::Error {
 
 /// The name of an operand for an error: a vector's name, or its Lua type.
 fn describe(value: &LuaValue) -> String {
-    match read(value) {
-        Some(vector) => vector.name().to_owned(),
-        None => value.type_name().to_owned(),
+    if let Some(vector) = read(value) {
+        vector.name().to_owned()
+    } else if read_quat(value).is_some() {
+        "quat".to_owned()
+    } else if number_of(value).is_some() {
+        "number".to_owned()
+    } else {
+        value.type_name().to_owned()
     }
 }
 
@@ -474,6 +623,65 @@ impl Quat {
             .map(|c| f64::from(*c) * f64::from(*c))
             .sum::<f64>()
             .sqrt()
+    }
+
+    /// The sum of the component products.
+    fn dot(&self, other: &Self) -> f64 {
+        self.c
+            .iter()
+            .zip(other.c)
+            .map(|(a, b)| f64::from(*a) * f64::from(b))
+            .sum()
+    }
+
+    /// The quat scaled to length 1. A zero quat is returned unchanged.
+    fn normalized(&self) -> Self {
+        let length = self.length();
+        if length > 0.0 {
+            Self::new(self.c.map(|v| float_to_f32(f64::from(v) / length)))
+        } else {
+            *self
+        }
+    }
+
+    /// The conjugate divided by the squared length. `None` for a zero quat.
+    fn inverse(&self) -> Option<Self> {
+        let squared = self.length() * self.length();
+        if squared > 0.0 {
+            let [w, x, y, z] = self.c;
+            Some(Self::new(
+                [w, -x, -y, -z].map(|v| float_to_f32(f64::from(v) / squared)),
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// Spherical interpolation from `a` to `b` by `t`, which is not clamped.
+    /// The inputs are not normalized; the math is done in f64.
+    fn slerp(a: Self, b: Self, t: f64) -> Self {
+        let start = a.c.map(f64::from);
+        let mut end = b.c.map(f64::from);
+        let mut cos = a.dot(&b);
+        if cos < 0.0 {
+            end = end.map(|v| -v);
+            cos = -cos;
+        }
+        let result: [f64; 4] = if cos > 0.9995 {
+            let lerp: [f64; 4] = std::array::from_fn(|i| start[i] + t * (end[i] - start[i]));
+            let length = lerp.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if length > 0.0 {
+                lerp.map(|v| v / length)
+            } else {
+                lerp
+            }
+        } else {
+            let theta = cos.acos();
+            let weight_a = ((1.0 - t) * theta).sin() / theta.sin();
+            let weight_b = (t * theta).sin() / theta.sin();
+            std::array::from_fn(|i| weight_a * start[i] + weight_b * end[i])
+        };
+        Self::new(result.map(float_to_f32))
     }
 
     fn mul_quat(self, rhs: Self) -> Self {

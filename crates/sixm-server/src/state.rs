@@ -53,6 +53,16 @@ impl StateStore {
         }
     }
 
+    /// The names of the keys set in `bag`, sorted. Empty for an unknown bag.
+    pub(crate) fn keys(&self, bag: &str) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .bags
+            .get(bag)
+            .map_or_else(Vec::new, |keys| keys.keys().cloned().collect());
+        names.sort();
+        names
+    }
+
     /// Every replicated key of every bag, as `(bag, key, value)`.
     pub(crate) fn replicated(&self) -> Vec<(String, String, Value)> {
         self.bags
@@ -189,6 +199,13 @@ impl ResourceManager {
     /// The names of every state bag, sorted.
     pub(crate) fn state_bag_names(&self) -> Vec<String> {
         self.state.borrow().bag_names()
+    }
+
+    /// The names of the keys set in `bag`, sorted, or `None` when the bag does
+    /// not exist (the same rule `write_state` uses).
+    pub(crate) fn state_bag_keys(&self, bag: &str) -> Option<Vec<String>> {
+        self.ensure_bag(bag).ok()?;
+        Some(self.state.borrow().keys(bag))
     }
 
     /// The keys of `bag` as `(key, value, replicated)`, or `None` for an unknown bag.

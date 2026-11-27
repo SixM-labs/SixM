@@ -1,8 +1,11 @@
 mod common;
 
+use std::time::Duration;
+
 use common::{call, new_client_host, new_host, start};
 use sixm_core::{
-    ClientTarget, EntityInfo, EntityKind, PlayerInfo, ScriptRuntime, Value, WebReply, WebRequest,
+    ClientTarget, ConvarKind, EntityInfo, EntityKind, PlayerInfo, ScriptRuntime, Value, WebReply,
+    WebRequest,
 };
 
 #[test]
@@ -459,4 +462,138 @@ fn batch_client_event_targets_support_arrays_and_reject_invalid_entries() {
     );
     assert_eq!(srv_host.client_events.borrow().len(), before_count);
     assert_eq!(srv_host.latent_client_events.borrow().len(), before_latent);
+}
+
+#[test]
+fn ace_check_uses_the_calling_resources_principal() {
+    let host = new_host();
+    host.grants
+        .borrow_mut()
+        .push(("resource.aces".to_owned(), "command.x".to_owned()));
+    let rt = start(
+        &host,
+        "aces",
+        &["check"],
+        &[(
+            "index.js",
+            r#"exports("check", (object) => IsAceAllowed(object));"#,
+        )],
+    );
+
+    assert_eq!(
+        call(&rt, "check", &[Value::from("command.x")]),
+        vec![Value::Bool(true)]
+    );
+    assert_eq!(
+        call(&rt, "check", &[Value::from("command.y")]),
+        vec![Value::Bool(false)]
+    );
+}
+
+#[test]
+fn player_guid_time_online_index_and_host_id_work_on_server() {
+    let host = new_host();
+    host.players.borrow_mut().extend([
+        (
+            7,
+            PlayerInfo {
+                name: "a".to_owned(),
+                endpoint: "203.0.113.7:51234".to_owned(),
+            },
+        ),
+        (
+            3,
+            PlayerInfo {
+                name: "b".to_owned(),
+                endpoint: "203.0.113.3:51234".to_owned(),
+            },
+        ),
+    ]);
+    host.identifiers
+        .borrow_mut()
+        .push((7, vec!["license:abc".to_owned(), "ip:1.2.3.4".to_owned()]));
+    host.time_online
+        .borrow_mut()
+        .insert(7, Duration::from_secs(125));
+    let rt = start(
+        &host,
+        "ids",
+        &["check", "host"],
+        &[(
+            "index.js",
+            r#"
+            exports("check", () => [
+                GetPlayerGuid(7), GetPlayerGuid(3), GetPlayerGuid(99),
+                GetPlayerTimeOnline(7), GetPlayerTimeOnline(99),
+                GetPlayerFromIndex(0), GetPlayerFromIndex(1),
+                GetPlayerFromIndex(2), GetPlayerFromIndex(-1),
+                GetHostId()
+            ]);
+            exports("host", () => [GetHostId()]);
+            "#,
+        )],
+    );
+
+    assert_eq!(
+        call(&rt, "check", &[]),
+        vec![Value::Array(vec![
+            Value::from("abc"),
+            Value::Nil,
+            Value::Nil,
+            Value::Int(125),
+            Value::Nil,
+            Value::from("7"),
+            Value::from("3"),
+            Value::Nil,
+            Value::Nil,
+            Value::from("3"),
+        ])]
+    );
+
+    host.players.borrow_mut().clear();
+    assert_eq!(call(&rt, "host", &[]), vec![Value::Array(vec![Value::Nil])]);
+}
+
+#[test]
+fn set_game_type_and_map_name_set_server_info_convars() {
+    let host = new_host();
+    let _rt = start(
+        &host,
+        "info",
+        &[],
+        &[("index.js", r#"SetGameType("race"); SetMapName("x");"#)],
+    );
+
+    let sets = host.convar_sets.borrow();
+    assert!(sets.contains(&(
+        "gametype".to_owned(),
+        "race".to_owned(),
+        ConvarKind::ServerInfo
+    )));
+    assert!(sets.contains(&("mapname".to_owned(), "x".to_owned(), ConvarKind::ServerInfo)));
+}
+
+#[test]
+fn drop_player_passes_the_calling_resource_to_the_host() {
+    let host = new_host();
+    let rt = start(
+        &host,
+        "drops",
+        &["drop"],
+        &[(
+            "index.js",
+            r#"exports("drop", (p, reason) => DropPlayer(p, reason));"#,
+        )],
+    );
+
+    call(&rt, "drop", &[Value::Int(4)]);
+    call(&rt, "drop", &[Value::from("5"), Value::from("bye")]);
+
+    assert_eq!(
+        *host.dropped.borrow(),
+        vec![
+            (4, "Dropped by server".to_owned(), "drops".to_owned()),
+            (5, "bye".to_owned(), "drops".to_owned()),
+        ]
+    );
 }

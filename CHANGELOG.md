@@ -9,6 +9,15 @@ may change the protocol and the API.
 
 ### Added
 
+- `start`, `stop`, `restart` and `ensure` accept a `[category]`; manifest
+  `server_only 'yes'`; new `Catalog::category_members`, `category_start_order`, `Manifest::server_only`.
+- ACE and info natives: `IsAceAllowed`, `GetGameName`, `GetGameBuildNumber`,
+  `GetInstanceId`, `GetPlayerGuid`, `GetPlayerTimeOnline`, `GetPlayerFromIndex`, `GetHostId`, `SetGameType`,
+  `SetMapName`, `GetResourceCommands`; new `Host::resource_commands` and `ServerHost::player_time_online`.
+- State bag natives `GetStateBagValue`, `SetStateBagValue`, `StateBagHasKey`,
+  `GetStateBagKeys` and `EnsureEntityStateBag` (Lua and JavaScript); new `Host::state_keys`.
+- Lua `Citizen.Trace` and `PerformHttpRequestAwait`; JS `addEventListener`,
+  `addNetEventListener`, `addRawEventListener` and `addRawEventHandler`.
 - Manifest `provide` / `provides` virtual resource alias directives, resolved
   across dependencies, `@alias/...` manifest references, `exports`, file/state/metadata
   natives, and resource lifecycle commands and natives (with duplicate
@@ -29,9 +38,18 @@ may change the protocol and the API.
 - Official IDE type definitions in `types/sixm.lua` and `types/sixm.d.ts`, plus
   clean-room `[system]/sessionmanager` and `[system]/baseevents` resources in
   `examples/server-data`.
+- Lua vector helpers `vector`, `dot`, `cross`, `norm`, `inv` and `slerp`.
+- Server events `onPlayerBucketChange`, `onEntityBucketChange`,
+  `onResourceListRefresh`; `playerJoining` gets `oldID`, `playerDropped` gets
+  `resourceName` and `clientDropReason`.
 
 ### Changed
 
+- `baseevents` registers the FiveM channel names (`enteringVehicle`,
+  `enteringAborted`, `enteredVehicle`, `leftVehicle`, `onPlayerKilled`,
+  `onPlayerWasted`, `onPlayerDied`); `onPlayerEnteredVehicle` and
+  `onPlayerLeftVehicle` are gone.
+- `ServerHost::drop_player` takes the calling resource.
 - Marked `sv_playerEventRateLimit`, `sv_metricsEnabled`, `sv_adminUiEnabled`,
   `sv_masterUrl`, and `sv_heartbeatInterval` as console-only convars.
 

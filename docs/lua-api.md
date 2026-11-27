@@ -23,6 +23,7 @@ Sources: `crates/sixm-lua/src/` (`natives.rs`, `client.rs`, `players.rs`,
 | `SetTimeout` / `Citizen.SetTimeout` | both | `SetTimeout(ms, fn)`. Runs `fn` once after `ms`. Returns an integer id. |
 | `ClearTimeout` / `Citizen.ClearTimeout` | both | `ClearTimeout(id)`. Cancels a timeout that has not run yet. |
 | `GetGameTimer` | both | `GetGameTimer()`. Returns milliseconds since the process first asked for the timer, as an integer. |
+| `Citizen.Trace` | both | `Citizen.Trace(text)`. Logs `text` like `print`, without tab joining. |
 
 Frames run at `sixm_tickRate` (see [server.md](server.md) and
 [client.md](client.md)). A `Wait(ms)` with a positive delay resumes when its
@@ -126,8 +127,11 @@ Server (`EventSource::Local` unless noted):
 | `entityCreating` | `entity`, `kind`, `model` | Fired before a client-created entity is accepted (`source` is the creator's player id). `kind` is `1` (ped), `2` (vehicle) or `3` (object). `CancelEvent()` refuses it. |
 | `entityCreated` | `entity` | Right after a server- or client-created entity is stored. Its state bag already exists. |
 | `entityRemoved` | `entity` | Before an entity is deleted, while it still exists. |
-| `playerJoining` | none | `source` is the player's id. Fired after admission and after the player's state bag exists. |
-| `playerDropped` | `reason` | `source` is the player's id. The player is still listed while the handlers run. |
+| `onResourceListRefresh` | none | Fired when `refresh` (or the hot-reload watcher) has replaced the resource list. |
+| `playerJoining` | `oldID` | `source` is the player's id. `oldID` is the id as a string and always equals `source`, because SixM assigns the id before `playerConnecting` and keeps it (FiveM uses a temporary id there). Fired after admission and after the player's state bag exists. |
+| `playerDropped` | `reason`, `resourceName`, `clientDropReason` | `source` is the player's id. The player is still listed while the handlers run. `reason` is the text shown to the player. `resourceName` is the resource that called `DropPlayer`, or `""` when none did. `clientDropReason` is `0` when the client closed or lost the connection, `1` for a `DropPlayer` call from a script, and `2` for a kick the server decides itself (for example an entity id that was not leased). These numbers are SixM's own; FiveM's values are not documented here. |
+| `onPlayerBucketChange` | `player`, `bucket`, `oldBucket` | `player` is the player id as a string, like `GetPlayers`. Fired only when `SetPlayerRoutingBucket` really changes the bucket (a call with the same bucket, or for an unknown player, fires nothing), after the move is complete. |
+| `onEntityBucketChange` | `entity`, `bucket`, `oldBucket` | Fired only when `SetEntityRoutingBucket` really changes the bucket, after the move is complete. It fires for every entity kind. A player's ped moves with the player, so a change of the player fires this event for the ped too, after `onPlayerBucketChange`, when the ped's own bucket was different. A player without a ped fires no entity event. |
 
 Client (`EventSource::Local`):
 
@@ -228,6 +232,7 @@ The rules that follow from these:
 | `GetResourceByFindIndex` | both | `GetResourceByFindIndex(index)`. Returns the name at the 0-based `index` of the resource list, or `nil`. |
 | `GetResourceMetadata` | both | `GetResourceMetadata(resource, key, index)`. Returns the value at the 0-based `index` of the metadata `key` of `resource`, or `nil`. |
 | `GetNumResourceMetadata` | both | `GetNumResourceMetadata(resource, key)`. Returns how many values the metadata `key` of `resource` has. |
+| `GetResourceCommands` | both | `GetResourceCommands(resource)`. Returns a sorted array of the names of the console commands `resource` registered, in lowercase, or an empty table for an unknown resource. |
 | `StartResource` | server | `StartResource(name)`. Starts `name` if allowed (`command.start` ACE permission for `resource.<caller>`), returning whether it was started. |
 | `StopResource` | server | `StopResource(name)`. Stops `name` if allowed (`command.stop` ACE permission for `resource.<caller>`), returning whether it was stopped. |
 | `RestartResource` | server | `RestartResource(name)`. Restarts `name` (and any running dependents, in dependency order; starts `name` if stopped) if allowed (`command.restart` ACE permission for `resource.<caller>`), returning a boolean. Resolves `provide` aliases. |
@@ -272,9 +277,10 @@ library can tell who called it. It is `nil` when no resource caused it.
   keeps the same value, and so does a handler after a `Wait`.
 - It is `nil` for events the host fires: lifecycle events (`onResourceStarting`,
   `onResourceStart`, `onServerResourceStart`, `onResourceStop`,
-  `onServerResourceStop`, `onClientResourceStart`, `onClientResourceStop`),
-  player events (`playerConnecting`, `playerJoining`, `playerDropped`), entity
-  events (`entityCreated`, `entityRemoved`), events from the network
+  `onServerResourceStop`, `onClientResourceStart`, `onClientResourceStop`,
+  `onResourceListRefresh`), player events (`playerConnecting`, `playerJoining`,
+  `playerDropped`, `onPlayerBucketChange`), entity events (`entityCreated`,
+  `entityRemoved`, `onEntityBucketChange`), events from the network
   (`TriggerServerEvent` and `TriggerClientEvent`), console commands and state
   bag change handlers.
 
@@ -352,11 +358,16 @@ plain names, because every write is batched (see below).
 | `SetConvar` | server | `SetConvar(name, value)`. Stores a plain convar, which only the server keeps. |
 | `SetConvarReplicated` | server | `SetConvarReplicated(name, value)`. Stores a replicated convar. Every connected player gets it at once, and players who join later get it too. Fails, and changes nothing, when the name is longer than 256 bytes or the value longer than 4096 bytes. |
 | `SetConvarServerInfo` | server | `SetConvarServerInfo(name, value)`. Stores a convar marked as server information. Nothing sends it anywhere yet. |
+| `SetGameType` | server | `SetGameType(name)`. Sets the `gametype` server-info convar, shown in `/info.json` `vars`. Errors as `SetConvar` does. |
+| `SetMapName` | server | `SetMapName(name)`. Sets the `mapname` server-info convar, shown in `/info.json` `vars`. Errors as `SetConvar` does. |
 | `AddConvarChangeListener` | both | `AddConvarChangeListener(filter, fn)`. Calls `fn(convarName, reserved)` when a matching convar changes (`*`/`?` globs, case-insensitive, `nil` or `""` matches all). Returns a numeric cookie. |
 | `RemoveConvarChangeListener` | both | `RemoveConvarChangeListener(cookie)`. Removes the listener returned by `AddConvarChangeListener`. |
 | `ExecuteCommand` | both | `ExecuteCommand(line)`. Queues a console line. It runs after the current script call returns. On a server it runs with the rights of the calling resource, as its principal `resource.<name>`. On a client it runs locally, as a typed console line. |
 | `RegisterCommand` | both | `RegisterCommand(name, fn [, restricted])`. Registers a console command. `fn` is called as `fn(source, args, raw)`, where `source` is the player's id or `0` (the console), `args` is an array of strings and `raw` is the line. |
 | `GetRegisteredCommands` | both | `GetRegisteredCommands()`. Returns a sorted array of `{ name = ... }` tables for built-in and script commands. |
+| `GetGameName` | both | `GetGameName()`. Returns `sixm` on a server and `headless` on a client. Constant. |
+| `GetGameBuildNumber` | both | `GetGameBuildNumber()`. Returns `0`. Constant. |
+| `GetInstanceId` | both | `GetInstanceId()`. Returns the process id as an integer, stable for the life of the process. |
 
 - Convar names are case-insensitive.
 - The setters take effect at once, not after the current call, and follow the
@@ -395,10 +406,15 @@ plain names, because every write is batched (see below).
 | `GetNumPlayerIdentifiers` | `GetNumPlayerIdentifiers(player)`. Returns the number of identifiers as an integer, `0` for an unknown player. |
 | `GetPlayerIdentifier` | `GetPlayerIdentifier(player, index)`. Returns the identifier at the 0-based `index`, or `nil`. |
 | `GetPlayerIdentifierByType` | `GetPlayerIdentifierByType(player, kind)`. Returns the first identifier whose text before `:` is `kind`, whole, for example `license:<hex>`, or `nil`. |
+| `GetPlayerGuid` | `GetPlayerGuid(player)`. Returns the hex part of the player's `license:` identifier (the text after `license:`), or `nil` for an unknown player or one without a license. |
+| `GetPlayerTimeOnline` | `GetPlayerTimeOnline(player)`. Returns whole seconds since the server admitted the player (after `playerConnecting` and deferrals), or `nil` for an unknown or still-connecting player. |
+| `GetPlayerFromIndex` | `GetPlayerFromIndex(index)`. Returns the player at the 0-based `index` of the connected-player list (join order), as a decimal string like `GetPlayers`, or `nil` when `index` is out of range or not a non-negative whole number. |
+| `GetHostId` | `GetHostId()`. Returns the lowest connected player id as a string, or `nil` when nobody is connected. |
 | `GetPlayerLastMsg` | `GetPlayerLastMsg(player)`. Returns milliseconds since the last message from the player, or `-1`. |
 | `GetNumPlayerTokens` | `GetNumPlayerTokens(player)`. Returns the number of client identity tokens (`1` for a connected player, `0` when unknown). |
 | `GetPlayerToken` | `GetPlayerToken(player, index)`. Returns the token at 0-based `index` (`0:<fingerprint>`), or `nil`. |
 | `DropPlayer` | `DropPlayer(player [, reason])`. Disconnects the player after the current call. The default reason is `Dropped by server`. |
+| `IsAceAllowed` | `IsAceAllowed(object)`. Returns whether the calling resource, as the principal `resource.<name>`, may use `object`. |
 | `IsPlayerAceAllowed` | `IsPlayerAceAllowed(player, object)`. Returns whether the player may use `object`, as the principal `player.<id>` with the identifiers it has. `false` for an id that is not connected. See [server.md](server.md#permissions). |
 | `IsPrincipalAceAllowed` | `IsPrincipalAceAllowed(principal, object)`. Returns whether the principal, such as `group.admin`, may use `object`. Names are case-insensitive. |
 | `Player` | `Player(id)`. Returns a table with a `state` field: the player's state bag. Raises an error when the id is not a number or a numeric string. |
@@ -439,6 +455,11 @@ client: the first is `0`, the second is the server id.
 | `AddStateBagChangeHandler` | both | `AddStateBagChangeHandler(key, bag, fn)`. Either filter may be `nil`, which matches every key or bag. Returns a cookie. |
 | `RemoveStateBagChangeHandler` | both | `RemoveStateBagChangeHandler(cookie)`. Removes a handler. |
 | `GetPlayerFromStateBagName` | both | `GetPlayerFromStateBagName(bagName)`. Returns the player id of a `player:<id>` bag, or `0` for any other name. |
+| `GetStateBagValue` | both | `GetStateBagValue(bagName, key)`. Returns the value, or `nil` when the bag or the key is not set. Bag names are `global`, `player:<id>` and `entity:<id>`. |
+| `StateBagHasKey` | both | `StateBagHasKey(bagName, key)`. Returns a boolean. A key set to `nil` is deleted, so it is `false`. |
+| `GetStateBagKeys` | both | `GetStateBagKeys(bagName)`. Returns the key names sorted ascending, `{}` for a bag without keys, and `nil` for a bag that does not exist. |
+| `SetStateBagValue` | both | `SetStateBagValue(bagName, key, value [, replicated])`. Same semantics as `bag:set`, except that `replicated` defaults to `false`. On a client, `replicated = true` fails with `clients cannot write replicated state`. The FiveM form `SetStateBagValue(bagName, key, valueData, valueLength, replicated)` takes msgpack bytes (a string from `msgpack.pack`), decodes only the first `valueLength` bytes and stores the result. It fails with `valueLength exceeds data` when the length is longer than the data, and with the decoder error for malformed bytes. |
+| `EnsureEntityStateBag` | both | `EnsureEntityStateBag(entity)`. Does nothing and never fails: an entity's bag exists for the whole life of the entity. Kept for FiveM compatibility. |
 | `Player(id).state` | server | A player's state bag. See above. |
 | `LocalPlayer.state` | client | The local player's state bag. |
 
@@ -471,6 +492,14 @@ Behaviour:
 | `vector3` / `vec3` | both | `vector3(x, y, z)`. Returns a 3D vector. |
 | `vector4` / `vec4` | both | `vector4(x, y, z, w)`. Returns a 4D vector. |
 | `quat` | both | `quat(w, x, y, z)`, `quat(w, vector3)` or `quat(other)`. Returns a quaternion with `.w`, `.x`, `.y`, `.z`, `*` composition/rotation and `json.encode`. |
+| `vector(...)` | both | Flattens numbers and vectors like `vector3(...)`. Returns a vector2, vector3 or vector4 by the total component count. |
+| `dot(a, b)` | both | Sum of the component products of two vectors of the same size. Returns a number. |
+| `cross(a, b)` | both | Cross product of two `vector3`. Returns a `vector3`. |
+| `norm(v)` | both | `v` scaled to length 1, as a vector or quat. A zero vector is returned unchanged. |
+| `inv(q)` | both | Inverse of a quat: its conjugate divided by its squared length. Raises an error for a zero quat. |
+| `slerp(a, b, t)` | both | Spherical interpolation between two quats. `t` is not clamped. Returns a quat. |
+
+- `vector` picks vector2/3/4 from the total component count.
 
 - Arguments can be numbers or vectors, flattened in order:
   `vector3(vector2(1, 2), 3)`. A single number fills every component:
@@ -693,6 +722,13 @@ worker. A callback whose resource has stopped by the time the response arrives i
 dropped, and requests of a stopped resource that have not begun never run.
 Requests run on a small pool of worker threads (`sixm_httpWorkers`), so they
 never block a frame.
+
+`PerformHttpRequestAwait(url, method, data, headers, options)` takes the same
+arguments without a callback and returns `status, body, headers, errorData`. It
+parks the current thread until the response arrives. It works in a thread
+(`CreateThread`) and in a script's main chunk (which runs as a task), like
+`Await`; in a context that cannot yield, such as an export or a plain callback,
+it raises an error.
 
 The client does not have `PerformHttpRequest`. A request from a player's
 machine would expose the player's address and could reach hosts the server

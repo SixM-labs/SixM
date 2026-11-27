@@ -17,6 +17,13 @@ not implemented yet. For exact function signatures, see
   optionally grouped inside `[category]` folders. Dot-prefixed folders are
   ignored.
 - Manifests use `fxmanifest.lua` (with `__resource.lua` fallback).
+- `start`, `stop`, `restart` and `ensure` accept a `[category]` argument as well as a
+  resource name. Manifest `server_only 'yes'` keeps a resource away from clients.
+  Only the exact string `'yes'` enables the flag. Other strings leave it
+  disabled. A Lua boolean such as `true` raises a manifest error. Another
+  client-synced resource can explicitly include a file from it with a path such
+  as `@server_only_res/data/config.json`; the file is sent as part of that
+  other resource, while the `server_only` resource itself remains unsynced.
 - Supported functional directives: `shared_script` / `shared_scripts`,
   `server_script` / `server_scripts`, `client_script` / `client_scripts`,
   `file` / `files`, `dependency` / `dependencies`, `provide` / `provides`,
@@ -45,9 +52,14 @@ See [manifest.md](../manifest.md) for all manifest rules.
   - Server: `onResourceStarting` (cancellable), `onResourceStart`,
     `onServerResourceStart`, `onResourceStop`, `onServerResourceStop`,
     `playerConnecting(name, setKickReason, deferrals)` (including
-    `deferrals.defer`, `deferrals.update`, `deferrals.done`), `playerJoining`,
-    `playerDropped(reason)`, `entityCreating` (cancellable), `entityCreated`,
-    and `entityRemoved`.
+    `deferrals.defer`, `deferrals.update`, `deferrals.done`),
+    `playerJoining(oldID)`, `playerDropped(reason, resourceName,
+    clientDropReason)`, `entityCreating` (cancellable), `entityCreated`,
+    `entityRemoved`, `onEntityBucketChange`, `onPlayerBucketChange` and
+    `onResourceListRefresh`.
+  - Difference: `oldID` always equals `source`, because SixM assigns the
+    player id before `playerConnecting` and keeps it. The `clientDropReason`
+    numbers (`0` client, `1` script, `2` server) are SixM's own.
   - Client: `onClientResourceStart`, `onResourceStart`, `onClientResourceStop`,
     and `onResourceStop`.
 
@@ -73,6 +85,46 @@ See [manifest.md](../manifest.md) for all manifest rules.
   `player:<id>` and `entity:<id>` bag names.
 - Clients cannot write replicated state (`bag:set(k, v, false)` keeps local
   client state only).
+
+### Script API compatibility additions
+
+- **Lua vectors:** `vector(...)` flattens numbers and vectors, then chooses
+  `vector2`, `vector3` or `vector4` from the component count. Global `dot`,
+  `cross`, and `norm` helpers complement vector methods. `inv` and `slerp`
+  operate on quaternions. JavaScript already has vector methods such as
+  `.dot()` and `.cross()`.
+- **Legacy helpers:** `Citizen.Trace(text)` writes one text argument without
+  `print`'s tab joining and drops one trailing newline. Lua
+  `PerformHttpRequestAwait(url, method, data, headers, options)`
+  returns the four HTTP results and yields in a thread or the script's main
+  chunk. It errors in a context that cannot yield. JavaScript also accepts
+  `addEventListener` and `addNetEventListener` aliases. Raw event listeners
+  can use `addRawEventListener` or `addRawEventHandler` to receive the msgpack
+  argument array as a `Uint8Array` and the event source.
+- **State bag natives:** `GetStateBagValue`, `StateBagHasKey`, and
+  `GetStateBagKeys` address `global`, `player:<id>`, and `entity:<id>` bags
+  directly. `GetStateBagValue` returns `nil` in Lua and `undefined` in
+  JavaScript for a missing bag or key. `StateBagHasKey` returns `false` when
+  the bag or key is missing. `GetStateBagKeys` returns `nil` or `undefined` for
+  an unknown bag. `SetStateBagValue` follows `bag:set` validation and also
+  supports the FiveM msgpack-byte signature. Its `replicated` flag defaults to
+  `false`. On clients, `replicated = false` writes local-only state and
+  replicated writes fail. `EnsureEntityStateBag` is a compatibility no-op.
+- **ACE and server information:** `IsAceAllowed(object)` checks the calling
+  resource's `resource.<name>` principal. Use `IsPlayerAceAllowed` to check a
+  player's permissions. `GetGameName()` returns `sixm` on the server and
+  `headless` on the client. `GetGameBuildNumber()` returns `0`, and
+  `GetInstanceId()` is the process id, stable until that process exits.
+  `GetPlayerGuid` is the hex fingerprint after the player's `license:` prefix.
+  `GetPlayerTimeOnline` counts whole seconds from admission after deferrals.
+  `GetPlayerFromIndex` uses a zero-based index and returns a string player id.
+  `GetHostId` is the lowest connected player id. `SetGameType` and `SetMapName`
+  set the `gametype` and `mapname` values shown in `/info.json`. For a resource,
+  `GetResourceCommands` returns its sorted, lowercase command names, or an
+  empty list if the resource is unknown. See
+  [Lua API: convars and commands](../lua-api.md#convars-and-commands),
+  [Lua API: players](../lua-api.md#players-server-only), and [Lua API:
+  resources](../lua-api.md#resources-and-files).
 
 ### Routing buckets
 
@@ -280,10 +332,11 @@ following FiveM areas are missing:
 - **Default resources:** The example server includes clean-room
   `[system]` resources `sessionmanager` (session ready handshake via
   `sixm_session:ready`, `Player(src).state.sessionActive`, `isPlayerActive`,
-  `getPlayerSession`, `isSessionReady`) and `baseevents` (registers
-  `baseevents:onPlayerEnteredVehicle`, `baseevents:onPlayerLeftVehicle`, and
-  `baseevents:onPlayerDied` channels for future GameAdapter integrations), plus
-  a console-only `chat` resource with a `say` command. `spawnmanager` and
+  `getPlayerSession`, `isSessionReady`) and `baseevents` (registers the FiveM
+  channels `baseevents:onPlayerDied`, `onPlayerKilled`, `onPlayerWasted`,
+  `enteringVehicle`, `enteringAborted`, `enteredVehicle` and `leftVehicle` for
+  scripts and a future GameAdapter; nothing emits them yet), plus a console-only
+  `chat` resource with a `say` command. `spawnmanager` and
   `mapmanager` are not bundled.
 - **No public server browser UI:** `sets` / `SetConvarServerInfo` marks convars
   as server info (exposed on `/info.json`), and `sv_masterUrl` /

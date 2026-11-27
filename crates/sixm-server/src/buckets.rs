@@ -11,12 +11,26 @@
 //! points the scripts use, and the per-bucket settings that are stored only:
 //! the population switch and the entity lockdown mode, which a game adapter
 //! and the entity creation rules read later.
+//!
+//! A move that changes the bucket of a player fires `onPlayerBucketChange`, and
+//! one that changes the bucket of an entity fires `onEntityBucketChange`, after
+//! the move is complete. A player's ped that changes bucket with it fires its
+//! own entity event, after the player event. A call that keeps the bucket fires
+//! nothing.
 
 use std::collections::BTreeMap;
 
-use sixm_core::ScriptError;
+use sixm_core::{EventSource, ScriptError, Value};
 
 use crate::manager::ResourceManager;
+
+/// The event fired when a player changes bucket. Arguments: the player id as a
+/// string, the new bucket, the old bucket.
+const PLAYER_BUCKET_EVENT: &str = "onPlayerBucketChange";
+
+/// The event fired when an entity changes bucket. Arguments: the entity id,
+/// the new bucket, the old bucket.
+const ENTITY_BUCKET_EVENT: &str = "onEntityBucketChange";
 
 /// The lockdown mode of a bucket that has none set.
 const DEFAULT_LOCKDOWN: &str = "inactive";
@@ -77,10 +91,11 @@ impl ResourceManager {
     /// Moves the connected player `player` and its ped to `bucket`. Returns
     /// `false`, and changes nothing, when the player is not connected.
     pub(crate) fn route_player(&self, player: u32, bucket: u32) -> bool {
-        if self.routed_player(player).is_none() {
+        let Some(old) = self.routed_player(player) else {
             return false;
-        }
+        };
         let ped = self.ped_of_player(player);
+        let old_ped = ped.and_then(|ped| self.routed_entity(ped));
         self.rebucket(|entities, scopes| {
             if bucket == 0 {
                 scopes.buckets.remove(&player);
@@ -92,6 +107,23 @@ impl ResourceManager {
             }
         });
         self.settle_owned_by_bucket(player);
+        if old != bucket && self.has_handler(PLAYER_BUCKET_EVENT) {
+            self.dispatch(
+                PLAYER_BUCKET_EVENT,
+                EventSource::Local,
+                &[
+                    Value::from(player.to_string()),
+                    Value::Int(i64::from(bucket)),
+                    Value::Int(i64::from(old)),
+                ],
+            );
+        }
+        if let (Some(ped), Some(old_ped)) = (ped, old_ped)
+            && old_ped != bucket
+            && self.has_handler(ENTITY_BUCKET_EVENT)
+        {
+            self.fire_entity_bucket_change(ped, bucket, old_ped);
+        }
         true
     }
 
@@ -104,12 +136,28 @@ impl ResourceManager {
     /// Moves the entity `entity` to `bucket`. Returns `false`, and changes
     /// nothing, when the entity does not exist.
     pub(crate) fn route_entity(&self, entity: u32, bucket: u32) -> bool {
-        if !self.entities.borrow().contains(entity) {
+        let Some(old) = self.routed_entity(entity) else {
             return false;
-        }
+        };
         self.rebucket(|entities, _| entities.set_bucket(entity, bucket));
         self.settle_owner_of_entity(entity);
+        if old != bucket && self.has_handler(ENTITY_BUCKET_EVENT) {
+            self.fire_entity_bucket_change(entity, bucket, old);
+        }
         true
+    }
+
+    /// Runs `onEntityBucketChange` for `entity`, which moved from `old` to `bucket`.
+    fn fire_entity_bucket_change(&self, entity: u32, bucket: u32, old: u32) {
+        self.dispatch(
+            ENTITY_BUCKET_EVENT,
+            EventSource::Local,
+            &[
+                Value::Int(i64::from(entity)),
+                Value::Int(i64::from(bucket)),
+                Value::Int(i64::from(old)),
+            ],
+        );
     }
 
     /// The connected players in `bucket`, in ascending order.

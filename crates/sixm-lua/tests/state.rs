@@ -3,8 +3,8 @@
 
 mod common;
 
-use common::{TestHost, call, first, new_host, start, text};
-use sixm_core::{EventSource, Host, PlayerInfo, ScriptRuntime, Value};
+use common::{TestHost, call, first, new_client_host, new_host, start, text};
+use sixm_core::{EntityKind, EventSource, Host, PlayerInfo, ScriptRuntime, Value};
 
 /// Replaces the host's player list with the given ids.
 fn join(host: &TestHost, ids: &[u32]) {
@@ -349,4 +349,178 @@ fn a_write_inside_a_handler_keeps_that_handlers_source() {
     host.trigger_event("probe", EventSource::Player(7), &[], None)
         .expect("the event is delivered");
     assert_eq!(first(&rt, "last"), Value::Int(7));
+}
+
+#[test]
+fn state_bag_natives_read_write_and_list_keys_by_name() {
+    let host = new_host();
+    join(&host, &[1]);
+    let rt = start(
+        &host,
+        "natives",
+        &["write", "check", "clear", "after"],
+        &[(
+            "main.lua",
+            "exports('write', function()\n\
+               SetStateBagValue('global', 'b', 2, true)\n\
+               SetStateBagValue('global', 'a', 'x', false)\n\
+               Player(1).state.score = 3\n\
+             end)\n\
+             exports('check', function()\n\
+               return table.concat({\n\
+                 tostring(GetStateBagValue('global', 'a')),\n\
+                 tostring(StateBagHasKey('global', 'b')),\n\
+                 table.concat(GetStateBagKeys('global'), ','),\n\
+                 tostring(GetStateBagValue('player:1', 'score')),\n\
+               }, ' ')\n\
+             end)\n\
+             exports('clear', function()\n\
+               SetStateBagValue('global', 'b', nil, true)\n\
+             end)\n\
+             exports('after', function()\n\
+               return tostring(StateBagHasKey('global', 'b')) .. ' ' .. table.concat(GetStateBagKeys('global'), ',')\n\
+             end)\n",
+        )],
+    );
+
+    call(&rt, "write", &[]);
+    assert_eq!(text(&rt, "check"), "x true a,b 3");
+    assert_eq!(host.state_get("global", "a"), Some(Value::from("x")));
+    call(&rt, "clear", &[]);
+    assert_eq!(text(&rt, "after"), "false a");
+}
+
+#[test]
+fn state_bag_natives_answer_nil_for_unknown_bags() {
+    let host = new_host();
+    let rt = start(
+        &host,
+        "unknown",
+        &["probe"],
+        &[(
+            "main.lua",
+            "exports('probe', function()\n\
+               return table.concat({\n\
+                 tostring(GetStateBagValue('player:9', 'x')),\n\
+                 tostring(GetStateBagKeys('entity:99')),\n\
+                 tostring(GetStateBagKeys('nonsense')),\n\
+                 tostring(StateBagHasKey('player:9', 'x')),\n\
+               }, ' ')\n\
+             end)\n",
+        )],
+    );
+
+    assert_eq!(text(&rt, "probe"), "nil nil nil false");
+}
+
+#[test]
+fn set_state_bag_value_fails_like_a_bag_write() {
+    let host = new_host();
+    let rt = start(
+        &host,
+        "setter",
+        &["unknown_bag", "function_value", "default", "read_default"],
+        &[(
+            "main.lua",
+            "exports('unknown_bag', function()\n\
+               return tostring(select(2, pcall(SetStateBagValue, 'player:9', 'x', 1, true)))\n\
+             end)\n\
+             exports('function_value', function()\n\
+               return tostring(select(2, pcall(SetStateBagValue, 'global', 'f', function() end, false)))\n\
+             end)\n\
+             exports('default', function()\n\
+               SetStateBagValue('global', 'd', 5)\n\
+             end)\n\
+             exports('read_default', function()\n\
+               return GetStateBagValue('global', 'd')\n\
+             end)\n",
+        )],
+    );
+
+    assert!(text(&rt, "unknown_bag").contains("state bag `player:9` does not exist"));
+    assert!(text(&rt, "function_value").contains("functions cannot be sent over the network"));
+    call(&rt, "default", &[]);
+    assert_eq!(first(&rt, "read_default"), Value::Int(5));
+}
+
+#[test]
+fn ensure_entity_state_bag_is_accepted_and_entity_bags_list_empty() {
+    let host = new_host();
+    let id = host.create_entity_for_test(EntityKind::Vehicle, None);
+    let rt = start(
+        &host,
+        "ensure",
+        &["ensure"],
+        &[(
+            "main.lua",
+            "exports('ensure', function(id)\n\
+               EnsureEntityStateBag(id)\n\
+               EnsureEntityStateBag(9999)\n\
+               return #GetStateBagKeys('entity:' .. id)\n\
+             end)\n",
+        )],
+    );
+
+    assert_eq!(
+        call(&rt, "ensure", &[Value::Int(i64::from(id))]),
+        vec![Value::Int(0)]
+    );
+}
+
+#[test]
+fn state_bag_natives_exist_on_the_client() {
+    let host = new_client_host(1);
+    host.state_set("global", "x", Value::Int(4), false)
+        .expect("a client writes local state");
+    let rt = start(
+        &host,
+        "client_natives",
+        &["read", "kind"],
+        &[(
+            "main.lua",
+            "exports('read', function() return GetStateBagValue('global', 'x') end)\n\
+             exports('kind', function() return type(SetStateBagValue) end)\n",
+        )],
+    );
+
+    assert_eq!(first(&rt, "read"), Value::Int(4));
+    assert_eq!(text(&rt, "kind"), "function");
+}
+
+#[test]
+fn set_state_bag_value_decodes_msgpack_bytes_up_to_the_length() {
+    let host = new_host();
+    let rt = start(
+        &host,
+        "packed",
+        &["write", "read", "trailing", "short", "bad"],
+        &[(
+            "main.lua",
+            "exports('write', function()\n\
+               local packed = msgpack.pack({ 1, 'two' })\n\
+               SetStateBagValue('global', 'packed', packed, #packed, true)\n\
+               local kept = msgpack.pack('kept')\n\
+               SetStateBagValue('global', 'trailing', kept .. 'junk', #kept, false)\n\
+             end)\n\
+             exports('read', function()\n\
+               return GetStateBagValue('global', 'packed')[2]\n\
+             end)\n\
+             exports('trailing', function()\n\
+               return GetStateBagValue('global', 'trailing')\n\
+             end)\n\
+             exports('short', function()\n\
+               local packed = msgpack.pack('x')\n\
+               return tostring(select(2, pcall(SetStateBagValue, 'global', 'k', packed, #packed + 1, true)))\n\
+             end)\n\
+             exports('bad', function()\n\
+               return tostring(pcall(SetStateBagValue, 'global', 'k', string.char(0xc1), 1, true))\n\
+             end)\n",
+        )],
+    );
+
+    call(&rt, "write", &[]);
+    assert_eq!(text(&rt, "read"), "two");
+    assert_eq!(first(&rt, "trailing"), Value::from("kept"));
+    assert!(text(&rt, "short").contains("SetStateBagValue: valueLength exceeds data"));
+    assert_eq!(text(&rt, "bad"), "false");
 }

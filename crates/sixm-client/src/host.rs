@@ -220,6 +220,10 @@ impl Host for ClientRuntime {
         self.state.borrow().get(bag, key).cloned()
     }
 
+    fn state_keys(&self, bag: &str) -> Option<Vec<String>> {
+        self.bag_exists(bag).then(|| self.state.borrow().keys(bag))
+    }
+
     fn entity(&self, entity: u32) -> Option<EntityInfo> {
         self.entities.borrow().get(&entity).map(|slot| slot.info)
     }
@@ -276,6 +280,15 @@ impl Host for ClientRuntime {
         names.sort_unstable();
         names.dedup();
         names
+    }
+
+    fn resource_commands(&self, resource: &str) -> Vec<String> {
+        self.commands
+            .borrow()
+            .iter()
+            .filter(|(_, command)| command.handler.owner.as_ref() == resource)
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     fn entity_script(&self, entity: u32) -> Option<String> {

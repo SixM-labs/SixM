@@ -210,6 +210,10 @@ function Citizen.SetTimeout(ms, fn) end
 ---@param id integer
 function Citizen.ClearTimeout(id) end
 
+--- Logs `text` like `print`, without joining tabs. One trailing newline is dropped.
+---@param text string
+function Citizen.Trace(text) end
+
 --- Parks the current thread until `p` settles and returns its value or raises its reason.
 ---@param p SixMPromise
 ---@return any
@@ -365,6 +369,11 @@ function GetResourceMetadata(resource, key, index) end
 ---@return integer
 function GetNumResourceMetadata(resource, key) end
 
+--- Returns a sorted array of the console command names `resource` registered, or `{}`.
+---@param resource string
+---@return string[]
+function GetResourceCommands(resource) end
+
 --- Starts resource `name` if allowed by `command.start` ACE permission. (Server only)
 ---@param name string
 ---@return boolean
@@ -505,6 +514,14 @@ function SetConvarReplicated(name, value) end
 ---@param value string
 function SetConvarServerInfo(name, value) end
 
+--- Sets the `gametype` server info convar. (Server only)
+---@param name string
+function SetGameType(name) end
+
+--- Sets the `mapname` server info convar. (Server only)
+---@param name string
+function SetMapName(name) end
+
 --- Registers a listener invoked when convars matching glob `filter` (`nil` or `""` for all) change.
 ---@param filter string?
 ---@param fn fun(convarName: string, reserved: integer)
@@ -528,6 +545,18 @@ function RegisterCommand(name, fn, restricted) end
 --- Returns a sorted array of registered command descriptors `{ name = ... }`.
 ---@return { name: string }[]
 function GetRegisteredCommands() end
+
+--- Returns `'sixm'` on a server and `'headless'` on a client.
+---@return string
+function GetGameName() end
+
+--- Returns the game build number, always `0`.
+---@return integer
+function GetGameBuildNumber() end
+
+--- Returns the process id, stable for the life of the process.
+---@return integer
+function GetInstanceId() end
 
 -- =============================================================================
 -- Players (server and client)
@@ -571,6 +600,25 @@ function GetNumPlayerIdentifiers(player) end
 ---@param index integer
 ---@return string?
 function GetPlayerIdentifier(player, index) end
+
+--- Returns the hex part of the player's `license:` identifier, or `nil`. (Server only)
+---@param player integer | string
+---@return string?
+function GetPlayerGuid(player) end
+
+--- Returns whole seconds since the player was admitted, or `nil`. (Server only)
+---@param player integer | string
+---@return integer?
+function GetPlayerTimeOnline(player) end
+
+--- Returns the player at 0-based `index` of the join-order player list as a string, or `nil`. (Server only)
+---@param index integer
+---@return string?
+function GetPlayerFromIndex(index) end
+
+--- Returns the lowest connected player id as a string, or `nil` when nobody is connected. (Server only)
+---@return string?
+function GetHostId() end
 
 --- Returns the first identifier whose prefix before `:` equals `kind`, or `nil`. (Server only)
 ---@param player integer | string
@@ -620,6 +668,11 @@ function IsPlayerAceAllowed(player, object) end
 ---@param object string
 ---@return boolean
 function IsPrincipalAceAllowed(principal, object) end
+
+--- Returns whether the calling resource (`resource.<name>`) is allowed ACE `object`. (Server only)
+---@param object string
+---@return boolean
+function IsAceAllowed(object) end
 
 --- Returns the local client player handle (`0`). (Client only)
 ---@return integer
@@ -690,6 +743,35 @@ function GetPlayerFromStateBagName(bagName) end
 ---@param bagName string
 ---@return integer
 function GetEntityFromStateBagName(bagName) end
+
+--- Returns the value of `key` in state bag `bagName`, or nil when unset.
+---@param bagName string
+---@param key string
+---@return any
+function GetStateBagValue(bagName, key) end
+
+--- Returns true when state bag `bagName` has a value for `key`.
+---@param bagName string
+---@param key string
+---@return boolean
+function StateBagHasKey(bagName, key) end
+
+--- Returns the key names of state bag `bagName`, sorted, or nil for an unknown bag.
+---@param bagName string
+---@return string[]?
+function GetStateBagKeys(bagName) end
+
+--- Writes `value` under `key` in state bag `bagName`. `replicated` defaults to false.
+---@param bagName string
+---@param key string
+---@overload fun(bagName: string, key: string, valueData: string, valueLength: integer, replicated: boolean?)
+---@param value any
+---@param replicated boolean?
+function SetStateBagValue(bagName, key, value, replicated) end
+
+--- Compatibility call; does nothing, since an entity's bag lives as long as the entity.
+---@param entity integer
+function EnsureEntityStateBag(entity) end
 
 -- =============================================================================
 -- Vectors and quaternions
@@ -832,6 +914,50 @@ function vec4(x, y, z, w) end
 ---@param z number
 ---@return quat
 function quat(w, x, y, z) end
+
+--- Builds a vector2, vector3 or vector4 from numbers and vectors, chosen by the total component count.
+---@overload fun(a: number, b: number): vector2
+---@overload fun(a: number, b: number, c: number): vector3
+---@overload fun(a: number, b: number, c: number, d: number): vector4
+---@param ... number | vector2 | vector3 | vector4
+---@return vector2 | vector3 | vector4
+function vector(...) end
+
+--- The sum of the component products of two vectors of the same size.
+---@overload fun(a: vector2, b: vector2): number
+---@overload fun(a: vector3, b: vector3): number
+---@overload fun(a: vector4, b: vector4): number
+---@param a vector2 | vector3 | vector4
+---@param b vector2 | vector3 | vector4
+---@return number
+function dot(a, b) end
+
+--- The cross product of two vector3.
+---@param a vector3
+---@param b vector3
+---@return vector3
+function cross(a, b) end
+
+--- Scales a vector or quat to length 1. A zero vector is returned unchanged.
+---@overload fun(v: vector2): vector2
+---@overload fun(v: vector3): vector3
+---@overload fun(v: vector4): vector4
+---@overload fun(q: quat): quat
+---@param v vector2 | vector3 | vector4 | quat
+---@return vector2 | vector3 | vector4 | quat
+function norm(v) end
+
+--- The inverse of a quat: its conjugate divided by its squared length. Errors for a zero quat.
+---@param q quat
+---@return quat
+function inv(q) end
+
+--- Spherical interpolation between two quats. `t` is not clamped.
+---@param a quat
+---@param b quat
+---@param t number
+---@return quat
+function slerp(a, b, t) end
 
 -- =============================================================================
 -- Entities and routing buckets
@@ -1221,6 +1347,18 @@ function GetRoutingBucketEntityLockdownMode(bucket) end
 ---@param headers? table<string, string | number>
 ---@param options? SixMHttpRequestOptions
 function PerformHttpRequest(url, callback, method, data, headers, options) end
+
+--- Starts an HTTP request and parks the current thread until it finishes. Works in a thread or a script's main chunk, not in a context that cannot yield. (Server only)
+---@param url string
+---@param method? string
+---@param data? string
+---@param headers? table<string, string | number>
+---@param options? SixMHttpRequestOptions
+---@return integer status
+---@return string body
+---@return table headers
+---@return string errorData
+function PerformHttpRequestAwait(url, method, data, headers, options) end
 
 --- Registers the resource's HTTP handler for `/<resource>` and `/<resource>/...`. (Server only)
 ---@param handler fun(req: SixMHttpRequest, res: SixMHttpResponse)

@@ -33,7 +33,7 @@ use crate::convars::{Convars, KVP_PATH, RCON_PASSWORD};
 use crate::entities::{EntityStore, EntityUpdate};
 use crate::host_functions::{HostFunctions, is_host};
 use crate::http::{Completion, HttpClient};
-use crate::network::Network;
+use crate::network::{DROP_SCRIPT, DropOrigin, Network};
 use crate::perf::FrameHistory;
 use crate::profiler::Profiler;
 use crate::resource_files::{FileHashes, listing};
@@ -52,6 +52,9 @@ pub enum ManagerError {
     /// The operation needs a running resource, and this one is not running.
     #[error("resource `{0}` is not running")]
     NotRunning(String),
+    /// No resource category has this name. The name includes the brackets.
+    #[error("no resource category `{0}`")]
+    UnknownCategory(String),
     /// A handler of `onResourceStarting` canceled the start.
     #[error("start of `{0}` was canceled by onResourceStarting")]
     Canceled(String),
@@ -270,6 +273,80 @@ impl ResourceManager {
         }
     }
 
+    /// Starts the resources of `category` and the resources they depend on,
+    /// dependencies first. Running resources are left as they are.
+    pub fn start_category(&self, category: &str) -> Result<(), ManagerError> {
+        self.ensure_scanned();
+        for resource in &self.category_order(category)? {
+            if !self.is_running_canonical(resource) {
+                self.start_one(resource)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Stops the running resources of `category`, dependents first. Each stop
+    /// also stops running dependents outside the category.
+    pub fn stop_category(&self, category: &str) -> Result<(), ManagerError> {
+        self.ensure_scanned();
+        for resource in self.members_in_dependency_order(category)?.iter().rev() {
+            if self.is_running_canonical(resource) {
+                self.stop(resource)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Restarts each resource of `category` in dependency order, starting the
+    /// ones that are not running.
+    pub fn restart_category(&self, category: &str) -> Result<(), ManagerError> {
+        self.ensure_scanned();
+        for resource in self.members_in_dependency_order(category)? {
+            self.restart(&resource)?;
+        }
+        Ok(())
+    }
+
+    /// Restarts or starts each resource of `category` in dependency order. A
+    /// dependent that is restarted again when its dependency restarts is
+    /// restarted twice.
+    pub fn ensure_category(&self, category: &str) -> Result<(), ManagerError> {
+        self.ensure_scanned();
+        for resource in self.members_in_dependency_order(category)? {
+            self.ensure(&resource)?;
+        }
+        Ok(())
+    }
+
+    /// The resources of `category` and their dependencies, dependencies first.
+    /// An empty category is logged and gives an empty list.
+    fn category_order(&self, category: &str) -> Result<Vec<ResourceName>, ManagerError> {
+        let order = self
+            .catalog
+            .borrow()
+            .category_start_order(category)?
+            .ok_or_else(|| ManagerError::UnknownCategory(category.to_owned()))?;
+        if order.is_empty() {
+            warn!("category `{category}` has no resources");
+        }
+        Ok(order)
+    }
+
+    /// The members of `category` in dependency order, leaving out the outside
+    /// dependencies that [`category_order`](Self::category_order) adds.
+    fn members_in_dependency_order(
+        &self,
+        category: &str,
+    ) -> Result<Vec<ResourceName>, ManagerError> {
+        let order = self.category_order(category)?;
+        let catalog = self.catalog.borrow();
+        let members = catalog.category_members(category).unwrap_or_default();
+        Ok(order
+            .into_iter()
+            .filter(|name| members.contains(name))
+            .collect())
+    }
+
     /// Scans the resource folder again. Running resources are not affected.
     pub fn refresh(&self) {
         let root = self.convars.borrow().resources_path();
@@ -291,6 +368,7 @@ impl ResourceManager {
         info!("Found {} resources in {}", catalog.len(), root.display());
         *self.catalog.borrow_mut() = catalog;
         self.scanned.set(true);
+        self.dispatch("onResourceListRefresh", EventSource::Local, &[]);
     }
 
     /// Whether `name` (canonical name or `provide` alias) is running.
@@ -680,6 +758,14 @@ impl ResourceManager {
         self.dispatch_from(event, source, args, None)
     }
 
+    /// Whether any running runtime handles `event`. Lets the callers skip
+    /// building the arguments of an event nobody listens to.
+    pub(crate) fn has_handler(&self, event: &str) -> bool {
+        self.snapshot()
+            .iter()
+            .any(|runtime| runtime.handles_event(event))
+    }
+
     /// Like [`dispatch`](Self::dispatch), for an event that a resource started.
     /// `invoker` is what the handlers see as `GetInvokingResource()`.
     pub(crate) fn dispatch_from(
@@ -820,6 +906,14 @@ impl ResourceManager {
     /// Lists the client files of `name` to players. A resource whose files
     /// cannot be expanded is still listed, with no files, and the error is logged.
     fn advertise(&self, name: &ResourceName) {
+        let server_only = self
+            .catalog
+            .borrow()
+            .get(name)
+            .is_some_and(|info| info.manifest.server_only);
+        if server_only {
+            return;
+        }
         let resource = self.client_resource(name);
         let entry = listing(&resource);
         self.advertised.borrow_mut().push(resource);
@@ -833,9 +927,15 @@ impl ResourceManager {
 
     /// Removes `name` from the client files and tells players it stopped.
     fn withdraw(&self, name: &ResourceName) {
-        self.advertised
-            .borrow_mut()
-            .retain(|resource| resource.name != name.as_ref());
+        let removed = {
+            let mut advertised = self.advertised.borrow_mut();
+            let before = advertised.len();
+            advertised.retain(|resource| resource.name != name.as_ref());
+            advertised.len() != before
+        };
+        if !removed {
+            return;
+        }
         self.publish_advertised();
         self.with_server(|server| {
             if let Err(err) = server.broadcast_resource_stopped(name) {
@@ -1289,6 +1389,10 @@ impl Host for ResourceManager {
         self.state.borrow().get(bag, key).cloned()
     }
 
+    fn state_keys(&self, bag: &str) -> Option<Vec<String>> {
+        self.state_bag_keys(bag)
+    }
+
     fn state_set(
         &self,
         bag: &str,
@@ -1320,6 +1424,15 @@ impl Host for ResourceManager {
         names.sort_unstable();
         names.dedup();
         names
+    }
+
+    fn resource_commands(&self, resource: &str) -> Vec<String> {
+        self.commands
+            .borrow()
+            .iter()
+            .filter(|(_, command)| command.handler.owner.as_ref() == resource)
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     fn entity_script(&self, entity: u32) -> Option<String> {
@@ -1417,8 +1530,12 @@ impl ServerHost for ResourceManager {
         self.identifiers_of(player)
     }
 
-    fn drop_player(&self, player: u32, reason: &str) {
-        self.queue_drop(player, reason);
+    fn drop_player(&self, player: u32, reason: &str, resource: &str) {
+        let origin = DropOrigin {
+            resource: resource.to_owned(),
+            code: DROP_SCRIPT,
+        };
+        self.queue_drop(player, reason, origin);
     }
 
     fn is_ace_allowed(&self, principal: &str, object: &str) -> bool {
@@ -1603,6 +1720,10 @@ impl ServerHost for ResourceManager {
 
     fn player_tokens(&self, player: u32) -> Vec<String> {
         self.player_tokens_of(player)
+    }
+
+    fn player_time_online(&self, player: u32) -> Option<std::time::Duration> {
+        self.player_online_for(player)
     }
 
     fn routing_bucket_entity_lockdown_mode(&self, bucket: u32) -> String {

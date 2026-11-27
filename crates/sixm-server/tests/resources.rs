@@ -1,10 +1,71 @@
 //! Resource natives on the server: lifecycle states seen from scripts, the
-//! sorted resource list and manifest metadata.
+//! sorted resource list, manifest metadata and the command, game type and
+//! instance natives.
 
 mod common;
 
+use common::net::{Loopback, Resource};
 use common::{Fixture, manifest};
 use sixm_core::{Host, Value};
+
+#[test]
+fn baseevents_registers_the_fivem_channels_and_not_the_old_ones() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/server-data/resources/[system]/baseevents/server.lua"
+    );
+    let mut source = std::fs::read_to_string(path).expect("read baseevents server.lua");
+    source.push_str(
+        "\nLOG = {}\n\
+         for _, n in ipairs(EVENT_CHANNELS) do\n\
+             AddEventHandler(n, function(a) LOG[#LOG + 1] = n .. '=' .. tostring(a) end)\n\
+         end\n\
+         AddEventHandler('baseevents:onPlayerEnteredVehicle', function(a)\n\
+             LOG[#LOG + 1] = 'baseevents:onPlayerEnteredVehicle=' .. tostring(a)\n\
+         end)\n\
+         AddEventHandler('baseevents:onPlayerLeftVehicle', function(a)\n\
+             LOG[#LOG + 1] = 'baseevents:onPlayerLeftVehicle=' .. tostring(a)\n\
+         end)\n\
+         exports('log', function() return table.concat(LOG, ' ') end)\n",
+    );
+    let h = Loopback::new(&[Resource {
+        name: "baseevents",
+        script: &source,
+        exports: &["log"],
+    }]);
+    let client = h.connect("Alice").expect("Alice is admitted");
+    let channels = [
+        "baseevents:onPlayerDied",
+        "baseevents:onPlayerKilled",
+        "baseevents:onPlayerWasted",
+        "baseevents:enteringVehicle",
+        "baseevents:enteringAborted",
+        "baseevents:enteredVehicle",
+        "baseevents:leftVehicle",
+    ];
+
+    for name in [
+        "baseevents:onPlayerEnteredVehicle",
+        "baseevents:onPlayerLeftVehicle",
+    ] {
+        client
+            .send_event(name, &[Value::from("x")])
+            .expect("old event is sent");
+    }
+    for name in channels {
+        client
+            .send_event(name, &[Value::from("x")])
+            .expect("FiveM event is sent");
+    }
+
+    h.wait_for_log("baseevents:leftVehicle=x");
+    let log = h.log();
+    for name in channels {
+        assert!(log.contains(&format!("{name}=x")), "missing {name}: {log}");
+    }
+    assert!(!log.contains("onPlayerEnteredVehicle"), "log: {log}");
+    assert!(!log.contains("onPlayerLeftVehicle"), "log: {log}");
+}
 
 /// `observer` keeps a log that other resources write to with `record`, read
 /// with `log()`, and asks for the state of any resource with `stateOf(name)`.
@@ -367,4 +428,185 @@ fn restart_resource_native_checks_ace_and_supports_aliases() {
         )
         .expect("call export");
     assert_eq!(missing, vec![Value::Bool(false)]);
+}
+
+#[test]
+fn resource_commands_game_type_and_instance_id_work_on_the_real_manager() {
+    let fx = Fixture::new();
+    fx.add_resource(
+        "info",
+        &manifest(&["server.lua"], &["commands", "setup", "instance"], &[]),
+        &[(
+            "server.lua",
+            "RegisterCommand('alpha', function() end, false)\n\
+             exports('commands', function() return GetResourceCommands('info') end)\n\
+             exports('setup', function()\n\
+                 SetGameType('race')\n\
+                 SetMapName('m')\n\
+             end)\n\
+             exports('instance', function() return GetInstanceId() end)\n",
+        )],
+    );
+
+    fx.manager().start("info").expect("info starts");
+    assert_eq!(
+        fx.manager()
+            .call_export("info", "commands", &[], None)
+            .expect("call export"),
+        vec![Value::Array(vec![Value::from("alpha")])]
+    );
+
+    fx.manager()
+        .call_export("info", "setup", &[], None)
+        .expect("call export");
+    assert_eq!(fx.manager().get_convar("gametype"), Some("race".to_owned()));
+    assert_eq!(fx.manager().get_convar("mapname"), Some("m".to_owned()));
+
+    assert_eq!(
+        fx.manager()
+            .call_export("info", "instance", &[], None)
+            .expect("call export"),
+        vec![Value::Int(i64::from(std::process::id()))]
+    );
+}
+
+#[test]
+fn refresh_fires_on_resource_list_refresh() {
+    let fx = Fixture::new();
+    add_observer(&fx);
+    fx.add_resource(
+        "listener",
+        &manifest(&["server.lua"], &[], &["observer"]),
+        &[(
+            "server.lua",
+            "AddEventHandler('onResourceListRefresh', function()\n\
+                 exports.observer:record('refreshed')\n\
+             end)\n",
+        )],
+    );
+    fx.manager().start("observer").expect("observer starts");
+    fx.manager().start("listener").expect("listener starts");
+
+    fx.manager().refresh();
+    fx.manager().refresh();
+
+    let values = fx
+        .manager()
+        .call_export("observer", "log", &[], None)
+        .expect("log");
+    assert_eq!(values, vec![Value::from("refreshed refreshed")]);
+}
+
+/// Writes resource `name` in folder `folder` that depends on `dependencies`.
+/// It records its name with the observer when it loads, and `stop name` when
+/// it stops.
+fn add_recorder(fx: &Fixture, folder: &str, name: &str, dependencies: &[&str]) {
+    fx.add_resource(
+        folder,
+        &manifest(&["server.lua"], &[], dependencies),
+        &[(
+            "server.lua",
+            &format!(
+                "exports.observer:record('{name}')\n\
+                 AddEventHandler('onResourceStop', function(stopped)\n\
+                     if stopped == GetCurrentResourceName() then\n\
+                         exports.observer:record('stop {name}')\n\
+                     end\n\
+                 end)\n"
+            ),
+        )],
+    );
+}
+
+/// The observer's log, as one string.
+fn observer_log(fx: &Fixture) -> String {
+    match fx
+        .manager()
+        .call_export("observer", "log", &[], None)
+        .expect("log")
+        .first()
+    {
+        Some(Value::String(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
+        other => panic!("log returned {other:?}"),
+    }
+}
+
+#[test]
+fn start_category_starts_members_and_dependencies_in_order() {
+    let fx = Fixture::new();
+    add_observer(&fx);
+    add_recorder(&fx, "[g]/a", "a", &["base"]);
+    add_recorder(&fx, "[g]/[inner]/b", "b", &["a"]);
+    add_recorder(&fx, "base", "base", &[]);
+    fx.manager().start("observer").expect("observer starts");
+
+    fx.server.execute("start [g]");
+
+    assert_eq!(observer_log(&fx), "base a b");
+    assert!(fx.manager().is_running("base"));
+    assert!(fx.manager().is_running("a"));
+    assert!(fx.manager().is_running("b"));
+}
+
+#[test]
+fn stop_category_stops_dependents_first_and_leaves_outside_dependencies() {
+    let fx = Fixture::new();
+    add_observer(&fx);
+    add_recorder(&fx, "[g]/a", "a", &["base"]);
+    add_recorder(&fx, "[g]/b", "b", &["a"]);
+    add_recorder(&fx, "base", "base", &[]);
+    fx.manager().start("observer").expect("observer starts");
+    fx.server.execute("start [g]");
+
+    fx.server.execute("stop [g]");
+
+    assert_eq!(observer_log(&fx), "base a b stop b stop a");
+    assert!(fx.manager().is_running("base"), "outside dependency stays");
+    assert!(!fx.manager().is_running("a"));
+    assert!(!fx.manager().is_running("b"));
+}
+
+#[test]
+fn ensure_and_restart_category_restart_running_and_start_stopped() {
+    let fx = Fixture::new();
+    add_observer(&fx);
+    add_recorder(&fx, "[g]/a", "a", &["base"]);
+    add_recorder(&fx, "[g]/b", "b", &["a"]);
+    add_recorder(&fx, "base", "base", &[]);
+    fx.manager().start("observer").expect("observer starts");
+    fx.manager().start("a").expect("a starts");
+    assert_eq!(observer_log(&fx), "base a");
+
+    fx.server.execute("ensure [g]");
+
+    assert_eq!(observer_log(&fx), "base a stop a a b");
+    assert!(fx.manager().is_running("a"));
+    assert!(fx.manager().is_running("b"));
+
+    fx.server.execute("restart [g]");
+
+    assert_eq!(
+        observer_log(&fx),
+        "base a stop a a b stop b stop a a b stop b b"
+    );
+    assert!(fx.manager().is_running("a"));
+    assert!(fx.manager().is_running("b"));
+}
+
+#[test]
+fn an_unknown_category_changes_nothing() {
+    let fx = Fixture::new();
+    add_observer(&fx);
+    add_recorder(&fx, "base", "base", &[]);
+    fx.manager().start("observer").expect("observer starts");
+
+    fx.server.execute("start [nope]");
+
+    assert_eq!(observer_log(&fx), "");
+    assert!(!fx.manager().is_running("base"));
+    let error = fx
+        .manager()
+        .start_category("[nope]")
+        .expect_err("unknown category");
+    assert_eq!(error.to_string(), "no resource category `[nope]`");
 }

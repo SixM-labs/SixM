@@ -43,6 +43,7 @@ pub(crate) fn install(runtime: &Rc<LuaRuntime>, helpers: &Helpers) -> mlua::Resu
     globals.raw_set("source", "")?;
     install_scheduling(lua, weak, &globals, helpers)?;
     let citizen: Table = globals.raw_get("Citizen")?;
+    citizen.raw_set("Trace", trace_function(lua, runtime.resource.clone())?)?;
     crate::promise::install(runtime, &globals, &citizen)?;
     install_events(lua, weak, &globals)?;
     install_host(lua, weak, &globals, runtime.side)?;
@@ -317,6 +318,18 @@ fn install_convar_listeners(
     globals.raw_set("AddConvarChangeListener", add_convar_listener)?;
     globals.raw_set("RemoveConvarChangeListener", remove_convar_listener)?;
     globals.raw_set("GetRegisteredCommands", registered_commands)?;
+    let game_name = bind_fn(lua, weak, |rt, (): ()| {
+        Ok(if rt.host()?.server().is_some() {
+            "sixm"
+        } else {
+            "headless"
+        })
+    })?;
+    let game_build_number = bind_fn(lua, weak, |_, (): ()| Ok(0_i64))?;
+    let instance_id = bind_fn(lua, weak, |_, (): ()| Ok(i64::from(std::process::id())))?;
+    globals.raw_set("GetGameName", game_name)?;
+    globals.raw_set("GetGameBuildNumber", game_build_number)?;
+    globals.raw_set("GetInstanceId", instance_id)?;
     Ok(())
 }
 
@@ -333,6 +346,15 @@ fn install_server_convars(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -
         let setter = bind_fn(lua, weak, move |rt, (convar, value): (String, String)| {
             players::server(&*rt.host()?)?
                 .set_convar_for_resource(&rt.resource, &convar, &value, kind)
+                .map_err(lua_err)
+        })?;
+        globals.raw_set(name, setter)?;
+    }
+    let server_info_setters = [("SetGameType", "gametype"), ("SetMapName", "mapname")];
+    for (name, convar) in server_info_setters {
+        let setter = bind_fn(lua, weak, move |rt, (value,): (String,)| {
+            players::server(&*rt.host()?)?
+                .set_convar_for_resource(&rt.resource, convar, &value, ConvarKind::ServerInfo)
                 .map_err(lua_err)
         })?;
         globals.raw_set(name, setter)?;
@@ -364,6 +386,21 @@ fn print_function(
             parts.push(String::from_utf8_lossy(&text.as_bytes()).into_owned());
         }
         tracing::info!(target: "sixm::script", "[{resource}] {}", parts.join("\t"));
+        Ok(())
+    })
+}
+
+/// `Citizen.Trace`: logs one text argument like `print`, without joining tabs. One
+/// trailing newline (with a `\r` before it) is dropped, so the log has no blank line.
+fn trace_function(lua: &Lua, resource: sixm_core::ResourceName) -> mlua::Result<Function> {
+    lua.create_function(move |_, text: LuaString| {
+        let bytes = text.as_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        let line = match text.strip_suffix('\n') {
+            Some(rest) => rest.strip_suffix('\r').unwrap_or(rest),
+            None => &*text,
+        };
+        tracing::info!(target: "sixm::script", "[{resource}] {line}");
         Ok(())
     })
 }

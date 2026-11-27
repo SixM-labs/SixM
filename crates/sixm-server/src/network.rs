@@ -8,7 +8,7 @@
 //! are queued and applied by [`ResourceManager::apply_deferral_calls`].
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::rc::Rc;
@@ -127,6 +127,9 @@ pub(crate) struct Player {
     /// The player's own ped, created when it is admitted and deleted when it
     /// leaves.
     ped: Option<u32>,
+    /// When the server accepted this player's connection. Set again at admission,
+    /// so time spent in `playerConnecting` and deferrals does not count.
+    connected_at: Instant,
     /// When the last message arrived from this player.
     last_msg: Instant,
     /// Deterministic client tokens derived from the player's TLS certificate fingerprint.
@@ -161,6 +164,7 @@ impl Player {
             deferral: None,
             functions: Vec::new(),
             ped: None,
+            connected_at: Instant::now(),
             last_msg: Instant::now(),
             tokens,
             event_bucket: None,
@@ -274,6 +278,24 @@ impl Players {
     }
 }
 
+/// The code of a drop that the server did not start from a script: the
+/// client closed or lost the connection.
+pub(crate) const DROP_CLIENT: i64 = 0;
+/// The code of a `DropPlayer` call from a script.
+pub(crate) const DROP_SCRIPT: i64 = 1;
+/// The code of a kick the server decides itself, such as an entity id that was
+/// not leased to the player.
+pub(crate) const DROP_SERVER: i64 = 2;
+
+/// Why a player is dropped: the resource that asked, empty when none did, and
+/// one of [`DROP_CLIENT`], [`DROP_SCRIPT`] or [`DROP_SERVER`]. `playerDropped`
+/// reports both.
+#[derive(Debug, Clone)]
+pub(crate) struct DropOrigin {
+    pub(crate) resource: String,
+    pub(crate) code: i64,
+}
+
 /// Everything the network needs: the socket, the players and kicks waiting
 /// for the end of the current script call.
 #[derive(Debug, Default)]
@@ -284,7 +306,9 @@ pub(crate) struct Network {
     pub(crate) web: RefCell<Option<WebServer>>,
     pub(crate) players: RefCell<Players>,
     /// Kicks requested by `DropPlayer`, applied by [`ResourceManager::apply_drops`].
-    pub(crate) pending_drops: RefCell<Vec<(u32, String)>>,
+    pub(crate) pending_drops: RefCell<Vec<(u32, String, DropOrigin)>>,
+    /// Why each kicked player is leaving, until its `playerDropped` runs.
+    pub(crate) drop_origins: RefCell<HashMap<u32, DropOrigin>>,
     /// Deferral calls by player, in the order the scripts made them. Shared
     /// with the deferral functions, which push onto it.
     pub(crate) deferral_calls: Rc<RefCell<Vec<(u32, DeferralCall)>>>,
@@ -663,6 +687,7 @@ impl ResourceManager {
             let mut players = self.network.players.borrow_mut();
             players.get_mut(id).map(|player| {
                 player.admitted = true;
+                player.connected_at = Instant::now();
                 player.deferral = None;
                 (
                     player.connection,
@@ -695,7 +720,11 @@ impl ResourceManager {
                 warn!("cannot send the resource list to player {id}: {err}");
             }
         });
-        self.dispatch("playerJoining", EventSource::Player(id), &[]);
+        self.dispatch(
+            "playerJoining",
+            EventSource::Player(id),
+            &[Value::from(id.to_string())],
+        );
         info!("{name} ({id}) joined from {endpoint}");
     }
 
@@ -850,8 +879,10 @@ impl ResourceManager {
 
     /// Runs `playerDropped`, deletes the player's ped and removes the player.
     /// The player is still listed while the handlers run, so they can look up
-    /// who left.
+    /// who left. `playerDropped` gets the reason, the resource that dropped the
+    /// player (empty for a client that left), and the [`DropOrigin`] code.
     fn player_dropped(&self, player: u32, reason: &str) {
+        let origin = self.network.drop_origins.borrow_mut().remove(&player);
         let found = self
             .network
             .players
@@ -862,10 +893,13 @@ impl ResourceManager {
             debug!(player, "disconnect of an unknown player ignored");
             return;
         };
+        let (resource, code) = origin.map_or((String::new(), DROP_CLIENT), |origin| {
+            (origin.resource, origin.code)
+        });
         self.dispatch(
             "playerDropped",
             EventSource::Player(player),
-            &[Value::from(reason)],
+            &[Value::from(reason), Value::from(resource), Value::Int(code)],
         );
         if let Some(ped) = ped {
             self.remove_entity(ped);
@@ -968,6 +1002,16 @@ impl ResourceManager {
             .map(|found| Instant::now().saturating_duration_since(found.last_msg))
     }
 
+    /// Time since `player` was admitted; `None` for an unknown or still pending player.
+    pub(crate) fn player_online_for(&self, player: u32) -> Option<Duration> {
+        self.network
+            .players
+            .borrow()
+            .get(player)
+            .filter(|found| found.admitted)
+            .map(|found| Instant::now().saturating_duration_since(found.connected_at))
+    }
+
     pub(crate) fn player_tokens_of(&self, player: u32) -> Vec<String> {
         self.network
             .players
@@ -1014,18 +1058,26 @@ impl ResourceManager {
     }
 
     /// Queues a kick. It is applied at the next drain, after the current script call.
-    pub(crate) fn queue_drop(&self, player: u32, reason: &str) {
+    pub(crate) fn queue_drop(&self, player: u32, reason: &str, origin: DropOrigin) {
         self.network
             .pending_drops
             .borrow_mut()
-            .push((player, reason.to_owned()));
+            .push((player, reason.to_owned(), origin));
     }
 
     /// Kicks every player queued by [`queue_drop`](Self::queue_drop). A kick
-    /// for a player who has already left does nothing.
+    /// for a player who has already left does nothing. The first kick of a
+    /// player sets its origin, which `playerDropped` reports later.
     pub(crate) fn apply_drops(&self) {
         let drops = std::mem::take(&mut *self.network.pending_drops.borrow_mut());
-        for (player, reason) in drops {
+        for (player, reason, origin) in drops {
+            if self.network.players.borrow().contains(player) {
+                self.network
+                    .drop_origins
+                    .borrow_mut()
+                    .entry(player)
+                    .or_insert(origin);
+            }
             self.with_server(|server| server.kick(player, &reason));
         }
     }

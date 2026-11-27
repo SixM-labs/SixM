@@ -8,7 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use sixm_core::{
     ClientHost, ClientTarget, ConvarKind, EntityAttachment, EntityInfo, EntityKind, EntityState,
@@ -62,8 +62,8 @@ pub struct TestHost {
     /// Client events sent, as `(event, target, args)`, in order.
     pub client_events: RefCell<Vec<(String, ClientTarget, Vec<Value>)>>,
     pub latent_client_events: RefCell<Vec<LatentClientEvent>>,
-    /// Players dropped, as `(id, reason)`, in order.
-    pub dropped: RefCell<Vec<(u32, String)>>,
+    /// Players dropped, as `(id, reason, resource)`, in order.
+    pub dropped: RefCell<Vec<(u32, String, String)>>,
     /// State values by `(bag, key)`.
     pub state: RefCell<HashMap<(String, String), Value>>,
     /// The key-value store, in a temporary folder unless [`TestHost::set_kvp_dir`] chose one.
@@ -110,6 +110,10 @@ pub struct TestHost {
     pub grants: RefCell<Vec<(String, String)>>,
     /// Resources restarted via `RestartResource`, as `(caller, target)`.
     pub restarted_resources: RefCell<Vec<(String, String)>>,
+    /// Console commands owned by a resource, as `(resource, command)`. Tests set this directly.
+    pub command_owners: RefCell<Vec<(String, String)>>,
+    /// How long each player has been connected, by player id. Tests set this directly.
+    pub time_online: RefCell<HashMap<u32, Duration>>,
 }
 
 impl TestHost {
@@ -317,6 +321,29 @@ impl Host for TestHost {
             .cloned()
     }
 
+    fn state_keys(&self, bag: &str) -> Option<Vec<String>> {
+        let player_connected = player_of_bag(bag).is_some_and(|id| {
+            self.players
+                .borrow()
+                .iter()
+                .any(|(connected, _)| *connected == id)
+        });
+        let entity_exists =
+            entity_of_bag(bag).is_some_and(|id| self.entities.borrow().contains_key(&id));
+        if bag != GLOBAL_BAG && !player_connected && !entity_exists {
+            return None;
+        }
+        let mut keys: Vec<String> = self
+            .state
+            .borrow()
+            .keys()
+            .filter(|(owner, _)| owner.as_str() == bag)
+            .map(|(_, key)| key.clone())
+            .collect();
+        keys.sort();
+        Some(keys)
+    }
+
     fn entity(&self, entity: u32) -> Option<EntityInfo> {
         self.entities.borrow().get(&entity).copied()
     }
@@ -381,6 +408,17 @@ impl Host for TestHost {
         }
         Ok(())
     }
+    fn resource_commands(&self, resource: &str) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .command_owners
+            .borrow()
+            .iter()
+            .filter(|(owner, _)| owner == resource)
+            .map(|(_, name)| name.clone())
+            .collect();
+        names.sort_unstable();
+        names
+    }
 }
 
 impl ServerHost for TestHost {
@@ -435,8 +473,14 @@ impl ServerHost for TestHost {
             .unwrap_or_default()
     }
 
-    fn drop_player(&self, player: u32, reason: &str) {
-        self.dropped.borrow_mut().push((player, reason.to_owned()));
+    fn drop_player(&self, player: u32, reason: &str, resource: &str) {
+        self.dropped
+            .borrow_mut()
+            .push((player, reason.to_owned(), resource.to_owned()));
+    }
+
+    fn player_time_online(&self, player: u32) -> Option<Duration> {
+        self.time_online.borrow().get(&player).copied()
     }
 
     fn is_ace_allowed(&self, principal: &str, object: &str) -> bool {

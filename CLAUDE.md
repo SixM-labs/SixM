@@ -27,6 +27,11 @@ is SixM-labs/SixM. Read README.md and CONTRIBUTING.md first.
   only when both CI jobs (`ubuntu-latest`, `windows-latest`) are green.
 - Docs and code comments are in English; talk to the maintainer in German.
 
+## Current work
+
+`docs/design/fivem-parity/PLAN.md`: FiveM parity plan with checkpoints and a
+handoff log shared with ChatGPT/Codex (`AGENTS.md`) and Gemini (`GEMINI.md`).
+
 ## Layout
 
 `crates/sixm-core` (contract: values, Host/ServerHost/ClientHost,
