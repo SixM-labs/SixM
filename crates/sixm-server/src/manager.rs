@@ -21,6 +21,7 @@ use sixm_resources::{Catalog, DependencyError, ResourceError, ScanIssue};
 use tracing::{error, info, warn};
 
 use crate::access::AccessStore;
+use crate::commands::CommandSource;
 use crate::convars::Convars;
 use crate::entities::{EntityStore, EntityUpdate};
 use crate::host_functions::{HostFunctions, is_host};
@@ -86,8 +87,9 @@ pub struct ResourceManager {
     next_instance: Cell<u64>,
     /// Script commands by lower-case name.
     commands: RefCell<BTreeMap<String, ScriptCommand>>,
-    /// Console lines queued by `ExecuteCommand`, run after the current call.
-    queued: RefCell<VecDeque<String>>,
+    /// Command lines queued by `ExecuteCommand` and the host, run after the
+    /// current call, each with the source that queued it.
+    queued: RefCell<VecDeque<(String, CommandSource)>>,
     quit: Cell<bool>,
     /// The listening socket, connected players and pending kicks.
     pub(crate) network: Network,
@@ -347,12 +349,12 @@ impl ResourceManager {
             .min()
     }
 
-    /// Removes and returns the next queued console line.
-    pub(crate) fn pop_command(&self) -> Option<String> {
+    /// Removes and returns the next queued command line and its source.
+    pub(crate) fn pop_command(&self) -> Option<(String, CommandSource)> {
         self.queued.borrow_mut().pop_front()
     }
 
-    /// Drops every queued console line and returns how many there were.
+    /// Drops every queued command line and returns how many there were.
     pub(crate) fn discard_commands(&self) -> usize {
         let mut queued = self.queued.borrow_mut();
         let count = queued.len();
@@ -808,8 +810,13 @@ impl Host for ResourceManager {
         }
     }
 
-    fn execute_command(&self, line: &str) {
-        self.queued.borrow_mut().push_back(line.to_owned());
+    fn execute_command(&self, line: &str, invoker: Option<&ResourceName>) {
+        let source = invoker.map_or(CommandSource::Console, |resource| {
+            CommandSource::Resource(resource.clone())
+        });
+        self.queued
+            .borrow_mut()
+            .push_back((line.to_owned(), source));
     }
 
     fn register_command(&self, name: &str, handler: FuncRef, restricted: bool) {

@@ -298,7 +298,7 @@ library can tell who called it. It is `nil` when no resource caused it.
 | `SetConvar` | server | `SetConvar(name, value)`. Stores a plain convar, which only the server keeps. |
 | `SetConvarReplicated` | server | `SetConvarReplicated(name, value)`. Stores a replicated convar. Every connected player gets it at once, and players who join later get it too. Fails, and changes nothing, when the name is longer than 256 bytes or the value longer than 4096 bytes. |
 | `SetConvarServerInfo` | server | `SetConvarServerInfo(name, value)`. Stores a convar marked as server information. Nothing sends it anywhere yet. |
-| `ExecuteCommand` | both | `ExecuteCommand(line)`. Queues a console line. It runs after the current script call returns. |
+| `ExecuteCommand` | both | `ExecuteCommand(line)`. Queues a console line. It runs after the current script call returns. On a server it runs with the rights of the calling resource, as its principal `resource.<name>`. On a client it runs locally, as a typed console line. |
 | `RegisterCommand` | both | `RegisterCommand(name, fn [, restricted])`. Registers a console command. `fn` is called as `fn(source, args, raw)`, where `source` is the player's id or `0` (the console), `args` is an array of strings and `raw` is the line. |
 
 - Convar names are case-insensitive.
@@ -312,7 +312,13 @@ library can tell who called it. It is `nil` when no resource caused it.
   restricted command only if allowed `command.<name>`. An unrestricted command
   runs for everyone. See [server.md](server.md#permissions).
 - `source` is the player's id for a command a player sent, and `0` for the
-  console. `ExecuteCommand` always runs with console rights.
+  console and for a line that `ExecuteCommand` ran.
+- `ExecuteCommand` on a server runs its line with the calling resource's rights,
+  not console rights. A built-in or restricted command needs
+  `command.<name>` for `resource.<name>`, and a resource cannot read or set a
+  convar by its name. This is a deliberate change: a resource that used
+  `ExecuteCommand` for `stop`, `set` or `exec` now needs an access control
+  entry for it. See [server.md](server.md#resources).
 - A command registered by a resource is removed when that resource stops.
 - Built-in console commands are matched before script commands. A script
   command with the same name as a built-in can never run. See

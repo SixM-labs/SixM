@@ -112,15 +112,18 @@ For any other name, the server checks in this order:
    sets it.
 3. Otherwise the server logs `No such command`.
 
-A console command is run by the console, a player's command by the player
-(see below). A script command that is not restricted runs for every source.
+A console command is run by the console, a player's command by the player,
+and a line that a script queues with `ExecuteCommand` by that resource (see
+below). A script command that is not restricted runs for every source.
 
 ## Permissions
 
 Players can send console lines from their client (see
 [client.md](client.md)). The server runs such a line with the player's
 permissions, which come from access control entries (ACEs). The console runs
-every command.
+every command. Scripts can queue console lines with `ExecuteCommand`, and the
+server runs those with the permissions of the calling resource (see
+[Resources](#resources)).
 
 - A player may run a built-in command only if its principal, `player.<id>`, is
   allowed `command.<name>`. For example, `quit` needs `command.quit`.
@@ -130,16 +133,49 @@ every command.
 - A player can never print or set a convar by its bare name.
 - A refused line is logged at `info` with the player id and the command name.
   An unknown name from a player is logged at `debug` only.
-- `ExecuteCommand` runs its line with console rights, whoever called it. A
-  script that passes a player's request to `ExecuteCommand` should first check
-  the player with `IsPlayerAceAllowed`.
+- `ExecuteCommand` does not run its line with console rights. A script that
+  passes a player's request to `ExecuteCommand` should first check the player
+  with `IsPlayerAceAllowed`. The line then runs with the resource's rights,
+  not the player's.
 
-A principal is a name such as `identifier.license:<hex>`, `group.admin` or
-`player.3`. `add_principal` makes one principal inherit from another, so a
-player can be placed in a group. Every principal inherits from
-`builtin.everyone`. A connected player, `player.<id>`, also inherits from
+A principal is a name such as `identifier.license:<hex>`, `group.admin`,
+`player.3` or `resource.<name>`. `add_principal` makes one principal inherit
+from another, so a player can be placed in a group. Every principal inherits
+from `builtin.everyone`. A connected player, `player.<id>`, also inherits from
 `identifier.<identifier>` for each of its identifiers, so a license can be
 named directly.
+
+### Resources
+
+A resource is the principal `resource.<name>`. A line that its script queues
+with `ExecuteCommand` runs with that principal's rights. The rules are the same
+as for a player:
+
+- A built-in command, such as `stop`, `set` or `exec`, needs
+  `command.<name>` for `resource.<name>`.
+- A script command registered with `restricted` needs `command.<name>`. An
+  unrestricted script command runs for every resource.
+- A resource can never print or set a convar by its bare name.
+- A refused line is logged at `warn`, with the resource and the command name.
+  Resources are trusted code, so a refusal is worth seeing.
+- A line that `exec` runs from such a command keeps the resource's rights.
+- A script command that such a line runs gets `0` as its source, as it does for
+  the console.
+
+This is a deliberate change. Earlier versions ran every `ExecuteCommand` line
+with console rights, so any resource could do anything. A resource that stops,
+starts, sets or execs now needs an entry for that command, as a player does.
+The entries below let a resource called `admin` start and stop resources, and
+nothing else:
+
+```text
+add_ace resource.admin command.start allow
+add_ace resource.admin command.stop allow
+```
+
+With these entries, `ExecuteCommand('stop other')` in `admin` works, while
+`ExecuteCommand('quit')` is refused. `ExecuteCommand('sv_hostname x')` is
+refused whatever the grants, because a resource never sets a convar by its name.
 
 An object is a dotted path, such as `command.stop`. An entry on `command`
 also covers `command.stop`. The check works like this:

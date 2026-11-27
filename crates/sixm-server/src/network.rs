@@ -18,7 +18,7 @@ use sixm_core::{ClientTarget, EventSource, FuncRef, PlayerInfo, ScriptError, Val
 use sixm_net::{ConnectionId, Fingerprint, NetError, NetEvent, NetServer, ServerConfig, Traffic};
 use tracing::{debug, info, warn};
 
-use crate::commands::{self, CommandContext};
+use crate::commands::{self, CommandContext, CommandSource};
 use crate::host_functions::HostFn;
 use crate::manager::ResourceManager;
 use crate::server::Input;
@@ -632,13 +632,24 @@ impl ResourceManager {
             debug!(player, "command from an unknown player ignored");
             return;
         }
-        commands::run_line(self, line, CommandContext::player(player));
+        commands::run_line(
+            self,
+            line,
+            &CommandContext::new(CommandSource::Player(player)),
+        );
     }
 
     /// Whether connected player `player` may use `object`. The player is the
     /// principal `player.<id>`.
     pub(crate) fn player_may(&self, player: u32, object: &str) -> bool {
         self.ace_allowed(&format!("player.{player}"), object)
+    }
+
+    /// Whether the resource `resource` may use `object`. The resource is the
+    /// principal `resource.<name>`, which inherits from `builtin.everyone`
+    /// like every principal.
+    pub(crate) fn resource_may(&self, resource: &str, object: &str) -> bool {
+        self.ace_allowed(&format!("resource.{resource}"), object)
     }
 
     /// Whether `principal` may use `object` under the access control entries.

@@ -1,9 +1,10 @@
 //! Access control entries set from the console: the `add_ace` family and the
-//! rules that `is_ace_allowed` applies to them.
+//! rules that `is_ace_allowed` applies to them. Also the rights that a script's
+//! `ExecuteCommand` lines run with, which are those of `resource.<name>`.
 
 mod common;
 
-use common::Fixture;
+use common::{Fixture, manifest, write_file};
 use sixm_core::Host;
 
 /// Whether `principal` may use `object`, as the server decides it.
@@ -126,4 +127,144 @@ fn a_built_in_command_runs_even_when_a_convar_has_its_name() {
         fx.manager().convar("add_ace").as_deref(),
         Some("some_value")
     );
+}
+
+/// A resource `name` whose console command `command` runs `line` with
+/// `ExecuteCommand`. `line` is written into a Lua long string.
+fn add_relay(fx: &Fixture, name: &str, command: &str, line: &str) {
+    let script =
+        format!("RegisterCommand('{command}', function() ExecuteCommand([==[{line}]==]) end)\n");
+    fx.add_resource(
+        name,
+        &manifest(&["server.lua"], &[], &[]),
+        &[("server.lua", &script)],
+    );
+}
+
+#[test]
+fn a_resource_cannot_stop_a_resource_without_an_ace() {
+    let fx = Fixture::new();
+    fx.add_resource(
+        "other",
+        &manifest(&["server.lua"], &[], &[]),
+        &[("server.lua", "OTHER = true")],
+    );
+    add_relay(&fx, "driver", "kill", "stop other");
+    fx.server.execute("start other");
+    fx.server.execute("start driver");
+
+    fx.server.execute("kill");
+    assert!(fx.manager().is_running("other"));
+
+    fx.server
+        .execute("add_ace resource.driver command.stop allow");
+    fx.server.execute("kill");
+    assert!(!fx.manager().is_running("other"));
+}
+
+#[test]
+fn a_resource_cannot_read_or_set_a_convar_by_its_name() {
+    let fx = Fixture::new();
+    fx.server.execute("set sv_hostname original");
+    add_relay(&fx, "driver", "rename", "sv_hostname x");
+    fx.server.execute("start driver");
+
+    fx.server.execute("rename");
+    assert_eq!(
+        fx.manager().convar("sv_hostname").as_deref(),
+        Some("original")
+    );
+
+    fx.server
+        .execute("add_ace resource.driver command.set allow");
+    fx.server.execute("rename");
+    assert_eq!(
+        fx.manager().convar("sv_hostname").as_deref(),
+        Some("original")
+    );
+}
+
+#[test]
+fn a_grant_to_builtin_everyone_reaches_resources() {
+    let fx = Fixture::new();
+    add_relay(&fx, "driver", "store", "set from_everyone yes");
+    fx.server.execute("start driver");
+
+    fx.server.execute("store");
+    assert_eq!(fx.manager().convar("from_everyone"), None);
+
+    fx.server
+        .execute("add_ace builtin.everyone command.set allow");
+    fx.server.execute("store");
+    assert_eq!(fx.manager().convar("from_everyone").as_deref(), Some("yes"));
+}
+
+#[test]
+fn an_unrestricted_script_command_runs_from_execute_command_with_source_zero() {
+    let fx = Fixture::new();
+    let script = r"
+        RegisterCommand('ping', function(source, args)
+            LAST = ('%d|%s'):format(source, table.concat(args, ','))
+        end)
+        RegisterCommand('relay', function() ExecuteCommand('ping a b') end)
+        function last() return LAST or 'none' end
+    ";
+    fx.add_resource(
+        "pinger",
+        &manifest(&["server.lua"], &["last"], &[]),
+        &[("server.lua", script)],
+    );
+    fx.server.execute("start pinger");
+
+    fx.server.execute("relay");
+    assert_eq!(fx.text("pinger", "last"), "0|a,b");
+}
+
+#[test]
+fn a_restricted_script_command_needs_the_ace_from_a_resource() {
+    let fx = Fixture::new();
+    let script = r"
+        RegisterCommand('secret', function() SEEN = 'yes' end, true)
+        RegisterCommand('relay', function() ExecuteCommand('secret') end)
+        function seen() return SEEN or 'no' end
+    ";
+    fx.add_resource(
+        "vault",
+        &manifest(&["server.lua"], &["seen"], &[]),
+        &[("server.lua", script)],
+    );
+    fx.server.execute("start vault");
+
+    fx.server.execute("relay");
+    assert_eq!(fx.text("vault", "seen"), "no");
+
+    fx.server
+        .execute("add_ace resource.vault command.secret allow");
+    fx.server.execute("relay");
+    assert_eq!(fx.text("vault", "seen"), "yes");
+}
+
+#[test]
+fn exec_from_a_resource_keeps_the_resources_rights() {
+    let fx = Fixture::new();
+    let cfg = fx.root().join("driver.cfg");
+    write_file(&cfg, "set from_file yes\nquit\n");
+    add_relay(
+        &fx,
+        "loader",
+        "load",
+        &format!("exec \"{}\"", cfg.display()),
+    );
+    fx.server.execute("start loader");
+
+    fx.server.execute("load");
+    assert_eq!(fx.manager().convar("from_file"), None);
+
+    fx.server
+        .execute("add_ace resource.loader command.exec allow");
+    fx.server
+        .execute("add_ace resource.loader command.set allow");
+    fx.server.execute("load");
+    assert_eq!(fx.manager().convar("from_file").as_deref(), Some("yes"));
+    assert!(!fx.manager().quit_requested());
 }

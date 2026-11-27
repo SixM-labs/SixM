@@ -143,7 +143,9 @@ The server listens on `endpoint_add_udp` (default `0.0.0.0:30120`) over QUIC.
 
 Each player gets a server id, counting up from 1 and never reused while the
 server runs. Players can send console commands that the server runs with their
-permissions; see [Permissions](docs/server.md#permissions). Scripts see the connection lifecycle as events:
+permissions, and scripts can queue console lines that run with the permissions
+of their resource; see [Permissions](docs/server.md#permissions). Scripts see the
+connection lifecycle as events:
 
 - `playerConnecting(name, setKickReason, deferrals)` runs before a player is admitted.
   Call `setKickReason(text)` or `CancelEvent()` to refuse the connection. The
