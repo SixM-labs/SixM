@@ -117,6 +117,10 @@ impl ClientRuntime {
     /// Starts every resource the connection has synced, in the server's order.
     /// Call it once, before the first [`pump`](Self::pump) or [`run`](Self::run).
     pub fn start_synced(&self) {
+        let joined = self.client.borrow_mut().join_notices();
+        for notice in joined {
+            self.handle_notice(notice);
+        }
         let resources = self.client.borrow().resources().to_vec();
         for resource in &resources {
             self.start_resource(resource);
@@ -264,6 +268,9 @@ impl ClientRuntime {
             }
             ClientNotice::EntityDeleted { id } => {
                 self.entities.borrow_mut().remove(&id);
+            }
+            ClientNotice::Convars { entries } => {
+                self.convars.borrow_mut().apply_replicated(entries);
             }
             ClientNotice::Kicked { reason } => {
                 info!("kicked: {reason}");

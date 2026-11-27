@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use sixm_core::{
-    ClientHost, ClientTarget, EntityInfo, EntityKind, EventContext, EventSource, FuncRef,
-    GLOBAL_BAG, Host, PlayerInfo, ResourceName, ResourceState, ScriptError, ScriptRuntime,
+    ClientHost, ClientTarget, ConvarKind, EntityInfo, EntityKind, EventContext, EventSource,
+    FuncRef, GLOBAL_BAG, Host, PlayerInfo, ResourceName, ResourceState, ScriptError, ScriptRuntime,
     ServerHost, Value, entity_bag, entity_of_bag, is_finite, player_of_bag,
 };
 use sixm_lua::LuaRuntime;
@@ -46,6 +46,8 @@ pub struct TestHost {
     pub released: RefCell<Vec<FuncRef>>,
     /// Lines queued by `ExecuteCommand`.
     pub commands: RefCell<Vec<String>>,
+    /// Convars stored by a server host, as `(name, value, kind)`, in order.
+    pub convar_sets: RefCell<Vec<(String, String, ConvarKind)>>,
     /// Connected players as `(id, info)`, in join order. Tests set this directly.
     pub players: RefCell<Vec<(u32, PlayerInfo)>>,
     /// Identifiers of players as `(id, identifiers)`. Tests set this directly.
@@ -375,6 +377,13 @@ impl ServerHost for TestHost {
         self.entity_slot(entity)?.rotation = rotation;
         Ok(())
     }
+
+    fn set_convar(&self, name: &str, value: &str, kind: ConvarKind) -> Result<(), ScriptError> {
+        self.convar_sets
+            .borrow_mut()
+            .push((name.to_owned(), value.to_owned(), kind));
+        Ok(())
+    }
 }
 
 impl TestHost {
@@ -418,6 +427,18 @@ impl ClientHost for TestHost {
 /// Creates a server host with a few convars set.
 pub fn new_host() -> Rc<TestHost> {
     let convars = HashMap::from([("sv_maxclients".to_owned(), "32".to_owned())]);
+    Rc::new(TestHost {
+        convars,
+        ..TestHost::default()
+    })
+}
+
+/// Creates a server host whose convars are exactly `convars`.
+pub fn new_host_with_convars(convars: &[(&str, &str)]) -> Rc<TestHost> {
+    let convars = convars
+        .iter()
+        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+        .collect();
     Rc::new(TestHost {
         convars,
         ..TestHost::default()

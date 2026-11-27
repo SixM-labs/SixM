@@ -86,6 +86,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             Some(ClientEvent::EntitySnapshot { entities }) => {
                 println!("{} entities exist", entities.len());
             }
+            Some(ClientEvent::Convars { entries }) => {
+                println!("{} replicated convars", entries.len());
+            }
             Some(ClientEvent::Kicked { reason }) => {
                 println!("kicked: {reason}");
                 break;

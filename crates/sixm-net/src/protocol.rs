@@ -9,7 +9,7 @@ use crate::files::{FileHash, ResourceEntry};
 use crate::wire::{Args, StateValue};
 
 /// Version of the wire protocol. A client must send it in its `Hello`.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Application protocol identifier negotiated during the TLS handshake.
 pub(crate) const ALPN: &[u8] = b"sixm/1";
@@ -36,6 +36,10 @@ pub(crate) const MAX_EVENT_NAME_LEN: usize = 256;
 pub(crate) const MAX_COMMAND_LEN: usize = 4096;
 /// Longest player name in characters, after trimming.
 pub(crate) const MAX_PLAYER_NAME_LEN: usize = 64;
+/// Longest convar name in bytes that travels to clients. A name is 1 byte or more.
+pub const MAX_CONVAR_NAME_LEN: usize = 256;
+/// Longest convar value in bytes that travels to clients.
+pub const MAX_CONVAR_VALUE_LEN: usize = 4096;
 
 /// Time a connection may stay silent before QUIC closes it.
 pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -172,6 +176,12 @@ pub(crate) enum ServerMessage {
     EntitySnapshot {
         entities: Vec<EntityEntry>,
     },
+    /// Replicated convars, as `(name, value)`. A nil `value` (`None`) means the
+    /// convar is no longer replicated, so the client forgets it. A join snapshot
+    /// may span several frames.
+    Convars {
+        entries: Vec<(String, Option<String>)>,
+    },
 }
 
 impl ServerMessage {
@@ -205,4 +215,6 @@ impl ServerMessage {
     pub(crate) const ENTITY_DELETED_TAG: u32 = 13;
     /// Variant index of [`ServerMessage::EntitySnapshot`] on the wire.
     pub(crate) const ENTITY_SNAPSHOT_TAG: u32 = 14;
+    /// Variant index of [`ServerMessage::Convars`] on the wire.
+    pub(crate) const CONVARS_TAG: u32 = 15;
 }

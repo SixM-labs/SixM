@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use mlua::{Function, Lua, LuaString, MultiValue, Table, Value as LuaValue};
-use sixm_core::{EventSource, joaat, normalize_resource_path};
+use sixm_core::{ConvarKind, EventSource, joaat, normalize_resource_path};
 
 use crate::client;
 use crate::entities;
@@ -49,6 +49,7 @@ pub(crate) fn install(runtime: &Rc<LuaRuntime>, helpers: &Helpers) -> mlua::Resu
         Side::Server => {
             players::install(lua, weak, &globals)?;
             entities::install_server(lua, weak, &globals)?;
+            install_server_convars(lua, weak, &globals)?;
         }
         Side::Client { local_player } => {
             client::install(runtime, &globals, local_player)?;
@@ -207,6 +208,13 @@ fn install_host(
             .and_then(|value| value.trim().parse::<i64>().ok());
         Ok(parsed.unwrap_or(default))
     })?;
+    let get_convar_bool = bind_fn(lua, weak, |rt, (name, default): (String, bool)| {
+        let parsed = rt
+            .host()?
+            .get_convar(&name)
+            .and_then(|value| parse_bool(&value));
+        Ok(parsed.unwrap_or(default))
+    })?;
     let execute_command = bind_fn(lua, weak, |rt, (line,): (String,)| {
         rt.host()?.execute_command(&line);
         Ok(())
@@ -231,6 +239,7 @@ fn install_host(
         ("SaveResourceFile", save_resource_file),
         ("GetConvar", get_convar),
         ("GetConvarInt", get_convar_int),
+        ("GetConvarBool", get_convar_bool),
         ("ExecuteCommand", execute_command),
         ("RegisterCommand", register_command),
         ("GetGameTimer", get_game_timer),
@@ -243,6 +252,37 @@ fn install_host(
 
     globals.raw_set("json", json::table(lua)?)?;
     Ok(())
+}
+
+/// Installs the convar setters, which only a server has. `SetConvar` stores a
+/// plain convar, `SetConvarReplicated` a replicated one and `SetConvarServerInfo`
+/// one marked as server information.
+fn install_server_convars(lua: &Lua, weak: &Weak<LuaRuntime>, globals: &Table) -> mlua::Result<()> {
+    let setters = [
+        ("SetConvar", ConvarKind::Plain),
+        ("SetConvarReplicated", ConvarKind::Replicated),
+        ("SetConvarServerInfo", ConvarKind::ServerInfo),
+    ];
+    for (name, kind) in setters {
+        let setter = bind_fn(lua, weak, move |rt, (convar, value): (String, String)| {
+            players::server(&*rt.host()?)?
+                .set_convar(&convar, &value, kind)
+                .map_err(lua_err)
+        })?;
+        globals.raw_set(name, setter)?;
+    }
+    Ok(())
+}
+
+/// Reads a convar's text as a boolean. `true`, `1`, `yes` and `on` are true, and
+/// `false`, `0`, `no` and `off` are false, in any letter case. Other text, after
+/// trimming, is not a boolean.
+fn parse_bool(text: &str) -> Option<bool> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 /// `print`: converts each argument with the original `tostring` and logs the line.
