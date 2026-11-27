@@ -257,6 +257,29 @@ pub trait Host {
     /// folders, and returns whether it was written. `path` is normalized.
     fn save_resource_file(&self, resource: &str, path: &str, data: &[u8]) -> bool;
 
+    /// The value stored under `key` in the key-value store of `resource`, or
+    /// `None`. A resource only ever reads its own store.
+    fn kvp_get(&self, resource: &str, key: &str) -> Option<Vec<u8>>;
+
+    /// Stores `value` under `key` in the key-value store of `resource`, and
+    /// returns whether it was stored. Fails for a key that is not 1 to 256
+    /// bytes or a value over 64 KiB. The host writes changes to the disk in
+    /// the background, in batches, and never blocks the caller on it.
+    fn kvp_set(&self, resource: &str, key: &str, value: &[u8]) -> bool;
+
+    /// Removes `key` from the key-value store of `resource`. Returns whether it
+    /// was set.
+    fn kvp_delete(&self, resource: &str, key: &str) -> bool;
+
+    /// The keys of the key-value store of `resource` that start with `prefix`,
+    /// in byte order.
+    fn kvp_keys(&self, resource: &str, prefix: &str) -> Vec<String>;
+
+    /// Hands every pending key-value change, of every resource, to the
+    /// background writer now instead of with the next batch. Does not wait for
+    /// the disk.
+    fn kvp_flush(&self);
+
     /// The entity with id `entity`, or `None` when it does not exist. On the
     /// server this is the entity itself; on a client it is the last state the
     /// server sent.

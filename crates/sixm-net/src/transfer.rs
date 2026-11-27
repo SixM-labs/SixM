@@ -24,6 +24,15 @@ const CHUNK_LEN: usize = 64 * 1024;
 /// the size as a `u64` in little-endian order.
 pub(crate) const HEADER_LEN: usize = 32 + 8;
 
+/// Splits the header of a file stream into the file's hash and its size.
+pub(crate) fn parse_file_header(header: &[u8; HEADER_LEN]) -> (FileHash, u64) {
+    let mut hash = [0_u8; 32];
+    hash.copy_from_slice(&header[..32]);
+    let mut size = [0_u8; 8];
+    size.copy_from_slice(&header[32..]);
+    (hash, u64::from_le_bytes(size))
+}
+
 /// Application error code for a stream that could not carry the whole file.
 const TRANSFER_ABORTED: u32 = 2;
 

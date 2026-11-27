@@ -14,6 +14,7 @@ use crate::events::handle_table;
 use crate::exports;
 use crate::http;
 use crate::json;
+use crate::kvp;
 use crate::players;
 use crate::resources;
 use crate::runtime::{LuaRuntime, Side, bind_fn, lua_err};
@@ -46,6 +47,7 @@ pub(crate) fn install(runtime: &Rc<LuaRuntime>, helpers: &Helpers) -> mlua::Resu
     install_events(lua, weak, &globals)?;
     install_host(lua, weak, &globals, runtime.side)?;
     entities::install(lua, weak, &globals)?;
+    kvp::install(lua, weak, &globals)?;
     match runtime.side {
         Side::Server => {
             players::install(lua, weak, &globals)?;

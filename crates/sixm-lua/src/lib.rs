@@ -12,6 +12,7 @@ mod events;
 mod exports;
 mod http;
 mod json;
+mod kvp;
 mod natives;
 mod players;
 mod promise;

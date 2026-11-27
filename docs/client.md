@@ -116,6 +116,7 @@ sixm-cache/
     ab12...ef            a downloaded file, named by its SHA-256 hash
   data/
     <resource>/          the data folder of each synced resource
+    <resource>.kvp       the key-value store of each resource, see lua-api.md
   identity.bin           the client certificate and its key
 ```
 
@@ -154,7 +155,8 @@ created when the resource starts.
 The name must be one plain folder name. A name with a path separator or `..`
 is refused, and the resource does not start.
 
-Files that scripts save with `SaveResourceFile` are written here. Files that
+Files that scripts save with `SaveResourceFile` are written here, and so is
+the key-value store of each resource, as `<resource>.kvp` next to the folders. Files that
 the server sent are not in this folder. They are in the cache, by hash, and
 `LoadResourceFile` reads them from there.
 

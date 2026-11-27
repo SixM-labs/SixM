@@ -173,6 +173,26 @@ impl Host for ClientRuntime {
         fs::write(full, data).is_ok()
     }
 
+    fn kvp_get(&self, resource: &str, key: &str) -> Option<Vec<u8>> {
+        self.kvp.borrow_mut().get(resource, key)
+    }
+
+    fn kvp_set(&self, resource: &str, key: &str, value: &[u8]) -> bool {
+        self.kvp.borrow_mut().set(resource, key, value)
+    }
+
+    fn kvp_delete(&self, resource: &str, key: &str) -> bool {
+        self.kvp.borrow_mut().delete(resource, key)
+    }
+
+    fn kvp_keys(&self, resource: &str, prefix: &str) -> Vec<String> {
+        self.kvp.borrow_mut().keys(resource, prefix)
+    }
+
+    fn kvp_flush(&self) {
+        self.kvp.borrow_mut().flush();
+    }
+
     fn state_get(&self, bag: &str, key: &str) -> Option<Value> {
         self.state.borrow().get(bag, key).cloned()
     }

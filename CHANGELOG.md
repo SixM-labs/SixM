@@ -7,6 +7,15 @@ may change the protocol and the API.
 
 ## [Unreleased]
 
+### Added
+
+- Resource key-value storage (`sixm-kvp`) on the server and the client:
+  `SetResourceKvp`, the typed variants, `GetResourceKvp*`, `DeleteResourceKvp`,
+  `StartFindKvp`/`FindKvp`/`EndFindKvp` and `FlushResourceKvp`. Reads stay in
+  memory; a background thread appends CRC-checked records to one log per
+  resource and compacts it, so the frame never waits for the disk. The server
+  folder is `sixm_kvpPath`.
+
 ## [0.1.0]
 
 First release. There is no game adapter yet: the server, the scripting runtime

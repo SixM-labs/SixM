@@ -215,6 +215,7 @@ Convar names are case-insensitive. Scripts read them with `GetConvar` and
 |---|---|---|
 | `sixm_resourcesPath` | `resources` | Folder scanned for resources. Relative to the working directory. |
 | `sixm_identityFile` | `cache/server-identity.bin` | File that holds the server certificate. Empty means a new certificate on every start. Relative to the working directory. |
+| `sixm_kvpPath` | `cache/kvp` | Folder of the resource key-value stores, one `<resource>.kvp` file each. Relative to the working directory. Read the first time a resource uses key-value storage. See [Key-value storage](lua-api.md#key-value-storage). |
 | `sixm_tickRate` | `20` | Frames per second, clamped to 1 to 1000. A value that is not a number gives 20. |
 | `endpoint_add_udp` | `0.0.0.0:30120` | Listen address. Read when the network starts. An address that does not parse stops the network. |
 | `sv_maxclients` | `32` | Player limit, clamped to 1 to 1024. A value that is not a number gives 32. |

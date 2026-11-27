@@ -42,6 +42,7 @@ separate adapters, starting with GTA VI once a PC version is released.
 | Players, net events and client events (`sixm-server`, `sixm-lua`) | ✅ done |
 | State bags (`sixm-server`, `sixm-lua`, `sixm-net`) | ✅ done |
 | Entity sync and player peds | ✅ done (server-owned entities and client-moved peds, no game yet) |
+| Resource key-value storage (`sixm-kvp`) | ✅ done |
 | Headless client: resource sync, client scripts (`sixm-client`) | ✅ done |
 | GTA VI game adapter | ⏳ planned (needs a PC release) |
 
@@ -51,6 +52,7 @@ separate adapters, starting with GTA VI once a PC version is released.
 crates/
 ├── sixm-core/        Shared types: script values, the Host and ScriptRuntime traits
 ├── sixm-resources/   Resource discovery, fxmanifest.lua parsing, dependency order
+├── sixm-kvp/         Persistent per-resource key-value storage, written by a background thread
 ├── sixm-lua/         Lua 5.4 runtime: scheduler, events, exports, sandbox
 └── sixm-server/      Server binary: server.cfg, console, resource manager, main loop
 examples/server-data/ A runnable example server with two resources

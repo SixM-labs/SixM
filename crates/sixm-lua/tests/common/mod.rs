@@ -15,6 +15,7 @@ use sixm_core::{
     FuncRef, GLOBAL_BAG, Host, HttpRequest, PlayerInfo, ResourceName, ResourceState, ScriptError,
     ScriptRuntime, ServerHost, Value, entity_bag, entity_of_bag, is_finite, player_of_bag,
 };
+use sixm_kvp::KvpStore;
 use sixm_lua::LuaRuntime;
 use tempfile::TempDir;
 
@@ -64,6 +65,8 @@ pub struct TestHost {
     pub dropped: RefCell<Vec<(u32, String)>>,
     /// State values by `(bag, key)`.
     pub state: RefCell<HashMap<(String, String), Value>>,
+    /// The key-value store, in a temporary folder unless [`TestHost::set_kvp_dir`] chose one.
+    kvp: RefCell<Option<KvpStore>>,
     /// Entities by id, in id order. On a server they are created and deleted
     /// through the host; on a client a test fills them in directly.
     pub entities: RefCell<BTreeMap<u32, EntityInfo>>,
@@ -266,6 +269,26 @@ impl Host for TestHost {
         fs::write(full, data).is_ok()
     }
 
+    fn kvp_get(&self, resource: &str, key: &str) -> Option<Vec<u8>> {
+        self.with_kvp(|store| store.get(resource, key))
+    }
+
+    fn kvp_set(&self, resource: &str, key: &str, value: &[u8]) -> bool {
+        self.with_kvp(|store| store.set(resource, key, value))
+    }
+
+    fn kvp_delete(&self, resource: &str, key: &str) -> bool {
+        self.with_kvp(|store| store.delete(resource, key))
+    }
+
+    fn kvp_keys(&self, resource: &str, prefix: &str) -> Vec<String> {
+        self.with_kvp(|store| store.keys(resource, prefix))
+    }
+
+    fn kvp_flush(&self) {
+        self.with_kvp(KvpStore::flush);
+    }
+
     fn state_get(&self, bag: &str, key: &str) -> Option<Value> {
         self.state
             .borrow()
@@ -431,6 +454,30 @@ impl ServerHost for TestHost {
 }
 
 impl TestHost {
+    /// Keeps the key-value store in `dir`, so that a later host with the same
+    /// folder reads what this one wrote.
+    pub fn set_kvp_dir(&self, dir: PathBuf) {
+        *self.kvp.borrow_mut() = Some(KvpStore::new(dir));
+    }
+
+    /// Writes the key-value changes to the disk and stops the store's writer,
+    /// so that a later host with the same folder reads them.
+    pub fn close_kvp(&self) {
+        self.with_kvp(KvpStore::shutdown);
+    }
+
+    /// Runs `f` on the key-value store, opening a temporary one on first use.
+    fn with_kvp<T>(&self, f: impl FnOnce(&mut KvpStore) -> T) -> T {
+        let mut slot = self.kvp.borrow_mut();
+        let store = slot.get_or_insert_with(|| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let root = dir.path().to_path_buf();
+            self.dirs.borrow_mut().push(dir);
+            KvpStore::new(root)
+        });
+        f(store)
+    }
+
     /// Runs `f` on the entity `entity`, or fails when it does not exist.
     fn entity_slot(&self, entity: u32) -> Result<std::cell::RefMut<'_, EntityInfo>, ScriptError> {
         let entities = self.entities.borrow_mut();
