@@ -464,6 +464,18 @@ pub trait ServerHost {
     /// value is too long to send, and then nothing changes.
     fn set_convar(&self, name: &str, value: &str, kind: ConvarKind) -> Result<(), ScriptError>;
 
+    /// Stores a convar as [`set_convar`](Self::set_convar) on behalf of
+    /// `resource`, enforcing protected and restricted convar write rules.
+    fn set_convar_for_resource(
+        &self,
+        _resource: &str,
+        name: &str,
+        value: &str,
+        kind: ConvarKind,
+    ) -> Result<(), ScriptError> {
+        self.set_convar(name, value, kind)
+    }
+
     /// The ped of a connected player. It is created, owned by the player, just
     /// before `playerJoining`, and deleted after `playerDropped`.
     fn player_ped(&self, player: u32) -> Option<u32>;

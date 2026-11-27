@@ -91,6 +91,8 @@ same name is never reached.
 | `sets <name> <value>` | Stores a convar published in `/info.json`. The value is read the same way. |
 | `setr <name> <value>` | Stores a replicated convar. The value is read the same way. Every connected player gets it, and players who join later get it too. |
 | `add_convar_permission <resource> read <name>` | Grants read access to a plain server convar. See [Private convar readers](#private-convar-readers). |
+| `remove_convar_permission <resource> read <name>` | Revokes `<resource>`'s read access to a restricted convar. When the last reader is removed, the convar becomes readable by every resource again. |
+| `list_convar_permissions` | Lists every private convar reader entry (`console` only). |
 | `exec <file>` | Runs each line of the file. See above. |
 | `help` | Lists the built-in commands and the script commands. Restricted commands are marked. |
 | `quit [reason]` | Asks the server to stop. The reason is written to the log. |
@@ -222,6 +224,7 @@ Convar names are case-insensitive. Scripts read them with `GetConvar` and
 | `sixm_tickRate` | `20` | Frames per second, clamped to 1 to 1000. A value that is not a number gives 20. |
 | `endpoint_add_udp` | `0.0.0.0:30120` | Listen address, for TCP (HTTP) and UDP (the game). Read when the network starts. An address that does not parse stops the network. A TCP port that is in use does not: the error is logged and the server runs without HTTP. |
 | `sv_httpEnabled` | `true` | Whether the HTTP listener runs. `false` or `0` turns it off. Read when the network starts. |
+| `sv_httpAllowPrivate` | `false` | Console-only. Whether `PerformHttpRequest` may reach loopback, link-local (such as `169.254.169.254`), or private network IP addresses (`true` or `1` turns it on). |
 | `sixm_httpHandlerTimeout` | `25` | Seconds a `SetHttpHandler` handler may take to complete its response before the client gets `504`, clamped to 1 to 120. A value that is not a number gives 25. |
 | `sv_exposePlayerIdentifiers` | `false` | Whether `/players.json` lists each player's identifiers. Only `true` turns it on. See [HTTP endpoints](#http-endpoints). |
 | `rcon_password` | empty | Console-only credential for [`POST /rcon`](#remote-console). Set with `set rcon_password "<password>"`. |
@@ -236,8 +239,12 @@ Convar names are case-insensitive. Scripts read them with `GetConvar` and
 | `sv_entityLockdown` | `inactive` | Global client entity creation lockdown mode (`inactive`, `relaxed` to block peds, or `strict` to block all client creations), overridable per routing bucket via `SetRoutingBucketEntityLockdownMode`. |
 
 Any other convar can be set with `set`, `sets` or `setr`, or with the Lua
-setters, and read by scripts. The server checks a value only when the convar is
-replicated (see below).
+setters, and read by scripts. Console-only bootstrap and security convars
+(`rcon_password`, `sv_httpAllowPrivate`, `sv_httpEnabled`,
+`sv_exposePlayerIdentifiers`, `sixm_identityFile`, `sixm_resourcesPath`,
+`sixm_kvpPath`, and `endpoint_add_udp`) cannot be modified by scripts or remote
+players. The server checks a value only when the convar is replicated (see
+below).
 
 ### Kinds of convar
 
@@ -282,9 +289,13 @@ set billing_token "<private-token>"
 
 The command requires the server console or `server.cfg`. It applies to Lua
 and JavaScript. A resource without access receives its supplied default from
-the getters and receives no change notifications for the convar. The policy
-applies to plain convars, and a restricted name cannot be stored with `sets`
-or `setr`.
+the getters, receives no change notifications for the convar, and cannot
+overwrite the convar through `SetConvar*` or `ExecuteCommand('set ...')`. The
+policy applies to plain convars, and a restricted name cannot be stored with
+`sets` or `setr`. Console-only convars cannot be granted via
+`add_convar_permission`. Remove an entry with
+`remove_convar_permission <resource> read <name>`, and inspect current entries
+with `list_convar_permissions`.
 
 ## Resource discovery
 

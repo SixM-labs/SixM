@@ -17,7 +17,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::access::Permission;
 use crate::config::tokenize;
-use crate::convars::{ENDPOINT, RCON_PASSWORD};
+use crate::convars::{Convars, ENDPOINT};
 use crate::manager::{ManagerError, ResourceManager};
 use crate::perf::{format_millis, per_second};
 
@@ -27,7 +27,7 @@ const MAX_EXEC_DEPTH: usize = 16;
 const MAX_QUEUED_COMMANDS: usize = 1000;
 
 /// Built-in command names, as listed by `help`.
-pub(crate) const BUILT_IN: [&str; 26] = [
+pub(crate) const BUILT_IN: [&str; 28] = [
     "add_ace",
     "add_convar_permission",
     "add_principal",
@@ -38,6 +38,7 @@ pub(crate) const BUILT_IN: [&str; 26] = [
     "exec",
     "help",
     "list_aces",
+    "list_convar_permissions",
     "list_principals",
     "perf",
     "players",
@@ -45,6 +46,7 @@ pub(crate) const BUILT_IN: [&str; 26] = [
     "quit",
     "refresh",
     "remove_ace",
+    "remove_convar_permission",
     "remove_principal",
     "restart",
     "set",
@@ -160,9 +162,11 @@ pub(crate) fn run_words(
         "add_ace" => add_ace(manager, args),
         "add_convar_permission" => add_convar_permission(manager, args, &context.source),
         "remove_ace" => remove_ace(manager, args),
+        "remove_convar_permission" => remove_convar_permission(manager, args, &context.source),
         "add_principal" => add_principal(manager, args),
         "remove_principal" => remove_principal(manager, args),
         "list_aces" => list_aces(manager, args),
+        "list_convar_permissions" => list_convar_permissions(manager, args, &context.source),
         "list_principals" => list_principals(manager, args),
         "test_ace" => test_ace(manager, args),
         _ => run_script_or_convar(manager, name, &lower, args, raw, &context.source),
@@ -271,9 +275,21 @@ fn set_convar(
         warn!("usage: {command} <name> <value>");
         return;
     };
-    if name.eq_ignore_ascii_case(RCON_PASSWORD) && !matches!(source, CommandSource::Console) {
-        warn!("rcon_password is console-only");
+    if Convars::is_console_only(name) && !matches!(source, CommandSource::Console) {
+        warn!("{} is console-only", name.to_ascii_lowercase());
         return;
+    }
+    let key = name.to_ascii_lowercase();
+    match source {
+        CommandSource::Player(player) if manager.convars.borrow().is_restricted(&key) => {
+            warn!("player {player} cannot modify restricted convar `{name}`");
+            return;
+        }
+        CommandSource::Resource(resource) if !manager.convars.borrow().can_read(&key, resource) => {
+            warn!("resource `{resource}` cannot modify restricted convar `{name}`");
+            return;
+        }
+        CommandSource::Console | CommandSource::Player(_) | CommandSource::Resource(_) => {}
     }
     store_convar(manager, name, &value.join(" "), kind);
 }
@@ -301,6 +317,49 @@ fn add_convar_permission(manager: &ResourceManager, args: &[String], source: &Co
     }
     if let Err(error) = manager.convars.borrow_mut().add_reader(name, resource) {
         error!("cannot add a reader for `{name}`: {error}");
+    }
+}
+
+fn remove_convar_permission(manager: &ResourceManager, args: &[String], source: &CommandSource) {
+    if !matches!(source, CommandSource::Console) {
+        warn!("remove_convar_permission is console-only");
+        return;
+    }
+    let Some([resource, operation, name]) =
+        names(args, "remove_convar_permission <resource> read <convar>")
+    else {
+        return;
+    };
+    if !operation.eq_ignore_ascii_case("read") {
+        warn!("usage: remove_convar_permission <resource> read <convar>");
+        return;
+    }
+    let (removed, still_restricted) = manager.convars.borrow_mut().remove_reader(name, resource);
+    match (removed, still_restricted) {
+        (true, true) => info!("removed convar permission {resource} read {name}"),
+        (true, false) => {
+            info!("removed convar permission {resource} read {name}; `{name}` is now unrestricted");
+        }
+        (false, _) => warn!("no convar permission {resource} read {name}"),
+    }
+}
+
+fn list_convar_permissions(manager: &ResourceManager, args: &[String], source: &CommandSource) {
+    if !matches!(source, CommandSource::Console) {
+        warn!("list_convar_permissions is console-only");
+        return;
+    }
+    if !args.is_empty() {
+        warn!("usage: list_convar_permissions");
+        return;
+    }
+    let readers = manager.convars.borrow().readers();
+    if readers.is_empty() {
+        info!("No convar permissions");
+        return;
+    }
+    for (convar, resource) in readers {
+        info!("convar_permission {resource} read {convar}");
     }
 }
 

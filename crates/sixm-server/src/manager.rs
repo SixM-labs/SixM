@@ -11,7 +11,7 @@ use sixm_core::{
     ClientHost, ClientTarget, ConvarKind, EntityAttachment, EntityInfo, EntityKind, EntityState,
     EventContext, EventSource, FuncRef, Host, HttpRequest, PlayerInfo, ResourceDirectory,
     ResourceName, ResourceState, ScriptError, ScriptLanguage, ScriptRuntime, ServerHost, Value,
-    WebReply,
+    WebReply, is_protected_resource_file,
 };
 use sixm_js::JsRuntime;
 use sixm_kvp::KvpStore;
@@ -26,7 +26,7 @@ use tracing::{debug, error, info, warn};
 use crate::access::AccessStore;
 use crate::buckets::BucketSettings;
 use crate::commands::CommandSource;
-use crate::convars::{Convars, RCON_PASSWORD};
+use crate::convars::{Convars, KVP_PATH, RCON_PASSWORD};
 use crate::entities::{EntityStore, EntityUpdate};
 use crate::host_functions::{HostFunctions, is_host};
 use crate::http::{Completion, HttpClient};
@@ -479,7 +479,7 @@ impl ResourceManager {
         let mut slot = self.kvp.borrow_mut();
         let store = slot.get_or_insert_with(|| {
             let root = self
-                .convar("sixm_kvpPath")
+                .convar(KVP_PATH)
                 .filter(|path| !path.is_empty())
                 .unwrap_or_else(|| "cache/kvp".to_owned());
             KvpStore::new(root)
@@ -1034,13 +1034,22 @@ impl Host for ResourceManager {
         request: HttpRequest,
         callback: FuncRef,
     ) -> Result<(), ScriptError> {
-        let (timeout, workers) = {
+        let (timeout, workers, allow_private) = {
             let convars = self.convars.borrow();
-            (convars.http_timeout(), convars.http_workers())
+            (
+                convars.http_timeout(),
+                convars.http_workers(),
+                convars.http_allow_private(),
+            )
         };
-        let result = self
-            .http
-            .start(resource, request, callback.clone(), timeout, workers);
+        let result = self.http.start(
+            resource,
+            request,
+            callback.clone(),
+            timeout,
+            workers,
+            allow_private,
+        );
         if result.is_err() {
             self.release_ref(&callback);
         }
@@ -1114,6 +1123,9 @@ impl Host for ResourceManager {
     }
 
     fn save_resource_file(&self, resource: &str, path: &str, data: &[u8]) -> bool {
+        if is_protected_resource_file(path) {
+            return false;
+        }
         let Some(root) = self.resource_path(resource) else {
             return false;
         };
@@ -1202,10 +1214,33 @@ fn check_replicated(name: &str, value: &str) -> Result<(), ScriptError> {
 
 impl ServerHost for ResourceManager {
     fn set_convar(&self, name: &str, value: &str, kind: ConvarKind) -> Result<(), ScriptError> {
-        if name.eq_ignore_ascii_case(RCON_PASSWORD) {
-            return Err(ScriptError::Runtime(
-                "rcon_password is console-only".to_owned(),
-            ));
+        if Convars::is_console_only(name) {
+            return Err(ScriptError::Runtime(format!(
+                "{} is console-only",
+                name.to_ascii_lowercase()
+            )));
+        }
+        self.set_convar(name, value, kind)
+    }
+
+    fn set_convar_for_resource(
+        &self,
+        resource: &str,
+        name: &str,
+        value: &str,
+        kind: ConvarKind,
+    ) -> Result<(), ScriptError> {
+        if Convars::is_console_only(name) {
+            return Err(ScriptError::Runtime(format!(
+                "{} is console-only",
+                name.to_ascii_lowercase()
+            )));
+        }
+        let key = name.to_ascii_lowercase();
+        if !self.convars.borrow().can_read(&key, resource) {
+            return Err(ScriptError::Runtime(format!(
+                "resource `{resource}` cannot modify restricted convar `{name}`"
+            )));
         }
         self.set_convar(name, value, kind)
     }

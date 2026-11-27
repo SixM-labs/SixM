@@ -163,6 +163,23 @@ impl ResourceDirectory {
     }
 }
 
+/// Whether `path` names a resource manifest or script file that scripts
+/// cannot overwrite through `SaveResourceFile`.
+pub fn is_protected_resource_file(path: &str) -> bool {
+    let Some(normalized) = normalize_resource_path(path) else {
+        return false;
+    };
+    let path = Path::new(&normalized);
+    let is_manifest = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.eq_ignore_ascii_case("fxmanifest.lua")
+                || name.eq_ignore_ascii_case("__resource.lua")
+        });
+    is_manifest || ScriptLanguage::from_path(path).is_some()
+}
+
 fn invalid_resource_path() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
@@ -174,7 +191,7 @@ fn invalid_resource_path() -> io::Error {
 mod tests {
     use std::fs;
 
-    use super::{ResourceDirectory, normalize_resource_path};
+    use super::{ResourceDirectory, is_protected_resource_file, normalize_resource_path};
 
     #[test]
     fn keeps_plain_relative_names() {
@@ -262,5 +279,27 @@ mod tests {
             assert!(directory.write(name, b"ignored").is_err());
         }
         assert_eq!(fs::read(outside).expect("outside data"), b"original");
+    }
+
+    #[test]
+    fn protected_resource_files_reject_manifests_and_scripts() {
+        for protected in [
+            "fxmanifest.lua",
+            "FXMANIFEST.LUA",
+            "__resource.lua",
+            "server.lua",
+            "client/main.js",
+            "./NESTED/SCRIPT.JS",
+        ] {
+            assert!(is_protected_resource_file(protected), "{protected}");
+        }
+        for writable in [
+            "data/config.json",
+            "state.txt",
+            "backup/server.lua.bak",
+            "../fxmanifest.lua",
+        ] {
+            assert!(!is_protected_resource_file(writable), "{writable}");
+        }
     }
 }

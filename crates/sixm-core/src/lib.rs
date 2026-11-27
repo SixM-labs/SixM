@@ -29,7 +29,8 @@ pub use entity::{
     entity_bag, entity_of_bag, euler_to_quat, is_finite, quat_to_euler,
 };
 pub use files::{
-    ResourceDirectory, ScriptLanguage, is_resource_component, normalize_resource_path,
+    ResourceDirectory, ScriptLanguage, is_protected_resource_file, is_resource_component,
+    normalize_resource_path,
 };
 pub use hash::joaat;
 pub use runtime::{

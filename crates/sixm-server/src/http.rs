@@ -17,11 +17,12 @@
 
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sixm_core::{FuncRef, HttpRequest, ResourceName, ScriptError, Value};
 use ureq::Agent;
@@ -93,6 +94,7 @@ struct Job {
     uri: Uri,
     request: HttpRequest,
     timeout: Duration,
+    allow_private: bool,
     owner: ResourceName,
     callback: FuncRef,
     /// Set when the owner stops, so a worker skips the request.
@@ -129,10 +131,13 @@ pub(crate) struct HttpClient {
 impl HttpClient {
     /// Starts `request` for `resource`. `callback` receives its outcome from a
     /// later frame. `timeout` applies unless the request has its own, and
-    /// `workers` sizes the pool if this is the first request. Fails, without
-    /// starting anything, when the URL is not an `http` or `https` address, the
-    /// method is not valid, the resource already has [`MAX_IN_FLIGHT`] requests
-    /// open, or [`QUEUE_CAPACITY`] requests already wait for a worker.
+    /// `workers` sizes the pool if this is the first request. When
+    /// `allow_private` is `false`, loopback, link-local, and private IP
+    /// targets (including after DNS resolution or redirects) fail safely. Fails,
+    /// without starting anything, when the URL is not an `http` or `https`
+    /// address, the method is not valid, the resource already has
+    /// [`MAX_IN_FLIGHT`] requests open, or [`QUEUE_CAPACITY`] requests already
+    /// wait for a worker.
     pub(crate) fn start(
         &self,
         resource: &ResourceName,
@@ -140,9 +145,10 @@ impl HttpClient {
         callback: FuncRef,
         timeout: Duration,
         workers: usize,
+        allow_private: bool,
     ) -> Result<(), ScriptError> {
         let uri: Uri = request.url.parse().map_err(|_| invalid_url(&request.url))?;
-        if !matches!(uri.scheme_str(), Some("http" | "https")) {
+        if !matches!(uri.scheme_str(), Some("http" | "https")) || uri.host().is_none() {
             return Err(invalid_url(&request.url));
         }
         let method = Method::from_bytes(request.method.as_bytes()).map_err(|_| {
@@ -159,6 +165,7 @@ impl HttpClient {
                     uri,
                     request,
                     timeout,
+                    allow_private,
                     owner: resource.clone(),
                     callback,
                     cancelled,
@@ -273,7 +280,14 @@ fn work(jobs: &Mutex<Receiver<Job>>, agent: &Agent, finished: &Mutex<Vec<Complet
         if job.cancelled.load(Ordering::Acquire) {
             continue;
         }
-        let outcome = perform(agent, &job.method, &job.uri, job.request, job.timeout);
+        let outcome = perform(
+            agent,
+            &job.method,
+            &job.uri,
+            job.request,
+            job.timeout,
+            job.allow_private,
+        );
         finished
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -296,45 +310,107 @@ fn invalid_url(url: &str) -> ScriptError {
     ScriptError::Runtime(format!("`{url}` is not an absolute http or https URL"))
 }
 
-/// The shared agent: rustls with ring, Mozilla roots, redirects followed up to
-/// [`MAX_REDIRECTS`], and error statuses returned as responses.
+/// The shared agent: rustls with ring, Mozilla roots, manual redirect handling
+/// up to [`MAX_REDIRECTS`] (so each hop is checked against private-network
+/// rules), and error statuses returned as responses.
 fn build_agent() -> Agent {
     Agent::config_builder()
         .http_status_as_error(false)
-        .max_redirects(MAX_REDIRECTS)
+        .max_redirects(0)
         .build()
         .into()
 }
 
-/// Runs one request to completion on the calling thread.
+/// Runs one request to completion on the calling thread, validating initial and
+/// redirected targets when `allow_private` is `false`.
 fn perform(
     agent: &Agent,
     method: &Method,
     uri: &Uri,
     request: HttpRequest,
     timeout: Duration,
+    allow_private: bool,
 ) -> Outcome {
-    let mut builder = http::Request::builder()
-        .method(method.clone())
-        .uri(uri.clone());
-    for (name, value) in &request.headers {
-        builder = builder.header(name.as_str(), value.as_str());
-    }
-    let body = request.body.unwrap_or_default();
-    let built = match builder.body(body) {
-        Ok(built) => built,
-        Err(err) => return Outcome::Failed(format!("invalid request: {err}")),
-    };
-    let built = agent
-        .configure_request(built)
-        .timeout_global(Some(timeout))
-        .build();
-    let mut response = match agent.run(built) {
-        Ok(response) => response,
-        Err(err) => return Outcome::Failed(err.to_string()),
-    };
+    let deadline = Instant::now() + timeout;
+    let mut method = method.clone();
+    let mut uri = uri.clone();
+    let mut headers = request.headers;
+    let mut body = request.body.unwrap_or_default();
 
-    let status = response.status().as_u16();
+    for hop in 0..=MAX_REDIRECTS {
+        if let Err(msg) = check_target(&uri, allow_private) {
+            return Outcome::Failed(msg);
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Outcome::Failed("request timed out".to_owned());
+        };
+        if remaining.is_zero() {
+            return Outcome::Failed("request timed out".to_owned());
+        }
+
+        let mut builder = http::Request::builder()
+            .method(method.clone())
+            .uri(uri.clone());
+        for (name, value) in &headers {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+        let built = match builder.body(body.clone()) {
+            Ok(built) => built,
+            Err(err) => return Outcome::Failed(format!("invalid request: {err}")),
+        };
+        let built = agent
+            .configure_request(built)
+            .timeout_global(Some(remaining))
+            .build();
+        let mut response = match agent.run(built) {
+            Ok(response) => response,
+            Err(err) => return Outcome::Failed(err.to_string()),
+        };
+
+        let status = response.status().as_u16();
+        if is_redirect(status)
+            && let Some(location) = response.headers().get(http::header::LOCATION)
+        {
+            let Ok(location) = location.to_str() else {
+                return Outcome::Failed("redirect target is not valid UTF-8".to_owned());
+            };
+            if hop == MAX_REDIRECTS {
+                return Outcome::Failed(format!("too many redirects (>{MAX_REDIRECTS})"));
+            }
+            let next_uri = match resolve_redirect(&uri, location) {
+                Ok(next) => next,
+                Err(msg) => return Outcome::Failed(msg),
+            };
+            let cross_origin = !same_origin(&uri, &next_uri);
+            apply_redirect_semantics(status, &mut method, &mut body, &mut headers, cross_origin);
+            uri = next_uri;
+            continue;
+        }
+
+        let response_headers = collect_headers(&response);
+        return match response
+            .body_mut()
+            .with_config()
+            .limit(MAX_BODY)
+            .read_to_vec()
+        {
+            Ok(body) => Outcome::Response {
+                status,
+                headers: response_headers,
+                body,
+            },
+            Err(err) => Outcome::Failed(err.to_string()),
+        };
+    }
+
+    Outcome::Failed(format!("too many redirects (>{MAX_REDIRECTS})"))
+}
+
+fn is_redirect(status: u16) -> bool {
+    matches!(status, 301 | 302 | 303 | 307 | 308)
+}
+
+fn collect_headers(response: &http::Response<ureq::Body>) -> Vec<(String, String)> {
     let mut headers: Vec<(String, String)> = Vec::new();
     for (name, value) in response.headers() {
         let Ok(value) = value.to_str() else {
@@ -348,19 +424,165 @@ fn perform(
             None => headers.push((name.as_str().to_owned(), value.to_owned())),
         }
     }
-    match response
-        .body_mut()
-        .with_config()
-        .limit(MAX_BODY)
-        .read_to_vec()
-    {
-        Ok(body) => Outcome::Response {
-            status,
-            headers,
-            body,
-        },
-        Err(err) => Outcome::Failed(err.to_string()),
+    headers
+}
+
+fn check_target(uri: &Uri, allow_private: bool) -> Result<(), String> {
+    if !matches!(uri.scheme_str(), Some("http" | "https")) {
+        return Err(format!("`{uri}` is not an absolute http or https URL"));
     }
+    let Some(host) = uri.host() else {
+        return Err(format!("`{uri}` has no host"));
+    };
+    if allow_private {
+        return Ok(());
+    }
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let lower = host.to_ascii_lowercase();
+    if lower == "localhost" || lower.ends_with(".localhost") {
+        return Err(format!("refused private or loopback HTTP target `{host}`"));
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_forbidden_ip(ip) {
+            return Err(format!("refused private or loopback HTTP target `{host}`"));
+        }
+        return Ok(());
+    }
+    let port = uri.port_u16().unwrap_or_else(|| default_port(uri));
+    let resolved = (host, port)
+        .to_socket_addrs()
+        .map_err(|err| format!("cannot resolve `{host}`: {err}"))?;
+    for addr in resolved {
+        if is_forbidden_ip(addr.ip()) {
+            return Err(format!("refused private or loopback HTTP target `{host}`"));
+        }
+    }
+    Ok(())
+}
+
+fn is_forbidden_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            o[0] == 0
+                || v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || (o[0] == 100 && (o[1] & 0b1100_0000) == 64)
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0)
+                || (o[0] == 198 && (o[1] & 0b1111_1110) == 18)
+                || o[0] >= 240
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_forbidden_ip(IpAddr::V4(v4));
+            }
+            let seg = v6.segments();
+            if seg[..6] == [0; 6] && !v6.is_unspecified() && !v6.is_loopback() {
+                let [a, b] = seg[6].to_be_bytes();
+                let [c, d] = seg[7].to_be_bytes();
+                return is_forbidden_ip(IpAddr::V4(Ipv4Addr::new(a, b, c, d)));
+            }
+            v6.is_unspecified()
+                || v6.is_loopback()
+                || v6.is_unicast_link_local()
+                || v6.is_unique_local()
+                || v6.is_multicast()
+                || (seg[0] == 0x2001 && seg[1] == 0x0db8)
+        }
+    }
+}
+
+fn default_port(uri: &Uri) -> u16 {
+    if uri.scheme_str() == Some("https") {
+        443
+    } else {
+        80
+    }
+}
+
+fn same_origin(a: &Uri, b: &Uri) -> bool {
+    a.scheme_str() == b.scheme_str()
+        && a.host()
+            .zip(b.host())
+            .is_some_and(|(ah, bh)| ah.eq_ignore_ascii_case(bh))
+        && a.port_u16().unwrap_or_else(|| default_port(a))
+            == b.port_u16().unwrap_or_else(|| default_port(b))
+}
+
+fn apply_redirect_semantics(
+    status: u16,
+    method: &mut Method,
+    body: &mut Vec<u8>,
+    headers: &mut Vec<(String, String)>,
+    cross_origin: bool,
+) {
+    if status == 303 && *method != Method::GET && *method != Method::HEAD
+        || matches!(status, 301 | 302) && *method == Method::POST
+    {
+        *method = Method::GET;
+        body.clear();
+        headers.retain(|(name, _)| {
+            !name.eq_ignore_ascii_case("content-length")
+                && !name.eq_ignore_ascii_case("content-type")
+        });
+    }
+    if cross_origin {
+        headers.retain(|(name, _)| {
+            !name.eq_ignore_ascii_case("authorization")
+                && !name.eq_ignore_ascii_case("proxy-authorization")
+                && !name.eq_ignore_ascii_case("cookie")
+        });
+    }
+}
+
+fn resolve_redirect(base: &Uri, location: &str) -> Result<Uri, String> {
+    let trimmed = location.trim().split('#').next().unwrap_or("").trim();
+    if trimmed.is_empty() {
+        return Err("redirect target is empty".to_owned());
+    }
+    if trimmed.starts_with("//") {
+        let scheme = base.scheme_str().unwrap_or("http");
+        let parsed: Uri = format!("{scheme}:{trimmed}")
+            .parse()
+            .map_err(|_| format!("invalid redirect URL `{location}`"))?;
+        return validate_redirect_uri(parsed);
+    }
+    if let Ok(parsed) = trimmed.parse::<Uri>()
+        && parsed.scheme_str().is_some()
+    {
+        return validate_redirect_uri(parsed);
+    }
+    let scheme = base.scheme_str().unwrap_or("http");
+    let authority = base
+        .authority()
+        .ok_or_else(|| "base URL has no authority".to_owned())?
+        .as_str();
+    let path_and_query = if trimmed.starts_with('/') {
+        trimmed.to_owned()
+    } else if trimmed.starts_with('?') {
+        format!("{}{trimmed}", base.path())
+    } else {
+        let prefix = match base.path().rfind('/') {
+            Some(index) => &base.path()[..=index],
+            None => "/",
+        };
+        format!("{prefix}{trimmed}")
+    };
+    let parsed: Uri = format!("{scheme}://{authority}{path_and_query}")
+        .parse()
+        .map_err(|_| format!("invalid redirect URL `{location}`"))?;
+    validate_redirect_uri(parsed)
+}
+
+fn validate_redirect_uri(uri: Uri) -> Result<Uri, String> {
+    if !matches!(uri.scheme_str(), Some("http" | "https")) || uri.host().is_none() {
+        return Err(format!("`{uri}` is not an absolute http or https URL"));
+    }
+    Ok(uri)
 }
 
 #[cfg(test)]
@@ -452,6 +674,7 @@ mod tests {
                 callback(),
                 Duration::from_secs(10),
                 WORKERS,
+                true,
             )
             .expect("start");
 
@@ -483,6 +706,7 @@ mod tests {
                 callback(),
                 Duration::from_secs(10),
                 WORKERS,
+                true,
             )
             .expect("start");
 
@@ -503,6 +727,7 @@ mod tests {
                 callback(),
                 Duration::from_millis(300),
                 WORKERS,
+                true,
             )
             .expect("start");
 
@@ -530,6 +755,7 @@ mod tests {
                 callback(),
                 Duration::from_secs(20),
                 WORKERS,
+                true,
             )
             .expect("start");
 
@@ -547,6 +773,7 @@ mod tests {
                 callback(),
                 Duration::from_secs(1),
                 WORKERS,
+                false,
             );
             assert!(result.is_err(), "{url} was accepted");
         }
@@ -565,7 +792,8 @@ mod tests {
                     bad,
                     callback(),
                     Duration::from_secs(1),
-                    WORKERS
+                    WORKERS,
+                    false,
                 )
                 .is_err()
         );
@@ -596,6 +824,7 @@ mod tests {
                 callback(),
                 Duration::from_secs(10),
                 WORKERS,
+                true,
             )
             .expect("start");
         let done = wait_for(&client);
@@ -617,6 +846,7 @@ mod tests {
                     callback(),
                     Duration::from_secs(10),
                     1,
+                    true,
                 )
                 .expect("start");
         }
@@ -646,6 +876,7 @@ mod tests {
                 callback(),
                 Duration::from_millis(200),
                 1,
+                true,
             );
             if result.is_err() {
                 refused += 1;
@@ -667,6 +898,7 @@ mod tests {
                     callback(),
                     Duration::from_secs(10),
                     1,
+                    true,
                 )
                 .expect("start");
         }
@@ -675,5 +907,100 @@ mod tests {
         thread::sleep(Duration::from_millis(600));
         // The one running request may finish; the queued ones were skipped.
         assert!(client.take_finished().len() <= 1);
+    }
+
+    #[test]
+    fn private_and_loopback_targets_are_blocked_by_default() {
+        let client = HttpClient::default();
+        for url in [
+            "http://127.0.0.1:1/",
+            "http://localhost:1/",
+            "http://[::1]:1/",
+            "http://[::ffff:127.0.0.1]:1/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.1/",
+            "http://192.168.1.1/",
+            "http://100.64.0.1/",
+            "http://0.0.0.0/",
+        ] {
+            client
+                .start(
+                    &resource(),
+                    request(url.to_owned()),
+                    callback(),
+                    Duration::from_secs(2),
+                    WORKERS,
+                    false,
+                )
+                .expect("start");
+            let done = wait_for(&client);
+            let Outcome::Failed(message) = &done[0].outcome else {
+                panic!("expected `{url}` to be blocked, got {:?}", done[0].outcome);
+            };
+            assert!(message.contains("private or loopback"), "{url}: {message}");
+            client.finish(&done[0].resource, done[0].callback.instance);
+        }
+
+        assert!(!is_forbidden_ip("1.1.1.1".parse().expect("ip")));
+        assert!(!is_forbidden_ip("172.15.255.255".parse().expect("ip")));
+        assert!(is_forbidden_ip("172.16.0.1".parse().expect("ip")));
+        assert!(is_forbidden_ip("fe80::1".parse().expect("ip")));
+        assert!(is_forbidden_ip("fc00::1".parse().expect("ip")));
+        assert!(!is_forbidden_ip(
+            "2606:4700:4700::1111".parse().expect("ip")
+        ));
+    }
+
+    #[test]
+    fn redirects_are_validated_and_followed_safely() {
+        let base: Uri = "https://public.example.test/api/v1/start"
+            .parse()
+            .expect("uri");
+        let blocked = resolve_redirect(&base, "http://169.254.169.254/latest").expect("uri");
+        assert!(check_target(&blocked, false).is_err());
+
+        let relative = resolve_redirect(&base, "next?ok=1#frag").expect("uri");
+        assert_eq!(
+            relative.to_string(),
+            "https://public.example.test/api/v1/next?ok=1"
+        );
+        assert!(same_origin(&base, &relative));
+
+        let other = resolve_redirect(&base, "https://other.example.test/hook").expect("uri");
+        assert!(!same_origin(&base, &other));
+        let mut method = Method::POST;
+        let mut body = b"secret".to_vec();
+        let mut headers = vec![
+            ("Authorization".to_owned(), "Bearer tok".to_owned()),
+            ("Cookie".to_owned(), "a=b".to_owned()),
+            ("X-Trace".to_owned(), "1".to_owned()),
+        ];
+        apply_redirect_semantics(302, &mut method, &mut body, &mut headers, true);
+        assert_eq!(method, Method::GET);
+        assert_eq!(body, b"");
+        assert_eq!(headers, [("X-Trace".to_owned(), "1".to_owned())]);
+
+        let client = HttpClient::default();
+        let final_url = serve(ok_response("final"), Duration::ZERO);
+        let redirect = format!(
+            "HTTP/1.1 302 Found\r\nLocation: {final_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .into_bytes();
+        client
+            .start(
+                &resource(),
+                request(serve(redirect, Duration::ZERO)),
+                callback(),
+                Duration::from_secs(10),
+                WORKERS,
+                true,
+            )
+            .expect("start redirect");
+        let done = wait_for(&client);
+        let Outcome::Response { status, body, .. } = &done[0].outcome else {
+            panic!("expected redirected response, got {:?}", done[0].outcome);
+        };
+        assert_eq!(*status, 201);
+        assert_eq!(body, b"final");
     }
 }

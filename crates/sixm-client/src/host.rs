@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use sixm_core::{
     ClientHost, EntityInfo, EntityKind, EntityState, EventSource, FuncRef, GLOBAL_BAG, Host,
     HttpRequest, MirrorChange, NativeRegistry, ResourceDirectory, ResourceName, ResourceState,
-    ScriptError, ServerHost, Value, entity_of_bag, is_finite, player_of_bag,
+    ScriptError, ServerHost, Value, entity_of_bag, is_finite, is_protected_resource_file,
+    player_of_bag,
 };
 use tracing::warn;
 
@@ -169,7 +170,7 @@ impl Host for ClientRuntime {
     /// Writes into the resource's data folder. A declared file cannot be
     /// overwritten, so a saved file never shadows one the server sent.
     fn save_resource_file(&self, resource: &str, path: &str, data: &[u8]) -> bool {
-        if !self.is_running(resource) {
+        if !self.is_running(resource) || is_protected_resource_file(path) {
             return false;
         }
         let declared = self

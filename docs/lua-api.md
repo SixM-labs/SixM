@@ -246,10 +246,13 @@ be a regular file.
 ### `SaveResourceFile`
 
 - **Server.** Writes only to the calling resource (the name must be its own).
-  The file goes into the resource folder, and an existing file there is
-  overwritten. The folders are created if needed.
+  The file goes into the resource folder, and an existing data file there is
+  overwritten. Resource manifests (`fxmanifest.lua`, `__resource.lua`) and
+  script files (`.lua`, `.js`) cannot be overwritten and return `false`. The
+  folders are created if needed.
 - **Client.** Writes only to the calling resource's data folder. A file name
-  that the server sent is refused, so a saved file never replaces a synced one.
+  that the server sent, or a manifest/script path, is refused so a saved file
+  never replaces a synced or executable one.
 
 The client keeps its data folders under the cache. See [client.md](client.md).
 
@@ -675,7 +678,11 @@ Arguments:
 - `options.timeout`: the timeout in milliseconds for this request. Optional. The
   default is the `sixm_httpTimeout` convar. Other keys are ignored.
 
-Redirects are followed up to 5. A resource may have 64 requests in flight at
+Redirects are followed up to 5. By default (`sv_httpAllowPrivate` unset or
+`false`), requests and redirects to loopback, link-local (such as cloud metadata
+endpoints), or private network addresses are refused with status `0` and an
+error message; cross-origin redirects strip sensitive request headers
+(`Authorization`, `Proxy-Authorization`, `Cookie`). A resource may have 64 requests in flight at
 once; a 65th raises an error, and so does a request while 256 others wait for a
 worker. A callback whose resource has stopped by the time the response arrives is
 dropped, and requests of a stopped resource that have not begun never run.

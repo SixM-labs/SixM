@@ -126,6 +126,12 @@ add_ace builtin.everyone command.help allow
 - **Convars by bare name:** A player or resource can **never** read or set a
   convar by typing its bare name (such as `sv_hostname` or
   `sv_hostname "New"`). Only the server console can do that.
+- **Console-only & restricted convars:** Security-critical and bootstrap
+  convars (`rcon_password`, `sv_httpAllowPrivate`, `sv_httpEnabled`,
+  `sv_exposePlayerIdentifiers`, `sixm_identityFile`, `sixm_resourcesPath`,
+  `sixm_kvpPath`, `endpoint_add_udp`) cannot be modified from scripts or remote
+  commands, and restricted convars (`add_convar_permission`) cannot be
+  overwritten by resources without read access.
 
 > [!CAUTION]
 > Granting `add_ace group.admin command allow` grants `command.exec`,
