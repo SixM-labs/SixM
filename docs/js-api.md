@@ -35,6 +35,10 @@ The runtime exposes no shell or process API. The server's `PerformHttpRequest`
 passes response data to scripts. `ExecuteCommand` only interprets SixM console
 commands with the resource's permissions.
 
+Resource file paths follow the same [file rules](lua-api.md#loadresourcefile)
+as Lua. Server convar getters and listeners respect
+[private convar readers](server.md#private-convar-readers).
+
 ## Scheduling, timers, and async
 
 | Name | Side | Signature and result |

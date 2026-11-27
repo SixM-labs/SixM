@@ -9,6 +9,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
@@ -31,6 +32,8 @@ const DEFAULT_REFUSAL: &str = "Rejected by the server";
 const FULL_REASON: &str = "Server is full";
 /// Refusal sent when a deferred connection is not finished in time.
 const DEFERRAL_TIMEOUT_REASON: &str = "connection timed out";
+/// Extra port choices when the system-assigned UDP port is unavailable to TCP.
+const HTTP_PORT_RETRIES: usize = 4;
 
 /// A connection that `playerConnecting` deferred and no `done` has ended yet.
 #[derive(Debug)]
@@ -269,28 +272,55 @@ impl ResourceManager {
             ..ServerConfig::default()
         };
         let net_input = input.clone();
-        let server = NetServer::bind(config, move |event| {
-            // The loop is gone once the receiver is dropped; events are then moot.
-            let _ = net_input.send(Input::Net(event));
-        })?;
-        let addr = server.local_addr();
+        let bind_game = || {
+            let net_input = net_input.clone();
+            NetServer::bind(config.clone(), move |event| {
+                let _ = net_input.send(Input::Net(event));
+            })
+        };
+        let mut server = bind_game()?;
 
         // A port selected by TCP may be unavailable to UDP. Bind the game
         // socket first and let HTTP use its address when TCP can bind it.
         let web = if http_enabled {
-            match WebServer::bind(addr, move |exchange| {
+            let on_web = move |exchange| {
                 let _ = input.send(Input::Web(exchange));
-            }) {
-                Ok(web) => Some(web),
-                Err(err) => {
-                    error!("HTTP is off: {err}");
-                    None
+            };
+            let mut retries = if bind.port() == 0 {
+                HTTP_PORT_RETRIES
+            } else {
+                0
+            };
+            loop {
+                let error = match WebServer::bind(server.local_addr(), on_web.clone()) {
+                    Ok(web) => break Some(web),
+                    Err(error) => error,
+                };
+                if retries == 0
+                    || !matches!(&error, NetError::Bind { source, .. }
+                    if matches!(source.kind(), ErrorKind::AddrInUse | ErrorKind::PermissionDenied))
+                {
+                    error!("HTTP is off: {error}");
+                    break None;
+                }
+
+                // Hold the current UDP port until a replacement has been chosen.
+                retries -= 1;
+                match bind_game() {
+                    Ok(replacement) => server = replacement,
+                    Err(retry_error) => {
+                        error!(
+                            "HTTP is off: {error}. Could not choose another game port: {retry_error}"
+                        );
+                        break None;
+                    }
                 }
             }
         } else {
             info!("HTTP is off: sv_httpEnabled is false");
             None
         };
+        let addr = server.local_addr();
         *self.network.web.borrow_mut() = web;
         *self.network.server.borrow_mut() = Some(server);
         self.publish_advertised();

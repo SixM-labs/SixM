@@ -231,8 +231,10 @@ The rules that follow from these:
 | `StartResource` | server | `StartResource(name)`. Starts `name` if allowed (`command.start` ACE permission for `resource.<caller>`), returning whether it was started. |
 | `StopResource` | server | `StopResource(name)`. Stops `name` if allowed (`command.stop` ACE permission for `resource.<caller>`), returning whether it was stopped. |
 
-`path` is normalised first. It must be relative, must not contain `..`, and
-must not contain a colon. Backslashes are accepted as separators.
+`path` is relative to a resource folder. Backslashes are accepted as
+separators. The host refuses parent-directory components, symbolic links,
+Windows device names, and components ending in a dot or space. The file must
+be a regular file.
 
 ### `LoadResourceFile`
 

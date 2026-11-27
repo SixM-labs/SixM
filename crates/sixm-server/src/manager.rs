@@ -9,8 +9,9 @@ use std::time::Instant;
 
 use sixm_core::{
     ClientHost, ClientTarget, ConvarKind, EntityAttachment, EntityInfo, EntityKind, EntityState,
-    EventContext, EventSource, FuncRef, Host, HttpRequest, PlayerInfo, ResourceName, ResourceState,
-    ScriptError, ScriptLanguage, ScriptRuntime, ServerHost, Value, WebReply,
+    EventContext, EventSource, FuncRef, Host, HttpRequest, PlayerInfo, ResourceDirectory,
+    ResourceName, ResourceState, ScriptError, ScriptLanguage, ScriptRuntime, ServerHost, Value,
+    WebReply,
 };
 use sixm_js::JsRuntime;
 use sixm_kvp::KvpStore;
@@ -291,12 +292,17 @@ impl ResourceManager {
             self.convars.borrow_mut().set_rcon_password(value);
             return Ok(());
         }
+        let key = name.to_ascii_lowercase();
+        if kind != ConvarKind::Plain && self.convars.borrow().is_restricted(&key) {
+            return Err(ScriptError::Runtime(
+                "restricted convars must remain plain".to_owned(),
+            ));
+        }
         if kind == ConvarKind::Replicated {
             check_replicated(name, value)?;
         }
         let previous_value = self.convars.borrow().get(name).map(str::to_owned);
         let previous = self.convars.borrow_mut().set(name, value, kind);
-        let key = name.to_ascii_lowercase();
         match (kind, previous) {
             (ConvarKind::Replicated, _) => self.broadcast_convar(&key, Some(value)),
             (_, Some(ConvarKind::Replicated)) => self.broadcast_convar(&key, None),
@@ -305,7 +311,10 @@ impl ResourceManager {
         if previous_value.as_deref() != Some(value) {
             let replicated = kind == ConvarKind::Replicated;
             for runtime in self.snapshot().iter() {
-                runtime.deliver_convar_change(name, Some(value), replicated);
+                let can_read = self.convars.borrow().can_read(&key, runtime.resource());
+                if can_read {
+                    runtime.deliver_convar_change(name, Some(value), replicated);
+                }
             }
         }
         Ok(())
@@ -1085,6 +1094,13 @@ impl Host for ResourceManager {
         self.convar(name)
     }
 
+    fn get_resource_convar(&self, resource: &str, name: &str) -> Option<String> {
+        self.convars
+            .borrow()
+            .get_for_resource(name, resource)
+            .map(str::to_owned)
+    }
+
     fn resource_path(&self, resource: &str) -> Option<PathBuf> {
         self.catalog
             .borrow()
@@ -1094,20 +1110,16 @@ impl Host for ResourceManager {
 
     fn load_resource_file(&self, resource: &str, path: &str) -> Option<Vec<u8>> {
         let root = self.resource_path(resource)?;
-        std::fs::read(root.join(path)).ok()
+        ResourceDirectory::open(&root).ok()?.read(path).ok()
     }
 
     fn save_resource_file(&self, resource: &str, path: &str, data: &[u8]) -> bool {
         let Some(root) = self.resource_path(resource) else {
             return false;
         };
-        let full = root.join(path);
-        if let Some(parent) = full.parent()
-            && std::fs::create_dir_all(parent).is_err()
-        {
-            return false;
-        }
-        std::fs::write(full, data).is_ok()
+        ResourceDirectory::open(&root)
+            .and_then(|directory| directory.write(path, data))
+            .is_ok()
     }
 
     fn kvp_get(&self, resource: &str, key: &str) -> Option<Vec<u8>> {

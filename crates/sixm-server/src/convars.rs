@@ -1,6 +1,6 @@
 //! Console variables: named settings shared by the server, the console and scripts.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -104,6 +104,7 @@ struct Entry {
 #[derive(Debug)]
 pub(crate) struct Convars {
     values: BTreeMap<String, Entry>,
+    readers: BTreeMap<String, BTreeSet<String>>,
     rcon_password: Option<Digest>,
 }
 
@@ -112,6 +113,7 @@ impl Convars {
     pub(crate) fn new() -> Self {
         let mut convars = Self {
             values: BTreeMap::new(),
+            readers: BTreeMap::new(),
             rcon_password: None,
         };
         convars.set(RESOURCES_PATH, "resources", ConvarKind::Plain);
@@ -166,6 +168,44 @@ impl Convars {
         self.values
             .get(&name.to_ascii_lowercase())
             .map(|entry| entry.kind)
+    }
+
+    /// Adds a reader of an ordinary convar. Public convars have no private-read policy.
+    pub(crate) fn add_reader(&mut self, name: &str, resource: &str) -> Result<(), &'static str> {
+        if name.eq_ignore_ascii_case(RCON_PASSWORD) {
+            return Err("rcon_password is console-only");
+        }
+        if matches!(
+            self.kind(name),
+            Some(ConvarKind::Replicated | ConvarKind::ServerInfo)
+        ) {
+            return Err("only plain convars can have private readers");
+        }
+        self.readers
+            .entry(name.to_ascii_lowercase())
+            .or_default()
+            .insert(resource.to_owned());
+        Ok(())
+    }
+
+    /// Whether a convar with this lowercase name has an explicit read policy.
+    pub(crate) fn is_restricted(&self, key: &str) -> bool {
+        self.readers.contains_key(key)
+    }
+
+    /// Unrestricted convars are readable by every resource.
+    pub(crate) fn can_read(&self, key: &str, resource: &str) -> bool {
+        self.readers
+            .get(key)
+            .is_none_or(|readers| readers.contains(resource))
+    }
+
+    pub(crate) fn get_for_resource(&self, name: &str, resource: &str) -> Option<&str> {
+        let key = name.to_ascii_lowercase();
+        if !self.can_read(&key, resource) {
+            return None;
+        }
+        self.values.get(&key).map(|entry| entry.value.as_str())
     }
 
     /// Stores `value` under `name` with `kind`, replacing any previous entry.

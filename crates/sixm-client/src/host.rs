@@ -1,13 +1,12 @@
 //! The [`Host`] and [`ClientHost`] services of [`ClientRuntime`], which the
 //! script runtimes call back into.
 
-use std::fs;
 use std::path::PathBuf;
 
 use sixm_core::{
     ClientHost, EntityInfo, EntityKind, EntityState, EventSource, FuncRef, GLOBAL_BAG, Host,
-    HttpRequest, MirrorChange, NativeRegistry, ResourceName, ResourceState, ScriptError,
-    ServerHost, Value, entity_of_bag, is_finite, player_of_bag,
+    HttpRequest, MirrorChange, NativeRegistry, ResourceDirectory, ResourceName, ResourceState,
+    ScriptError, ServerHost, Value, entity_of_bag, is_finite, player_of_bag,
 };
 use tracing::warn;
 
@@ -157,11 +156,14 @@ impl Host for ClientRuntime {
             .borrow()
             .get(resource)
             .and_then(|files| files.get(path).cloned());
-        let file = match cached {
-            Some(cache_path) => cache_path,
-            None => self.data_path(resource)?.join(path),
-        };
-        fs::read(file).ok()
+        if let Some(cache_path) = cached {
+            let directory = ResourceDirectory::open(cache_path.parent()?).ok()?;
+            return directory.read(cache_path.file_name()?.to_str()?).ok();
+        }
+        ResourceDirectory::open(&self.data_path(resource)?)
+            .ok()?
+            .read(path)
+            .ok()
     }
 
     /// Writes into the resource's data folder. A declared file cannot be
@@ -181,13 +183,9 @@ impl Host for ClientRuntime {
         let Some(dir) = self.data_path(resource) else {
             return false;
         };
-        let full = dir.join(path);
-        if let Some(parent) = full.parent()
-            && fs::create_dir_all(parent).is_err()
-        {
-            return false;
-        }
-        fs::write(full, data).is_ok()
+        ResourceDirectory::open(&dir)
+            .and_then(|directory| directory.write(path, data))
+            .is_ok()
     }
 
     fn kvp_get(&self, resource: &str, key: &str) -> Option<Vec<u8>> {
