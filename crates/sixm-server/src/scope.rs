@@ -43,7 +43,7 @@ struct Location {
 #[derive(Debug)]
 pub(crate) struct Grid {
     size: f64,
-    cells: HashMap<Cell, Vec<u32>>,
+    cells: HashMap<Cell, Vec<(u32, [f32; 3])>>,
     locations: HashMap<u32, Location>,
 }
 
@@ -72,7 +72,7 @@ impl Grid {
     /// Adds entity `id` at `position`.
     pub(crate) fn insert(&mut self, id: u32, position: [f32; 3]) {
         let cell = self.cell_of(position);
-        self.place(id, cell);
+        self.place(id, cell, position);
     }
 
     /// Removes entity `id`, when it is in the grid.
@@ -91,14 +91,16 @@ impl Grid {
         };
         if location.cell != cell {
             self.detach(location);
-            self.place(id, cell);
+            self.place(id, cell, position);
+        } else if let Some(bucket) = self.cells.get_mut(&cell) {
+            bucket[location.index].1 = position;
         }
     }
 
     /// Appends entity `id` to `cell`.
-    fn place(&mut self, id: u32, cell: Cell) {
+    fn place(&mut self, id: u32, cell: Cell, position: [f32; 3]) {
         let bucket = self.cells.entry(cell).or_default();
-        bucket.push(id);
+        bucket.push((id, position));
         let index = bucket.len() - 1;
         self.locations.insert(id, Location { cell, index });
     }
@@ -111,7 +113,7 @@ impl Grid {
             return;
         };
         bucket.swap_remove(location.index);
-        if let Some(moved) = bucket.get(location.index).copied() {
+        if let Some((moved, _)) = bucket.get(location.index).copied() {
             if let Some(found) = self.locations.get_mut(&moved) {
                 found.index = location.index;
             }
@@ -123,13 +125,13 @@ impl Grid {
 
     /// Calls `visit` with every entity in the nine cells around `position`.
     /// Entities farther away may be included, so the caller measures them.
-    pub(crate) fn for_each_near(&self, position: [f32; 3], mut visit: impl FnMut(u32)) {
+    pub(crate) fn for_each_near(&self, position: [f32; 3], mut visit: impl FnMut(u32, [f32; 3])) {
         let (x, y) = self.cell_of(position);
         for cx in x.saturating_sub(1)..=x.saturating_add(1) {
             for cy in y.saturating_sub(1)..=y.saturating_add(1) {
                 if let Some(bucket) = self.cells.get(&(cx, cy)) {
-                    for &id in bucket {
-                        visit(id);
+                    for &(id, position) in bucket {
+                        visit(id, position);
                     }
                 }
             }
@@ -464,7 +466,7 @@ mod tests {
 
     fn near(grid: &Grid, at: [f32; 3]) -> Vec<u32> {
         let mut found = Vec::new();
-        grid.for_each_near(at, |id| found.push(id));
+        grid.for_each_near(at, |id, _| found.push(id));
         found.sort_unstable();
         found
     }
@@ -495,6 +497,9 @@ mod tests {
         grid.move_to(1, [2.0, 2.0, 0.0]);
         assert_eq!(near(&grid, [2.0, 2.0, 0.0]), vec![1]);
         assert_eq!(grid.cells.len(), 1);
+        let mut position = None;
+        grid.for_each_near([2.0, 2.0, 0.0], |_, at| position = Some(at));
+        assert_eq!(position, Some([2.0, 2.0, 0.0]));
     }
 
     #[test]

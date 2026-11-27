@@ -109,11 +109,9 @@ impl EntityStore {
         out.clear();
         if let (Some(center), Some(grid)) = (center, self.grid.as_ref()) {
             let limit = radius * radius;
-            grid.for_each_near(center, |id| {
-                if let Some(slot) = self.by_id.get(&id) {
-                    if squared_distance(slot.info.position, center) <= limit {
-                        out.push(id);
-                    }
+            grid.for_each_near(center, |id, position| {
+                if squared_distance(position, center) <= limit {
+                    out.push(id);
                 }
             });
         }
