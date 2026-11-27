@@ -242,14 +242,14 @@ pub(crate) fn install(lua: &Lua, globals: &Table, original_type: Function) -> ml
 /// flattened in order, except that one number fills every component.
 fn construct(name: &str, len: u8, args: MultiValue) -> mlua::Result<Vector> {
     let args = args.into_vec();
-    if let [single] = args.as_slice() {
-        if let Some(number) = number_of(single) {
-            let mut c = [0.0; MAX_LEN];
-            for slot in c.iter_mut().take(usize::from(len)) {
-                *slot = number;
-            }
-            return Ok(Vector { len, c });
+    if let [single] = args.as_slice()
+        && let Some(number) = number_of(single)
+    {
+        let mut c = [0.0; MAX_LEN];
+        for slot in c.iter_mut().take(usize::from(len)) {
+            *slot = number;
         }
+        return Ok(Vector { len, c });
     }
 
     let mut c = [0.0; MAX_LEN];

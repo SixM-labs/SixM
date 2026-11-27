@@ -19,7 +19,7 @@ use sixm_core::Value;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-use crate::entities::EntityEntry;
+use crate::entities::{EntityEntry, EntityTransform};
 use crate::error::NetError;
 use crate::files::{FileHash, MAX_FILE_SIZE, ResourceEntry, hash_hex};
 use crate::identity::{Credentials, Fingerprint, Identity};
@@ -64,9 +64,7 @@ pub enum ClientEvent {
     EntityCreated { entity: EntityEntry },
     /// New positions and rotations, as `(id, position, rotation, epoch)`.
     /// `epoch` changes each time the server moves the entity itself.
-    EntityTransforms {
-        updates: Vec<(u32, [f32; 3], [f32; 3], u32)>,
-    },
+    EntityTransforms { updates: Vec<EntityTransform> },
     /// An entity was deleted.
     EntityDeleted { id: u32 },
     /// The entities that existed when the client joined.
@@ -280,10 +278,7 @@ impl NetClient {
     /// Sends the transforms of entities this client owns, as `(id, position,
     /// rotation, epoch)`. They travel in as few messages as possible, each
     /// carrying at most 1024 updates. Nothing is sent for an empty list.
-    pub fn send_entity_transforms(
-        &self,
-        updates: &[(u32, [f32; 3], [f32; 3], u32)],
-    ) -> Result<(), NetError> {
+    pub fn send_entity_transforms(&self, updates: &[EntityTransform]) -> Result<(), NetError> {
         let commands = self.commands.as_ref().ok_or(NetError::Closed)?;
         for frame in encode_client_transforms(updates, MAX_FRAME)? {
             commands.send(frame).map_err(|_| NetError::Closed)?;

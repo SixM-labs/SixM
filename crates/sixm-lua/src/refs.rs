@@ -86,11 +86,10 @@ impl RefTable {
                 .entries
                 .get(&id)
                 .is_some_and(|entry| entry.retains == 0)
+                && let Some(entry) = self.entries.remove(&id)
             {
-                if let Some(entry) = self.entries.remove(&id) {
-                    self.by_pointer.remove(&entry.pointer);
-                    freed.push(entry.func);
-                }
+                self.by_pointer.remove(&entry.pointer);
+                freed.push(entry.func);
             }
         }
         freed

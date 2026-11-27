@@ -4,12 +4,12 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::entities::EntityEntry;
+use crate::entities::{EntityEntry, EntityTransform};
 use crate::files::{FileHash, ResourceEntry};
 use crate::wire::{Args, StateValue};
 
 /// Version of the wire protocol. A client must send it in its `Hello`.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// Application protocol identifier negotiated during the TLS handshake.
 pub(crate) const ALPN: &[u8] = b"sixm/1";
@@ -141,12 +141,14 @@ pub(crate) enum ClientMessage {
         line: String,
     },
     /// New transforms of entities this client owns, as `(id, position,
-    /// rotation, epoch)`, where `epoch` is the latest epoch the client knows
-    /// for the entity. The server applies an update only when the player owns
-    /// the entity, every value is finite and the epoch is the entity's current
-    /// one. A message carries at most [`MAX_TRANSFORMS_PER_MESSAGE`] updates.
+    /// rotation, epoch)`, where `position` and `rotation` are each present only
+    /// when they changed, and `epoch` is the latest epoch the client knows for
+    /// the entity. The server applies an update only when the player owns the
+    /// entity, every present value is finite and the epoch is the entity's
+    /// current one. A message carries at most [`MAX_TRANSFORMS_PER_MESSAGE`]
+    /// updates.
     EntityTransforms {
-        updates: Vec<(u32, [f32; 3], [f32; 3], u32)>,
+        updates: Vec<EntityTransform>,
     },
 }
 
@@ -221,11 +223,13 @@ pub(crate) enum ServerMessage {
     EntityCreated {
         entity: EntityEntry,
     },
-    /// New positions and rotations, as `(id, position, rotation, epoch)`. The
-    /// epoch changes each time the server moves the entity itself. Clients
-    /// ignore an id they do not know. One frame may carry many updates.
+    /// New positions and rotations, as `(id, position, rotation, epoch)`. A
+    /// part is present only when it changed, and a receiver applies only the
+    /// parts present. The epoch changes each time the server moves the entity
+    /// itself. Clients ignore an id they do not know. One frame may carry many
+    /// updates.
     EntityTransforms {
-        updates: Vec<(u32, [f32; 3], [f32; 3], u32)>,
+        updates: Vec<EntityTransform>,
     },
     /// An entity was deleted. Clients remove it, and its state bag follows as a
     /// removal.

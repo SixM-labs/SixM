@@ -433,10 +433,10 @@ impl ResourceManager {
             EventContext::invoked_by(name.clone())
         });
         for runtime in snapshot.iter() {
-            if runtime.handles_event(event) {
-                if let Err(err) = runtime.deliver_event(event, source, args, &ctx) {
-                    error!(target: "sixm::script", "[{}] {event}: {err}", runtime.resource());
-                }
+            if runtime.handles_event(event)
+                && let Err(err) = runtime.deliver_event(event, source, args, &ctx)
+            {
+                error!(target: "sixm::script", "[{}] {event}: {err}", runtime.resource());
             }
         }
         ctx.is_canceled()
@@ -864,10 +864,10 @@ impl Host for ResourceManager {
             return false;
         };
         let full = root.join(path);
-        if let Some(parent) = full.parent() {
-            if std::fs::create_dir_all(parent).is_err() {
-                return false;
-            }
+        if let Some(parent) = full.parent()
+            && std::fs::create_dir_all(parent).is_err()
+        {
+            return false;
         }
         std::fs::write(full, data).is_ok()
     }

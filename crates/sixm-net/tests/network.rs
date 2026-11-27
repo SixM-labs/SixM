@@ -20,8 +20,8 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, Serve
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use sixm_core::{FuncRef, Value};
 use sixm_net::{
-    ClientEvent, ConnectionId, EntityEntry, FILE_KIND_CLIENT, FILE_KIND_FILE, FileEntry, FileHash,
-    Fingerprint, Identity, MAX_EXPORT_NAME_LEN, MAX_FILE_SIZE, MAX_METADATA,
+    ClientEvent, ConnectionId, EntityEntry, EntityTransform, FILE_KIND_CLIENT, FILE_KIND_FILE,
+    FileEntry, FileHash, Fingerprint, Identity, MAX_EXPORT_NAME_LEN, MAX_FILE_SIZE, MAX_METADATA,
     MAX_METADATA_VALUE_LEN, NetClient, NetError, NetEvent, NetServer, PROTOCOL_VERSION,
     PublishedFile, PublishedResource, ResourceEntry, ServerConfig, Traffic,
 };
@@ -1286,7 +1286,7 @@ fn entity_creation_transforms_and_deletion_arrive_in_order() {
     let server = start();
     let client = join(&server, "ann", 1);
     let entry = vehicle_entry(1);
-    let moved = [(1, [4.0, 5.0, 6.0], [0.0, 0.0, 45.0], 3)];
+    let moved = [(1, Some([4.0, 5.0, 6.0]), Some([0.0, 0.0, 45.0]), 3)];
 
     server
         .net
@@ -1318,8 +1318,8 @@ fn entity_creation_transforms_and_deletion_arrive_in_order() {
 fn owned_entity_transforms_reach_the_server_in_one_event() {
     let server = start();
     let client = join(&server, "ann", 4);
-    let updates: Vec<(u32, [f32; 3], [f32; 3], u32)> = (1..=1500_u32)
-        .map(|id| (id, [1.0, 2.0, 3.0], [0.0, 0.0, 90.0], 0))
+    let updates: Vec<EntityTransform> = (1..=1500_u32)
+        .map(|id| (id, Some([1.0, 2.0, 3.0]), Some([0.0, 0.0, 90.0]), 0))
         .collect();
 
     client
