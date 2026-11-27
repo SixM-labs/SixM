@@ -16,7 +16,8 @@ use crate::protocol::{
 };
 use crate::wire::{
     Args, FRAME_HEADER_LEN, StateValue, decode_client_message, decode_latent_body,
-    decode_server_message, encode_frame, encode_latent_body,
+    decode_server_message, encode_client_transforms, encode_entity_transforms, encode_frame,
+    encode_latent_body,
 };
 
 /// Inputs per run. Each input goes through every decoder.
@@ -101,11 +102,17 @@ fn payload_of<T: serde::Serialize>(message: &T) -> Vec<u8> {
     frame[FRAME_HEADER_LEN..].to_vec()
 }
 
+/// The payload of the only frame in `frames`.
+fn frame_payload(frames: &[std::sync::Arc<[u8]>]) -> Vec<u8> {
+    assert_eq!(frames.len(), 1, "a seed fits in one frame");
+    frames[0][FRAME_HEADER_LEN..].to_vec()
+}
+
 /// Valid payloads of every client message, used as mutation seeds.
 fn client_seeds() -> Vec<Vec<u8>> {
     let transforms = vec![
-        (3, [1.0, 2.0, 3.0], [0.0, 90.0, 0.0], 2),
-        (4, [0.0; 3], [0.0; 3], 0),
+        (3, Some([1.0, 2.0, 3.0]), Some([0.0, 90.0, 0.0]), 2),
+        (4, None, Some([0.0; 3]), 0),
     ];
     let seeds: [Vec<u8>; 5] = [
         payload_of(&ClientMessage::Hello {
@@ -120,9 +127,7 @@ fn client_seeds() -> Vec<Vec<u8>> {
         payload_of(&ClientMessage::Command {
             line: "status".to_owned(),
         }),
-        payload_of(&ClientMessage::EntityTransforms {
-            updates: transforms,
-        }),
+        frame_payload(&encode_client_transforms(&transforms, MAX_FRAME).expect("seed encodes")),
     ];
     Vec::from(seeds)
 }
@@ -176,9 +181,10 @@ fn server_seeds() -> Vec<Vec<u8>> {
         payload_of(&ServerMessage::EntityCreated {
             entity: sample_entity(),
         }),
-        payload_of(&ServerMessage::EntityTransforms {
-            updates: vec![(7, [1.0; 3], [2.0; 3], 3)],
-        }),
+        frame_payload(
+            &encode_entity_transforms(&[(7, Some([1.0; 3]), Some([2.0; 3]), 3)], MAX_FRAME)
+                .expect("seed encodes"),
+        ),
         payload_of(&ServerMessage::EntityDeleted { id: 7 }),
         payload_of(&ServerMessage::EntitySnapshot {
             entities: vec![sample_entity()],
