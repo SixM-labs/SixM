@@ -18,6 +18,7 @@ sixm-resources.workspace = true
 sixm-lua.workspace = true
 sixm-js.workspace = true
 sixm-net.workspace = true
+sixm-sql.workspace = true
 ring.workspace = true
 subtle.workspace = true
 thiserror.workspace = true

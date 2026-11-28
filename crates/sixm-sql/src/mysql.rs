@@ -16,7 +16,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use tracing::{debug, warn};
 
 use crate::config::{MysqlConfig, SslMode};
-use crate::params::{BoundQuery, Dialect, ParsedSql};
+use crate::params::{BoundQuery, Dialect, ParsedSql, bind_transaction_item};
 use crate::{
     DmlSummary, LimitKind, PrepareParams, QueryOutcome, QueryResultSet, SqlError, SqlLimits,
     SqlOperation, SqlRow, SqlValue, TransactionItem,
@@ -246,22 +246,29 @@ async fn run_op_with_timeout(
 
     let mut conn = match tokio::time::timeout(remaining_connect, pool.get_conn()).await {
         Ok(Ok(conn)) => conn,
-        Ok(Err(err)) => return Err(map_mysql_err(&err)),
+        // Connection and authentication diagnostics can contain configuration
+        // details. SQL statement errors are reported separately below.
+        Ok(Err(_)) => {
+            return Err(SqlError::Backend(
+                "cannot acquire a MySQL connection".to_owned(),
+            ));
+        }
         Err(_) => return Err(SqlError::Timeout(limits.timeout)),
     };
 
-    if cancelled
-        .as_ref()
-        .is_some_and(|flag| flag.load(Ordering::Acquire))
-    {
-        return Err(SqlError::Cancelled);
-    }
+    let cancelled = cancelled.as_deref();
+    check_cancelled(cancelled)?;
 
     let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
         return Err(SqlError::Timeout(limits.timeout));
     };
 
-    match tokio::time::timeout(remaining, execute_op(&mut conn, op, limits, date_strings)).await {
+    match tokio::time::timeout(
+        remaining,
+        execute_op(&mut conn, op, limits, date_strings, cancelled),
+    )
+    .await
+    {
         Ok(Ok(outcome)) => Ok(outcome),
         Ok(Err(err @ SqlError::ResultTooLarge { .. })) => {
             // Disconnect rather than draining an unbounded server result set or rolling back over an active stream.
@@ -276,11 +283,20 @@ async fn run_op_with_timeout(
     }
 }
 
+fn check_cancelled(cancelled: Option<&AtomicBool>) -> Result<(), SqlError> {
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        Err(SqlError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
 async fn execute_op(
     conn: &mut Conn,
     op: SqlOperation,
     limits: SqlLimits,
     date_strings: bool,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<QueryOutcome, SqlError> {
     match op {
         SqlOperation::Query { sql, params } | SqlOperation::RawExecute { sql, params } => {
@@ -364,10 +380,10 @@ async fn execute_op(
             Ok(QueryOutcome::Update(affected))
         }
         SqlOperation::Prepare { sql, params } => {
-            execute_prepare(conn, &sql, params, limits, date_strings).await
+            execute_prepare(conn, &sql, params, limits, date_strings, cancelled).await
         }
         SqlOperation::Transaction { items } => {
-            execute_transaction(conn, &items, limits, date_strings).await
+            execute_transaction(conn, &items, limits, date_strings, cancelled).await
         }
     }
 }
@@ -378,6 +394,7 @@ async fn execute_prepare(
     params: PrepareParams,
     limits: SqlLimits,
     date_strings: bool,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<QueryOutcome, SqlError> {
     let parsed = ParsedSql::parse_for(sql, Dialect::Mysql)?;
     let mut total_bytes = 0;
@@ -391,6 +408,7 @@ async fn execute_prepare(
         PrepareParams::Batch(sets) => {
             let mut results = Vec::with_capacity(sets.len());
             for set in sets {
+                check_cancelled(cancelled)?;
                 let bound = parsed.bind(&set, Dialect::Mysql)?;
                 results.push(
                     exec_bound(conn, &bound, limits, None, date_strings, &mut total_bytes).await?,
@@ -406,14 +424,19 @@ async fn execute_transaction(
     items: &[TransactionItem],
     limits: SqlLimits,
     date_strings: bool,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<QueryOutcome, SqlError> {
     let mut bound_items = Vec::with_capacity(items.len());
     for item in items {
-        bound_items.push(
-            ParsedSql::parse_for(&item.sql, Dialect::Mysql)?.bind(&item.params, Dialect::Mysql)?,
-        );
+        check_cancelled(cancelled)?;
+        bound_items.push(bind_transaction_item(
+            &item.sql,
+            &item.params,
+            Dialect::Mysql,
+        )?);
     }
 
+    check_cancelled(cancelled)?;
     let mut tx = conn
         .start_transaction(TxOpts::default())
         .await
@@ -421,6 +444,10 @@ async fn execute_transaction(
 
     let mut total_bytes = 0;
     for bound in &bound_items {
+        if let Err(err) = check_cancelled(cancelled) {
+            let _ = tx.rollback().await;
+            return Err(err);
+        }
         if let Err(err) =
             exec_bound(&mut tx, bound, limits, None, date_strings, &mut total_bytes).await
         {
@@ -431,6 +458,10 @@ async fn execute_transaction(
         }
     }
 
+    if let Err(err) = check_cancelled(cancelled) {
+        let _ = tx.rollback().await;
+        return Err(err);
+    }
     tx.commit().await.map_err(|e| map_mysql_err(&e))?;
     Ok(QueryOutcome::Transaction(true))
 }

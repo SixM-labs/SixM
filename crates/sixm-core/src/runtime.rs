@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::fmt;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use crate::adapter::NativeRegistry;
@@ -382,9 +383,84 @@ pub trait Host {
     }
 }
 
+/// Result shape requested from a single SQL statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlQueryKind {
+    Query,
+    Single,
+    Scalar,
+    Insert,
+    Update,
+    RawExecute,
+}
+
+impl FromStr for SqlQueryKind {
+    type Err = ScriptError;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        match name {
+            "query" => Ok(Self::Query),
+            "single" => Ok(Self::Single),
+            "scalar" => Ok(Self::Scalar),
+            "insert" => Ok(Self::Insert),
+            "update" => Ok(Self::Update),
+            "rawExecute" => Ok(Self::RawExecute),
+            _ => Err(ScriptError::Runtime("unknown SQL operation".to_owned())),
+        }
+    }
+}
+
+fn sql_unavailable() -> ScriptError {
+    ScriptError::Runtime("SQL is unavailable on this server".to_owned())
+}
+
 /// Services only a server provides: the connected players and the messages
 /// that reach them.
 pub trait ServerHost {
+    /// Whether the configured database is ready to accept queries.
+    fn sql_is_ready(&self) -> bool {
+        false
+    }
+
+    /// Submits a bound statement. On success, the host owns the callback's pin
+    /// and calls it with `(error, result)` on a later frame, unless the origin
+    /// resource or callback runtime has stopped. On error the caller releases
+    /// the pin. `origin` can differ from the callback owner for a proxy export.
+    fn sql_execute(
+        &self,
+        _origin: &ResourceName,
+        _kind: SqlQueryKind,
+        _sql: String,
+        _params: Value,
+        _callback: FuncRef,
+    ) -> Result<(), ScriptError> {
+        Err(sql_unavailable())
+    }
+
+    /// Submits a prepared statement with a single set or a batch of parameters.
+    /// The callback follows the ownership rules of [`Self::sql_execute`].
+    fn sql_prepare(
+        &self,
+        _origin: &ResourceName,
+        _sql: String,
+        _params: Value,
+        _callback: FuncRef,
+    ) -> Result<(), ScriptError> {
+        Err(sql_unavailable())
+    }
+
+    /// Submits a transaction and its optional shared parameters. The callback
+    /// follows the ownership rules of [`Self::sql_execute`].
+    fn sql_transaction(
+        &self,
+        _origin: &ResourceName,
+        _queries: Value,
+        _params: Value,
+        _callback: FuncRef,
+    ) -> Result<(), ScriptError> {
+        Err(sql_unavailable())
+    }
+
     /// Sends an event to one connected player or to all of them. Fails when a
     /// value cannot cross the network (function references).
     fn trigger_client_event(

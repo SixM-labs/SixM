@@ -179,9 +179,12 @@ function promise.all(list) end
 ---@return SixMPromise
 function promise.first(list) end
 
+---@class SixMThenable
+---@field ['then'] fun(resolve: fun(value: any), reject: fun(reason: any))
+
 --- Parks the current thread until `p` settles and returns its fulfilled value,
 --- or raises its rejection reason as an error.
----@param p SixMPromise
+---@param p SixMPromise|SixMThenable
 ---@return any
 function Await(p) end
 
@@ -215,7 +218,7 @@ function Citizen.ClearTimeout(id) end
 function Citizen.Trace(text) end
 
 --- Parks the current thread until `p` settles and returns its value or raises its reason.
----@param p SixMPromise
+---@param p SixMPromise|SixMThenable
 ---@return any
 function Citizen.Await(p) end
 
@@ -1454,6 +1457,38 @@ function PerformHttpRequestAwait(url, method, data, headers, options) end
 --- Registers the resource's HTTP handler for `/<resource>` and `/<resource>/...`. (Server only)
 ---@param handler fun(req: SixMHttpRequest, res: SixMHttpResponse)
 function SetHttpHandler(handler) end
+
+---@alias SixMSqlKind 'query'|'single'|'scalar'|'insert'|'update'|'rawExecute'
+---@alias SixMSqlValue boolean|number|string
+---@alias SixMSqlParams SixMSqlValue[]|table<string, SixMSqlValue>
+---@alias SixMSqlCallback fun(err: string|nil, result: any)
+---@class SixMSqlTransactionItem
+---@field query string
+---@field values? SixMSqlParams
+---@field parameters? SixMSqlParams
+
+--- Reports whether the configured database accepts queries. (Server only)
+---@return boolean
+function SixmSqlIsReady() end
+
+--- Queues a bound SQL statement. (Server only)
+---@param kind SixMSqlKind
+---@param sql string
+---@param params SixMSqlParams|SixMSqlValue[][]|nil
+---@param callback SixMSqlCallback
+function SixmSqlExecute(kind, sql, params, callback) end
+
+--- Queues a prepared SQL statement with one or several sets of parameters. (Server only)
+---@param sql string
+---@param params SixMSqlValue[]|SixMSqlValue[][]|nil
+---@param callback SixMSqlCallback
+function SixmSqlPrepare(sql, params, callback) end
+
+--- Queues an atomic transaction. (Server only)
+---@param queries (string|SixMSqlTransactionItem|table)[]
+---@param params SixMSqlParams|nil
+---@param callback SixMSqlCallback
+function SixmSqlTransaction(queries, params, callback) end
 
 -- =============================================================================
 -- JSON, msgpack, and other globals

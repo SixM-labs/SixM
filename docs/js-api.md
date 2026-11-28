@@ -314,3 +314,31 @@ All core utility, command, convar, resource, and KVP functions match
 - **HTTP (server):**
   - `PerformHttpRequest(url, cb, method, data, headers, options)`
   - `SetHttpHandler((req, res) => { ... })`: `req` exposes `address` (the client IP string, honoring `sv_proxyIPRanges`), `method`, `path`, `query`, `headers`, `setDataHandler((body) => { ... })`, and `setCancelHandler(() => { ... })` (called if the client disconnects or the request times out before `res.send` completes); `res` exposes `writeHead(status, headers)`, `write(data)`, and `send(data)`.
+
+## SQL (server only)
+
+Declare `dependency 'oxmysql'` in your manifest to call
+`await exports.oxmysql.query_async(sql, params)` or
+`exports.oxmysql.query(sql, params, (result, error) => { ... })`.
+The other operations are `single`, `scalar`, `insert`, `update`, `prepare`,
+`rawExecute`, and `transaction`. `await exports.oxmysql.ready_async()` waits
+for the configured database. For the Lua import and legacy aliases, see the
+[migration guide](guides/from-fivem.md).
+
+The server also exposes the native bridge:
+
+- `SixmSqlIsReady()` reports whether the configured database accepts queries.
+- `SixmSqlExecute(kind, sql, params, callback)` accepts `query`, `single`,
+  `scalar`, `insert`, `update`, or `rawExecute` as `kind`.
+- `SixmSqlPrepare(sql, params, callback)` takes one set or a batch of sets of
+  positional parameters.
+- `SixmSqlTransaction(queries, params, callback)` takes SQL strings with shared
+  parameters or entries `{ query, values }`, `{ query, parameters }`, or
+  `[sql, params]`.
+
+Pass arrays for `?` bindings, objects for named bindings, and `null` or
+`undefined` when there are no parameters. Native callbacks receive
+`(error, result)` on a later frame, with `error === null` on success. Submission
+errors throw synchronously. The native bridge also preserves JavaScript `null`
+bindings and `NULL` fields that are subject to Lua table conversion when using
+the compatibility exports.

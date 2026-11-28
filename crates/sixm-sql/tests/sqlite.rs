@@ -441,6 +441,33 @@ fn sqlite_transactions_commit_and_rollback_atomically() {
 }
 
 #[test]
+fn sqlite_transaction_rejects_an_explicit_commit() {
+    let pool = SqlPool::from_connection_string("sqlite::memory:", SqlLimits::default())
+        .expect("parse")
+        .expect("pool");
+    pool.query("CREATE TABLE entries (value INTEGER)", ParamSet::Empty)
+        .expect("create");
+    let error = pool
+        .transaction(vec![
+            TransactionItem {
+                sql: "INSERT INTO entries VALUES (1)".to_owned(),
+                params: ParamSet::Empty,
+            },
+            TransactionItem {
+                sql: "/* managed transaction */ COMMIT".to_owned(),
+                params: ParamSet::Empty,
+            },
+        ])
+        .expect_err("explicit commit must be refused");
+    assert!(matches!(error, SqlError::InvalidSql(_)));
+    assert_eq!(
+        pool.scalar("SELECT COUNT(*) FROM entries", ParamSet::Empty)
+            .expect("count"),
+        Some(SqlValue::Int(0))
+    );
+}
+
+#[test]
 fn sqlite_file_wal_persistence_and_limits() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("nested").join("game.db");

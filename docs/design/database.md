@@ -37,13 +37,13 @@ Requirements from [FiveM parity plan](fivem-parity/PLAN.md):
 ### 2.1 Driver crates: `mysql_async` + `rusqlite` (`bundled`)
 
 - **MySQL / MariaDB:** `mysql_async` (`default-features = false`, features
-  `["minimal", "rustls-tls", "ring"]`).
+  `["minimal-rust", "rustls-tls", "tls12", "ring"]`).
   - Pure Rust wire protocol + TLS reusing SixM's existing `tokio` (1.54),
     `rustls` (0.23), and `ring` (0.17) dependencies — zero C/OpenSSL system
     library dependencies on Linux or Windows.
   - Supports native `tokio` connection pooling, prepared statements,
     transactions, TLS (`ssl=true` / `sslmode`), and MariaDB/MySQL auth plugins.
-- **SQLite:** `rusqlite` (`features = ["bundled"]`).
+- **SQLite:** `rusqlite` (`features = ["bundled", "hooks"]`).
   - Compiles upstream SQLite C sources statically via `cc` in the same way SixM
     already bundles Lua 5.4 (`mlua` `vendored`) and QuickJS (`rquickjs`), with
     no system packages on Linux or Windows MSVC.
@@ -86,7 +86,7 @@ or replicated to clients:
 | `sixm_dbTimeoutMs` | `10000` | Yes | Per-query / transaction timeout in milliseconds (clamped `100..=300000`). |
 | `sixm_dbMaxRows` | `10000` | Yes | Maximum rows materialized per result set (clamped `1..=100000`). |
 | `sixm_dbMaxResultBytes` | `16777216` | Yes | Maximum serialized result payload bytes per query (`16 MiB`, clamped `65536..=67108864`). |
-| `sixm_dbSlowQueryWarnMs` | `200` | No (console/server) | Logs a warning on `target: "sixm::sql"` when a query exceeds this duration (`0` disables). |
+| `sixm_dbSlowQueryWarnMs` | `200` | Yes | Logs a warning on `target: "sixm::sql"` when a query exceeds this duration (clamped `0..=300000`, `0` disables). |
 
 All values remain bounded (`MAX_IN_FLIGHT_PER_RESOURCE = 256`,
 `QUEUE_CAPACITY = 1024`) matching the bounded-worker discipline of
@@ -173,19 +173,27 @@ Core operations mapped to `oxmysql` semantics:
 | `RawExecute` | Array of row maps or DML metadata | Same safe binding, bypasses wrapper normalization extras. |
 | `Transaction` | `Bool(true)` on commit, error / `Bool(false)` on rollback | Atomic SQL transaction across N statements (`{ query, values }` list or shared parameter map); rolls back on any error or timeout. |
 
+Transaction items are row queries, CTEs, or data manipulation statements.
+The pool owns transaction control and keeps schema statements outside the
+batch to avoid implicit MySQL commits. Use transactional MySQL tables such as
+InnoDB. Cancellation is cooperative. A MySQL statement already sent to the
+server can finish, so stopping a resource does not undo committed work.
+
 ### 5.2 Server Host Integration (Zero Main-Loop Blocking)
 
 Mirroring `HttpClient` (`crates/sixm-server/src/http.rs`):
 
 1. Scripts call SQL through a server-only host bridge on `ServerHost` (`sql_is_ready`,
-   `sql_query`, `sql_prepare`, `sql_transaction`), passing `(resource, op, callback: FuncRef)`
+   `sql_execute`, `sql_prepare`, `sql_transaction`), passing `(resource, op, callback: FuncRef)`
    (or a synchronous read for `is_ready`).
 2. `SqlService` in `sixm-server` enforces per-resource `MAX_IN_FLIGHT`, attaches an
-   `Arc<AtomicBool>` cancellation token tied to the resource instance (`FuncRef::instance`),
+   `Arc<AtomicBool>` cancellation token tied to the originating resource and the
+   callback's owning runtime instance,
    and dispatches work onto `SqlPool`'s background runtime/threads.
-3. On completion (or timeout / error), the worker pushes
-   `SqlCompletion { resource, callback, outcome }` into `Arc<Mutex<Vec<SqlCompletion>>>`.
-4. Once per server frame (`ResourceManager::complete_sql()`), completions are drained:
+3. On completion (or timeout / error), the worker sends the job ID and outcome
+   through a completion channel. A main-thread job limit bounds both queued jobs
+   and undelivered outcomes.
+4. Once per server frame (`ResourceManager::deliver_sql()`), completions are drained:
    if the resource stopped before completion, the result is discarded without invoking
    stale callbacks; otherwise `runtime.call_ref(callback.id, &[err_or_nil, result])`
    runs cleanly and releases `FuncRef`.

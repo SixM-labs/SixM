@@ -408,11 +408,25 @@ without `eval`, `Function` constructors, or Node.js/Web runtime APIs: `require`,
 `fs`, `process`, `Buffer`, `setImmediate`, `npm`, `yarn`/`webpack` build
 resources, `node_version` manifest handling, `TextEncoder`, `structuredClone`,
 and `performance` do not exist. Libraries and bundles that depend on Node
-built-ins (such as npm-based `oxmysql` or Node-targeted TypeScript bundles)
-will not load; see [js-api.md](../js-api.md). (SixM's planned Phase E native
-database support in [database.md](../design/database.md) provides `oxmysql` API
-parity through a Rust crate and clean-room `oxmysql` resource without adding
-Node.js.)
+built-ins need to be ported to the SixM runtime. For database access, use the
+bundled `[system]/oxmysql` resource with your existing `dependency 'oxmysql'`,
+Lua `@oxmysql/lib/MySQL.lua` import, or JavaScript `exports.oxmysql` calls.
+See [JavaScript API](../js-api.md#sql-server-only) and
+[Lua API](../lua-api.md#sql-server-only).
+
+The `mysql-async` and `ghmattimysql` aliases resolve to the same resource. The
+Lua import provides `MySQL.Async` callbacks and `MySQL.Sync` methods that park
+the calling thread. A direct legacy export such as `executeSync`, `scalarSync`,
+or `transactionSync` returns a thenable. Use `Await` in Lua or `await` in
+JavaScript when calling those exports directly.
+
+Queries use bound `?`, `@name`, or `:name` value placeholders. `prepare` and
+`rawExecute` use positional `?` only. Dynamic table or column names must come
+from the resource's own fixed choices. The Lua compatibility exports follow
+Lua table semantics for SQL `NULL`. A named field with a `nil` value is absent
+and a positional table with holes cannot represent an exact parameter list.
+JavaScript code that needs explicit `null` fields or bindings can use the SQL
+bridge natives with JavaScript objects and arrays directly.
 
 ### 7. Remote console, logging filters, and profiling
 

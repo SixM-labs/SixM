@@ -41,7 +41,7 @@ the call fails with "cannot pass a userdata value".
 | `promise.new` | both | `promise.new()`. Returns a pending promise. |
 | `promise.all` | both | `promise.all(list)`. Returns a promise that fulfils with an array of the values, in order, once every entry is fulfilled. It rejects with the first rejection. An empty list fulfils at once with an empty table. An entry that is not a promise counts as fulfilled. |
 | `promise.first` | both | `promise.first(list)`. Settles like the first entry to settle. An empty list stays pending. |
-| `Await` / `Citizen.Await` | both | `Await(p)`. Returns the value of `p`, or raises its reason as an error. In a thread, a pending `p` parks the thread until it settles. Outside a thread it raises an error. |
+| `Await` / `Citizen.Await` | both | `Await(p)`. Accepts a promise or a table with `['then'] = function(resolve, reject) … end`. A pending value parks the thread until it settles. Returns the value or raises the rejection reason. Outside a thread it raises an error. |
 
 Methods of a promise:
 
@@ -794,6 +794,33 @@ affected entities for the clients in the same call. Server only:
   or `strict`. Stored per bucket for the entity creation rules.
 
 Buckets are a bucket number from 0 to 4294967295. Bucket 0 costs nothing extra.
+
+## SQL (server only)
+
+The stock `oxmysql` resource provides callback exports and awaitable exports
+such as `Await(exports.oxmysql:query_async(sql, params))`. Add `dependency
+'oxmysql'` and `server_script '@oxmysql/lib/MySQL.lua'` to your manifest to use
+`MySQL.query(sql, params, callback)`, `MySQL.query.await(sql, params)`, and the
+legacy `MySQL.Async` / `MySQL.Sync` methods. `MySQL.ready(callback)` runs the
+callback in a thread once the database is ready. The operations are `query`,
+`single`, `scalar`, `insert`, `update`, `prepare`, `rawExecute`, and `transaction`.
+
+The resource uses four server natives:
+
+| Native | Signature and result |
+|---|---|
+| `SixmSqlIsReady` | `SixmSqlIsReady()` returns whether the configured database accepts queries. |
+| `SixmSqlExecute` | `SixmSqlExecute(kind, sql, params, callback)` for `query`, `single`, `scalar`, `insert`, `update`, or `rawExecute`. |
+| `SixmSqlPrepare` | `SixmSqlPrepare(sql, params, callback)` executes one set or a batch of parameter sets with one prepared statement. |
+| `SixmSqlTransaction` | `SixmSqlTransaction(queries, params, callback)` takes SQL strings with shared parameters or entries `{ query = sql, values = params }`, `{ query = sql, parameters = params }`, or `{ sql, params }`. |
+
+Pass an array for positional `?` bindings, a table with string keys for named
+bindings, or `nil` for no parameters. The bridge raises submission errors and
+calls `callback(error, result)` on a later server frame for accepted requests.
+Success has `error == nil`. The resource exports instead pass `(result, error)`
+to callbacks. A failed transaction returns `false` on a database error, and
+other awaitable exports raise database errors. Resource stop discards that
+resource's pending callbacks. See [the migration guide](guides/from-fivem.md).
 
 ## HTTP (server only)
 

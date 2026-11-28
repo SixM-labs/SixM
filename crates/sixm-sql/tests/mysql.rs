@@ -146,6 +146,25 @@ fn verify_transactions(pool: &SqlPool, id1: u64, id2: u64) {
         ])
         .expect_err("tx rollback");
     assert!(matches!(tx_err, SqlError::Backend(_)));
+    for sql in [
+        "/* managed transaction */ COMMIT",
+        "CREATE TABLE sixm_tx_ddl (id INT)",
+    ] {
+        let error = pool
+            .transaction(vec![
+                TransactionItem {
+                    sql: "UPDATE sixm_sql_e2_test SET score = score + 9999 WHERE id = @id"
+                        .to_owned(),
+                    params: named(&[("id", SqlValue::UInt(id1))]),
+                },
+                TransactionItem {
+                    sql: sql.to_owned(),
+                    params: ParamSet::Empty,
+                },
+            ])
+            .expect_err("statements that can commit must be refused");
+        assert!(matches!(error, SqlError::InvalidSql(_)));
+    }
     assert_eq!(
         pool.scalar(
             "SELECT score FROM sixm_sql_e2_test WHERE id = ?",

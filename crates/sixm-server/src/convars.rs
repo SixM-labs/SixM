@@ -7,6 +7,10 @@ use std::time::Duration;
 use ring::digest::{Digest, SHA256, digest};
 use sixm_core::ConvarKind;
 use sixm_net::Identity;
+use sixm_sql::{
+    MAX_MAX_RESULT_BYTES, MAX_MAX_ROWS, MAX_POOL_SIZE, MAX_TIMEOUT, MIN_MAX_RESULT_BYTES,
+    MIN_TIMEOUT, SqlLimits,
+};
 use subtle::ConstantTimeEq;
 
 /// Convar naming the folder that is scanned for resources.
@@ -55,10 +59,24 @@ pub(crate) const PROXY_IP_RANGES: &str = "sv_proxyIPRanges";
 const PROMETHEUS_BASIC_AUTH_USER: &str = "sv_prometheusBasicAuthUser";
 /// Optional HTTP Basic Auth password protecting `GET /metrics`.
 pub(crate) const PROMETHEUS_BASIC_AUTH_PASSWORD: &str = "sv_prometheusBasicAuthPassword";
+/// Database connection string. Credentials are held outside the public convar store.
+pub(crate) const MYSQL_CONNECTION_STRING: &str = "mysql_connection_string";
+const DB_POOL_SIZE: &str = "sixm_dbpoolsize";
+const DB_TIMEOUT_MS: &str = "sixm_dbtimeoutms";
+const DB_MAX_ROWS: &str = "sixm_dbmaxrows";
+const DB_MAX_RESULT_BYTES: &str = "sixm_dbmaxresultbytes";
+const DB_SLOW_QUERY_WARN_MS: &str = "sixm_dbslowquerywarnms";
+const SQL_TUNING_CONVARS: [&str; 5] = [
+    DB_POOL_SIZE,
+    DB_TIMEOUT_MS,
+    DB_MAX_ROWS,
+    DB_MAX_RESULT_BYTES,
+    DB_SLOW_QUERY_WARN_MS,
+];
 
 /// Security-critical and bootstrap convars writable only from the server
 /// console or `server.cfg`.
-const CONSOLE_ONLY_CONVARS: [&str; 17] = [
+const CONSOLE_ONLY_CONVARS: [&str; 18] = [
     RCON_PASSWORD,
     HTTP_ALLOW_PRIVATE,
     HTTP_ENABLED,
@@ -76,6 +94,7 @@ const CONSOLE_ONLY_CONVARS: [&str; 17] = [
     PROXY_IP_RANGES,
     PROMETHEUS_BASIC_AUTH_USER,
     PROMETHEUS_BASIC_AUTH_PASSWORD,
+    MYSQL_CONNECTION_STRING,
 ];
 /// Convar naming how many seconds a resource's HTTP handler may take to
 /// complete its response.
@@ -230,6 +249,23 @@ impl Convars {
             &DEFAULT_HITCH_WARNING_MS.to_string(),
             ConvarKind::Plain,
         );
+        let limits = SqlLimits::default();
+        for (name, value) in [
+            (DB_POOL_SIZE, limits.pool_size.to_string()),
+            (DB_TIMEOUT_MS, limits.timeout.as_millis().to_string()),
+            (DB_MAX_ROWS, limits.max_rows.to_string()),
+            (DB_MAX_RESULT_BYTES, limits.max_result_bytes.to_string()),
+            (
+                DB_SLOW_QUERY_WARN_MS,
+                limits
+                    .slow_query_warn
+                    .unwrap_or_default()
+                    .as_millis()
+                    .to_string(),
+            ),
+        ] {
+            convars.set(name, &value, ConvarKind::Plain);
+        }
         convars
     }
 
@@ -253,6 +289,53 @@ impl Convars {
         CONSOLE_ONLY_CONVARS
             .iter()
             .any(|protected| name.eq_ignore_ascii_case(protected))
+            || Self::is_sql_tuning(name)
+    }
+
+    pub(crate) fn is_sql_tuning(name: &str) -> bool {
+        SQL_TUNING_CONVARS
+            .iter()
+            .any(|setting| name.eq_ignore_ascii_case(setting))
+    }
+
+    /// Database settings parsed only when an operator changes a setting.
+    pub(crate) fn sql_limits(&self) -> SqlLimits {
+        let defaults = SqlLimits::default();
+        let millis =
+            |duration: Duration| usize::try_from(duration.as_millis()).unwrap_or(usize::MAX);
+        let number = |name, default, min, max| {
+            self.values
+                .get(name)
+                .and_then(|entry| entry.value.trim().parse::<i128>().ok())
+                .map_or(default, |value| {
+                    usize::try_from(value).unwrap_or(if value < 0 { 0 } else { usize::MAX })
+                })
+                .clamp(min, max)
+        };
+        let warning = number(
+            DB_SLOW_QUERY_WARN_MS,
+            millis(defaults.slow_query_warn.unwrap_or_default()),
+            0,
+            millis(MAX_TIMEOUT),
+        );
+        SqlLimits {
+            pool_size: number(DB_POOL_SIZE, defaults.pool_size, 1, MAX_POOL_SIZE),
+            timeout: Duration::from_millis(number(
+                DB_TIMEOUT_MS,
+                millis(defaults.timeout),
+                millis(MIN_TIMEOUT),
+                millis(MAX_TIMEOUT),
+            ) as u64),
+            max_rows: number(DB_MAX_ROWS, defaults.max_rows, 1, MAX_MAX_ROWS),
+            max_result_bytes: number(
+                DB_MAX_RESULT_BYTES,
+                defaults.max_result_bytes,
+                MIN_MAX_RESULT_BYTES,
+                MAX_MAX_RESULT_BYTES,
+            ),
+            slow_query_warn: (warning != 0).then(|| Duration::from_millis(warning as u64)),
+            ..defaults
+        }
     }
 
     /// Adds a reader of an ordinary convar. Public convars have no private-read policy.

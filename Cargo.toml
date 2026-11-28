@@ -18,6 +18,7 @@ sixm-js = { path = "crates/sixm-js" }
 sixm-net = { path = "crates/sixm-net" }
 sixm-kvp = { path = "crates/sixm-kvp" }
 sixm-client = { path = "crates/sixm-client" }
+sixm-sql = { path = "crates/sixm-sql" }
 
 mysql_async = { version = "0.37.1", default-features = false, features = ["minimal-rust", "rustls-tls", "tls12", "ring"] }
 rusqlite = { version = "0.39.0", features = ["bundled", "hooks"] }

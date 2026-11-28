@@ -12,7 +12,7 @@ use rusqlite::{Connection, ErrorCode, params_from_iter};
 use tracing::warn;
 
 use crate::config::{SqliteConfig, SqliteTarget};
-use crate::params::{BoundQuery, Dialect, ParsedSql};
+use crate::params::{BoundQuery, Dialect, ParsedSql, bind_transaction_item};
 use crate::{
     DmlSummary, LimitKind, ParamSet, PrepareParams, QueryOutcome, QueryResultSet, SqlError,
     SqlLimits, SqlOperation, SqlRow, SqlValue, TransactionItem,
@@ -256,7 +256,16 @@ fn run_with_deadline(
     )
     .map_err(|e| map_sqlite_err(&e))?;
 
-    let result = execute_op(conn, op, limits);
+    let check = || {
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            Err(SqlError::Cancelled)
+        } else if Instant::now() >= deadline {
+            Err(SqlError::Timeout(limits.timeout))
+        } else {
+            Ok(())
+        }
+    };
+    let result = check().and_then(|()| execute_op(conn, op, limits, &check));
     let _ = conn.progress_handler(0, None::<fn() -> bool>);
 
     match result {
@@ -277,6 +286,7 @@ fn execute_op(
     conn: &mut Connection,
     op: SqlOperation,
     limits: SqlLimits,
+    check: &impl Fn() -> Result<(), SqlError>,
 ) -> Result<QueryOutcome, SqlError> {
     match op {
         SqlOperation::Query { sql, params } | SqlOperation::RawExecute { sql, params } => {
@@ -334,8 +344,8 @@ fn execute_op(
             };
             Ok(QueryOutcome::Update(affected))
         }
-        SqlOperation::Prepare { sql, params } => execute_prepare(conn, &sql, params, limits),
-        SqlOperation::Transaction { items } => execute_transaction(conn, &items, limits),
+        SqlOperation::Prepare { sql, params } => execute_prepare(conn, &sql, params, limits, check),
+        SqlOperation::Transaction { items } => execute_transaction(conn, &items, limits, check),
     }
 }
 
@@ -344,6 +354,7 @@ fn execute_prepare(
     sql: &str,
     params: PrepareParams,
     limits: SqlLimits,
+    check: &impl Fn() -> Result<(), SqlError>,
 ) -> Result<QueryOutcome, SqlError> {
     let parsed = ParsedSql::parse_for(sql, Dialect::Sqlite)?;
     let mut total_bytes = 0;
@@ -356,6 +367,7 @@ fn execute_prepare(
         PrepareParams::Batch(sets) => {
             let mut results = Vec::with_capacity(sets.len());
             for set in sets {
+                check()?;
                 let bound = parsed.bind(&set, Dialect::Sqlite)?;
                 results.push(execute_bound(conn, &bound, limits, None, &mut total_bytes)?);
             }
@@ -368,33 +380,37 @@ fn execute_transaction(
     conn: &mut Connection,
     items: &[TransactionItem],
     limits: SqlLimits,
+    check: &impl Fn() -> Result<(), SqlError>,
 ) -> Result<QueryOutcome, SqlError> {
     let mut bound_items = Vec::with_capacity(items.len());
     for item in items {
-        bound_items.push(
-            ParsedSql::parse_for(&item.sql, Dialect::Sqlite)?
-                .bind(&item.params, Dialect::Sqlite)?,
-        );
+        check()?;
+        bound_items.push(bind_transaction_item(
+            &item.sql,
+            &item.params,
+            Dialect::Sqlite,
+        )?);
     }
 
+    check()?;
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| map_sqlite_err(&e))?;
 
-    let mut total_bytes = 0;
-    for bound in &bound_items {
-        if let Err(err) = execute_bound(conn, bound, limits, None, &mut total_bytes) {
-            // Disarm any deadline/cancel progress hook before rolling back so
-            // ROLLBACK itself cannot be interrupted.
-            let _ = conn.progress_handler(0, None::<fn() -> bool>);
-            let _ = conn.execute_batch("ROLLBACK");
-            return Err(err);
+    let result = (|| {
+        let mut total_bytes = 0;
+        for bound in &bound_items {
+            check()?;
+            execute_bound(conn, bound, limits, None, &mut total_bytes)?;
         }
-    }
+        check()?;
+        conn.execute_batch("COMMIT").map_err(|e| map_sqlite_err(&e))
+    })();
 
-    if let Err(err) = conn.execute_batch("COMMIT") {
+    if let Err(err) = result {
+        // Disarm any deadline/cancel progress hook so ROLLBACK can finish.
         let _ = conn.progress_handler(0, None::<fn() -> bool>);
         let _ = conn.execute_batch("ROLLBACK");
-        return Err(map_sqlite_err(&err));
+        return Err(err);
     }
 
     Ok(QueryOutcome::Transaction(true))

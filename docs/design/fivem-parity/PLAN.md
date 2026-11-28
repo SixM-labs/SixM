@@ -310,7 +310,7 @@ equivalent / no effect / absent".
 | D7 | done | Gemini | `git log --grep "^D7:"` |
 | E1 | done | Gemini | `git log --grep "^E1:"` |
 | E2 | done | Gemini | `git log --grep "^E2:"` |
-| E3 | todo | | |
+| E3 | done | Codex | `git log --grep "^E3:"` |
 | E4 | todo | | |
 | F1 | todo | | |
 | F2 | todo | | |
@@ -490,3 +490,12 @@ what is next, anything surprising.
   integration job on Ubuntu, and review fixes (SQLite backslash literals,
   transaction rollback progress-handler disarm, `dateStrings`, and `ResultTooLarge`
   disconnect). Next: `E3` (`resources/[system]/oxmysql` and host bridge).
+- 2026-11-28, Codex, `feat/fivem-parity-e`: `E3` adds the server SQL bridge,
+  background pool configuration, per-resource cancellation, and protected
+  database credentials. The stock oxmysql resource and legacy aliases work
+  from Lua and JS, including awaitable exports. Integration tests exercise
+  both runtimes, the Lua import, rollback, credentials, queue limits, and
+  resource restart while a SQLite operation is pending. The review also
+  tightened transactional statement validation and cancellation. Verified
+  type definitions, formatting, Clippy, and the Linux workspace suites.
+  Next: `E4` (operator docs, example, and Phase E PR).

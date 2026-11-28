@@ -21,6 +21,7 @@ use crate::resources;
 use crate::runtime::{CALLBACK_BUDGET, JsRuntime, Side};
 use crate::sandbox::{self, catch_script};
 use crate::scheduler;
+use crate::sql;
 use crate::state;
 use crate::vector;
 use crate::web;
@@ -43,6 +44,7 @@ pub(crate) fn install(runtime: &Rc<JsRuntime>) -> Result<(), sixm_core::ScriptEr
                 entities::install_server(&ctx, weak)?;
                 resources::install_server(&ctx, weak)?;
                 http::install(&ctx, weak)?;
+                sql::install(&ctx, weak)?;
                 web::install(&ctx, weak)?;
                 install_server_convars(&ctx, weak)?;
             }

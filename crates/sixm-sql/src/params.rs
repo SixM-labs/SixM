@@ -78,7 +78,7 @@ impl ParsedSql {
                 i += 1;
                 continue;
             }
-            if let Some(next_i) = skip_comment(bytes, i)? {
+            if let Some(next_i) = skip_comment(bytes, i, dialect)? {
                 i = next_i;
                 continue;
             }
@@ -94,7 +94,7 @@ impl ParsedSql {
                     ));
                 }
                 end_limit = i;
-                verify_only_trailing_comments(bytes, i + 1)?;
+                verify_only_trailing_comments(bytes, i + 1, dialect)?;
                 break;
             }
 
@@ -261,6 +261,39 @@ pub fn bind_query(sql: &str, params: &ParamSet, dialect: Dialect) -> Result<Boun
     ParsedSql::parse_for(sql, dialect)?.bind(params, dialect)
 }
 
+/// Restrict transaction items to queries and row changes. The pool owns the
+/// transaction boundaries, and MySQL schema changes can implicitly commit.
+pub(crate) fn bind_transaction_item(
+    sql: &str,
+    params: &ParamSet,
+    dialect: Dialect,
+) -> Result<BoundQuery, SqlError> {
+    let bytes = sql.as_bytes();
+    let mut start = 0;
+    while let Some(byte) = bytes.get(start) {
+        if byte.is_ascii_whitespace() {
+            start += 1;
+        } else if let Some(next) = skip_comment(bytes, start, dialect)? {
+            start = next;
+        } else {
+            break;
+        }
+    }
+    let keyword = &bytes[start..scan_ident_end(bytes, start)];
+    let allowed: [&[u8]; 7] = [
+        b"SELECT", b"WITH", b"INSERT", b"UPDATE", b"DELETE", b"REPLACE", b"VALUES",
+    ];
+    if !allowed
+        .iter()
+        .any(|verb| keyword.eq_ignore_ascii_case(verb))
+    {
+        return Err(SqlError::InvalidSql(
+            "transactions only accept row queries and data changes".to_owned(),
+        ));
+    }
+    bind_query(sql, params, dialect)
+}
+
 fn is_ident_start(b: u8) -> bool {
     b.is_ascii_alphabetic() || b == b'_'
 }
@@ -269,15 +302,31 @@ fn is_ident_continue(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-fn skip_comment(bytes: &[u8], i: usize) -> Result<Option<usize>, SqlError> {
+fn skip_comment(bytes: &[u8], i: usize, dialect: Dialect) -> Result<Option<usize>, SqlError> {
     let b = bytes[i];
-    if b == b'-' && bytes.get(i + 1) == Some(&b'-') {
+    if b == b'-'
+        && bytes.get(i + 1) == Some(&b'-')
+        && (dialect == Dialect::Sqlite
+            || bytes
+                .get(i + 2)
+                .is_none_or(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control()))
+    {
         return Ok(Some(skip_line_comment(bytes, i + 2)));
     }
-    if b == b'#' {
+    if b == b'#' && dialect == Dialect::Mysql {
         return Ok(Some(skip_line_comment(bytes, i + 1)));
     }
     if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
+        if dialect == Dialect::Mysql
+            && (bytes[i + 2..].starts_with(b"!")
+                || bytes
+                    .get(i + 2..i + 4)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"M!")))
+        {
+            return Err(SqlError::InvalidSql(
+                "MySQL executable comments are not supported".to_owned(),
+            ));
+        }
         return skip_block_comment(bytes, i + 2).map(Some);
     }
     Ok(None)
@@ -292,11 +341,15 @@ fn skip_quoted(bytes: &[u8], i: usize, backslash_escapes: bool) -> Result<Option
     }
 }
 
-fn verify_only_trailing_comments(bytes: &[u8], mut i: usize) -> Result<(), SqlError> {
+fn verify_only_trailing_comments(
+    bytes: &[u8],
+    mut i: usize,
+    dialect: Dialect,
+) -> Result<(), SqlError> {
     while i < bytes.len() {
         if bytes[i].is_ascii_whitespace() {
             i += 1;
-        } else if let Some(next_i) = skip_comment(bytes, i)? {
+        } else if let Some(next_i) = skip_comment(bytes, i, dialect)? {
             i = next_i;
         } else {
             return Err(SqlError::InvalidSql(

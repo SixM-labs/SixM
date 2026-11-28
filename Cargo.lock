@@ -1871,6 +1871,7 @@ dependencies = [
  "sixm-lua",
  "sixm-net",
  "sixm-resources",
+ "sixm-sql",
  "subtle",
  "tempfile",
  "thiserror",
