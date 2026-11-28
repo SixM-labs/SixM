@@ -140,6 +140,8 @@ impl LuaRuntime {
     ) -> mlua::Result<()> {
         for handler in handlers {
             let (slot, _) = self.spawn(handler, source, ctx.invoker().cloned())?;
+            self.handled_events
+                .set(self.handled_events.get().saturating_add(1));
             self.run(slot, Instant::now(), args.clone());
             if self.was_canceled() {
                 ctx.cancel();

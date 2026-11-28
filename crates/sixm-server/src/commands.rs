@@ -24,7 +24,7 @@ use crate::convars::{Convars, ENDPOINT};
 use crate::filters::ChannelAction;
 use crate::manager::{ManagerError, ResourceManager};
 use crate::network::{DROP_SCRIPT, DROP_SERVER, DropOrigin};
-use crate::perf::{format_millis, per_second};
+use crate::perf::{format_kib, format_millis, per_second};
 
 /// Deepest `exec` nesting. A file that includes itself stops here.
 const MAX_EXEC_DEPTH: usize = 16;
@@ -32,7 +32,7 @@ const MAX_EXEC_DEPTH: usize = 16;
 const MAX_QUEUED_COMMANDS: usize = 1000;
 
 /// Built-in command names, as listed by `help` and `cmdlist`.
-pub(crate) const BUILT_IN: [&str; 36] = [
+pub(crate) const BUILT_IN: [&str; 37] = [
     "add_ace",
     "add_convar_permission",
     "add_principal",
@@ -58,6 +58,7 @@ pub(crate) const BUILT_IN: [&str; 36] = [
     "remove_ace",
     "remove_convar_permission",
     "remove_principal",
+    "resmon",
     "restart",
     "say",
     "set",
@@ -182,6 +183,7 @@ pub(crate) fn run_words(
             }
         }),
         "refresh" => manager.refresh(),
+        "resmon" => resmon(manager, args),
         "endpoint_add_udp" => endpoint(manager, args, false),
         "endpoint_add_tcp" => endpoint(manager, args, true),
         "perf" => perf(manager, args),
@@ -612,6 +614,30 @@ fn cmdlist(manager: &ResourceManager, args: &[String]) {
         } else {
             info!("{name}");
         }
+    }
+}
+
+/// `resmon`: prints live per-resource tick CPU (avg/max), heap size, and event counts.
+fn resmon(manager: &ResourceManager, args: &[String]) {
+    if !args.is_empty() {
+        warn!("usage: resmon");
+        return;
+    }
+    let snapshot = manager.resmon_snapshot();
+    if snapshot.is_empty() {
+        info!("No resources are running");
+        return;
+    }
+    for (name, stats) in snapshot {
+        info!(
+            "{name}  avg {} ms  max {} ms  heap {} KiB  events {}/{} ({}f)",
+            format_millis(stats.avg_tick_micros),
+            format_millis(u64::from(stats.max_tick_micros)),
+            format_kib(stats.heap_bytes),
+            stats.window_events,
+            stats.total_events,
+            stats.samples,
+        );
     }
 }
 
@@ -1128,7 +1154,7 @@ mod tests {
 
     #[test]
     fn built_in_list_is_sorted_and_unique() {
-        assert_eq!(BUILT_IN.len(), 36);
+        assert_eq!(BUILT_IN.len(), 37);
         assert!(BUILT_IN.windows(2).all(|pair| pair[0] < pair[1]));
     }
 }

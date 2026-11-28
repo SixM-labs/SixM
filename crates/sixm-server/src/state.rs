@@ -204,8 +204,9 @@ impl ResourceManager {
     /// Applies one state change to the store and runs server change handlers.
     fn apply_and_deliver(&self, bag: &str, key: &str, value: &Value, replicated: bool) {
         self.state.borrow_mut().apply(bag, key, value, replicated);
-        for runtime in self.snapshot().iter() {
-            runtime.deliver_state_change(bag, key, value, replicated);
+        for slot in self.snapshot().iter() {
+            slot.runtime
+                .deliver_state_change(bag, key, value, replicated);
         }
     }
 

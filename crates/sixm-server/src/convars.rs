@@ -45,6 +45,9 @@ const HEARTBEAT_INTERVAL: &str = "sv_heartbeatInterval";
 /// Whether client-initiated state bag writes are rejected (`false` by default).
 /// Stored in lower case so hot-path packet checks do not allocate.
 const STATE_BAG_STRICT_MODE: &str = "sv_statebagstrictmode";
+/// Frame duration threshold in milliseconds above which a hitch warning is logged
+/// (`0` disables, default `50`). Stored in lower case so hot-path checks do not allocate.
+const HITCH_WARNING_MS: &str = "sixm_hitchwarningms";
 
 /// Security-critical and bootstrap convars writable only from the server
 /// console or `server.cfg`.
@@ -136,6 +139,9 @@ const MAX_PLAYER_EVENT_RATE_LIMIT: i64 = 10_000;
 const DEFAULT_HEARTBEAT_INTERVAL: i64 = 30;
 const MIN_HEARTBEAT_INTERVAL: i64 = 10;
 const MAX_HEARTBEAT_INTERVAL: i64 = 3600;
+/// Default and upper clamp (ms) for `sixm_hitchWarningMs` (`0` disables).
+const DEFAULT_HITCH_WARNING_MS: u64 = 50;
+const MAX_HITCH_WARNING_MS: u64 = 60_000;
 
 /// A stored convar: its value and the kind the last store gave it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +211,11 @@ impl Convars {
         convars.set(
             HEARTBEAT_INTERVAL,
             &DEFAULT_HEARTBEAT_INTERVAL.to_string(),
+            ConvarKind::Plain,
+        );
+        convars.set(
+            HITCH_WARNING_MS,
+            &DEFAULT_HITCH_WARNING_MS.to_string(),
             ConvarKind::Plain,
         );
         convars
@@ -562,6 +573,16 @@ impl Convars {
             .unwrap_or(DEFAULT_MAX_CLIENTS);
         usize::try_from(value.clamp(MIN_CLIENTS, MAX_CLIENTS_LIMIT)).unwrap_or(1)
     }
+
+    /// Frame hitch threshold in milliseconds, from `sixm_hitchWarningMs`.
+    /// Stored lowercase so hot-path tick checks never allocate. `0` disables.
+    pub(crate) fn hitch_warning_ms(&self) -> u64 {
+        self.values
+            .get(HITCH_WARNING_MS)
+            .and_then(|entry| entry.value.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_HITCH_WARNING_MS)
+            .min(MAX_HITCH_WARNING_MS)
+    }
 }
 
 #[cfg(test)]
@@ -770,6 +791,11 @@ mod tests {
         assert!(convars.state_bag_strict_mode());
         convars.set(MASTER_URL, " https://master.example/hb ", ConvarKind::Plain);
         assert_eq!(convars.master_url(), Some("https://master.example/hb"));
+        assert_eq!(convars.hitch_warning_ms(), 50);
+        for (value, expected) in [("0", 0), ("25", 25), ("999999", 60_000), ("bad", 50)] {
+            convars.set(HITCH_WARNING_MS, value, ConvarKind::Plain);
+            assert_eq!(convars.hitch_warning_ms(), expected, "{value}");
+        }
 
         for protected in [
             "sv_playerEventRateLimit",

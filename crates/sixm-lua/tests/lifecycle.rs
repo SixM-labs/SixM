@@ -57,3 +57,24 @@ fn register_command_accepts_a_missing_restricted_flag() {
         &[("main.lua", "RegisterCommand('hello', function() end)\n")],
     );
 }
+
+#[test]
+fn memory_bytes_and_handled_events_report_activity() {
+    let host = new_host();
+    let rt = start(
+        &host,
+        "resmon_lua",
+        &[],
+        &[(
+            "main.lua",
+            "local t = {}; for i = 1, 100 do t[i] = string.rep('x', 32) end\n\
+             AddEventHandler('ping', function() end)\n\
+             AddEventHandler('ping', function() end)\n",
+        )],
+    );
+    assert!(rt.memory_bytes() > 0);
+    assert_eq!(rt.handled_events(), 0);
+    host.trigger_event("ping", EventSource::Local, &[], None)
+        .expect("trigger ping");
+    assert_eq!(rt.handled_events(), 2);
+}

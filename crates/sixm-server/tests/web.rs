@@ -424,6 +424,36 @@ fn admin_ui_requires_both_sv_admin_ui_enabled_and_rcon_password() {
 }
 
 #[test]
+fn resmon_json_is_gated_and_reports_running_resources() {
+    let lb = started();
+    assert_eq!(get(&lb, "/resmon.json").status, 404);
+
+    lb.fx.server.execute("set sv_adminUiEnabled 1");
+    assert_eq!(get(&lb, "/resmon.json").status, 403);
+
+    lb.fx.server.execute("set rcon_password admin-pw");
+    lb.fx.server.tick(std::time::Instant::now());
+
+    let admin_html = get(&lb, "/admin").text();
+    assert!(admin_html.contains("/resmon.json"));
+    assert!(admin_html.contains("Resource Monitor (resmon)"));
+
+    let reply = get(&lb, "/resmon.json");
+    assert_eq!(reply.status, 200);
+    assert_eq!(post(&lb, "/resmon.json", "x").status, 405);
+
+    let doc: serde_json::Value = serde_json::from_slice(&reply.body).expect("JSON");
+    assert_eq!(doc["hitch_warning_ms"], 50);
+    let resources = doc["resources"].as_array().expect("resources array");
+    let app = resources
+        .iter()
+        .find(|r| r["name"] == "app")
+        .expect("app resource in resmon");
+    assert!(app["samples"].as_u64().unwrap_or(0) >= 1);
+    assert!(app["heap_bytes"].as_u64().unwrap_or(0) > 0);
+}
+
+#[test]
 fn master_heartbeat_posts_info_and_dynamic_to_configured_url() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock master");
     let port = listener.local_addr().expect("addr").port();

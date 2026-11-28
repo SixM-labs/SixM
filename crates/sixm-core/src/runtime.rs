@@ -749,6 +749,16 @@ pub trait ScriptRuntime: fmt::Debug {
     /// Drops all tasks, handlers and references. The runtime is unusable
     /// afterwards; the host removes it.
     fn shutdown(&self);
+
+    /// Current script VM allocator/heap usage in bytes (called off the hot path).
+    fn memory_bytes(&self) -> usize {
+        0
+    }
+
+    /// Cumulative count of script event handler invocations executed by this runtime.
+    fn handled_events(&self) -> u64 {
+        0
+    }
 }
 
 /// Case-insensitive glob matching for `AddConvarChangeListener` filters.

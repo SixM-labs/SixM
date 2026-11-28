@@ -73,6 +73,8 @@ pub struct LuaRuntime {
     pub(crate) deferred_releases: RefCell<Vec<u32>>,
     /// Open `StartFindKvp` cursors.
     pub(crate) kvp_finds: RefCell<Finds>,
+    /// Cumulative count of invoked event handlers for `resmon`.
+    pub(crate) handled_events: Cell<u64>,
 }
 
 impl LuaRuntime {
@@ -118,6 +120,7 @@ impl LuaRuntime {
             refs: RefCell::default(),
             deferred_releases: RefCell::default(),
             kvp_finds: RefCell::default(),
+            handled_events: Cell::new(0),
         });
         natives::install(&runtime, &helpers).into_script()?;
         Ok(runtime)
@@ -319,6 +322,14 @@ impl ScriptRuntime for LuaRuntime {
         if !self.shut.replace(true) {
             self.clear_state();
         }
+    }
+
+    fn memory_bytes(&self) -> usize {
+        self.lua.used_memory()
+    }
+
+    fn handled_events(&self) -> u64 {
+        self.handled_events.get()
     }
 }
 

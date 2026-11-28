@@ -275,6 +275,7 @@ impl ResourceManager {
             "/healthz" => Some(json_route(request, || self.healthz_document())),
             "/metrics" => Some(self.handle_metrics(request)),
             "/admin" => Some(self.handle_admin(request)),
+            "/resmon.json" => Some(self.handle_resmon(request)),
             _ => None,
         }
     }
@@ -440,6 +441,52 @@ impl ResourceManager {
                 ("cache-control".to_owned(), "no-store".to_owned()),
             ],
             body: include_str!("admin.html").as_bytes().to_vec(),
+        }
+    }
+
+    /// `GET /resmon.json`: live per-resource monitor snapshot gated identically to `/admin`.
+    fn handle_resmon(&self, request: &WebRequest) -> WebResponse {
+        let convars = self.convars.borrow();
+        if !convars.admin_ui_enabled() {
+            return text(404, "Not Found");
+        }
+        if convars.rcon_password().is_none() {
+            return text(403, "Admin UI requires rcon_password to be configured");
+        }
+        let hitch_warning_ms = convars.hitch_warning_ms();
+        drop(convars);
+        if !is_get_or_head(&request.method) {
+            return method_not_allowed("GET, HEAD");
+        }
+        let resources: Vec<Json> = self
+            .resmon_snapshot()
+            .into_iter()
+            .map(|(name, stats)| {
+                let avg_u32 = u32::try_from(stats.avg_tick_micros).unwrap_or(u32::MAX);
+                json!({
+                    "name": name.as_ref(),
+                    "samples": stats.samples,
+                    "avg_tick_ms": f64::from(avg_u32) / 1000.0,
+                    "max_tick_ms": f64::from(stats.max_tick_micros) / 1000.0,
+                    "last_tick_ms": f64::from(stats.last_tick_micros) / 1000.0,
+                    "heap_bytes": stats.heap_bytes,
+                    "window_events": stats.window_events,
+                    "total_events": stats.total_events,
+                })
+            })
+            .collect();
+        let body = serde_json::to_vec(&json!({
+            "hitch_warning_ms": hitch_warning_ms,
+            "resources": resources,
+        }))
+        .unwrap_or_default();
+        WebResponse {
+            status: 200,
+            headers: vec![
+                ("content-type".to_owned(), "application/json".to_owned()),
+                ("cache-control".to_owned(), "no-store".to_owned()),
+            ],
+            body,
         }
     }
 

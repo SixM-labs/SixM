@@ -17,6 +17,10 @@ may change the protocol and the API.
   `con_addChannelFilter <channel> <print|none>`, and
   `con_removeChannelFilter <channel>`, backed by `ChannelFilters` (`Server::with_channel_filters`,
   `Server::channel_filters`) across process logs and `POST /rcon`.
+- Live resource monitor: allocation-free 60-frame `ResourceMonitor` ring buffers,
+  `ScriptRuntime::memory_bytes` / `handled_events`, `resmon` console command,
+  `/resmon.json` and `/admin` live Resource Monitor table, plus configurable frame
+  hitch log warnings via `sixm_hitchWarningMs`.
 - Stock `[system]/chat` resource with the FiveM chat event names, a cancelable
   server message pipeline, command suggestions, and headless client `say`.
 - Clean-room stock `[system]/mapmanager`: scalar `resource_type` metadata,

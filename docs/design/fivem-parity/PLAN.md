@@ -303,7 +303,7 @@ equivalent / no effect / absent".
 | C3 | done | Gemini | `git log --grep "^C3:"` |
 | D1 | done | Gemini (Flash impl, Pro review) | `git log --grep "^D1:"` |
 | D2 | done | Gemini (Flash impl, Pro review) | `git log --grep "^D2:"` |
-| D3 | todo | | |
+| D3 | done | Gemini | `git log --grep "^D3:"` |
 | D4 | todo | | |
 | D5 | todo | | |
 | D6 | todo | | |
@@ -428,3 +428,9 @@ what is next, anything surprising.
   and `con_channelFilters`, `con_addChannelFilter`, `con_removeChannelFilter`
   wired into both process tracing layers and `POST /rcon`, with full checks
   green. Next: D3 (`resmon`, `sixm_hitchWarningMs`, `/admin` live panel).
+- 2026-11-28, Gemini, `feat/fivem-parity-d`: `D3: live resource monitor and
+  hitch warnings` follows e224c7c. Added allocation-free fixed 60-frame
+  `ResourceMonitor` ring buffers, `ScriptRuntime::memory_bytes` &
+  `handled_events` for Lua/JS, `resmon` console command, `sixm_hitchWarningMs`
+  frame warnings, and `/resmon.json` + `/admin` panel, with full checks green.
+  Next: D4 (`sv_proxyIPRanges` & `/metrics` Basic Auth).

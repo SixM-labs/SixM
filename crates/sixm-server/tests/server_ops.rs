@@ -794,3 +794,133 @@ fn channel_filters_filter_rcon_and_tracing_output() {
     assert!(!target_filtered.iter().any(|l| l.contains("noisy line")));
     assert!(target_filtered.iter().any(|l| l == "[loud] loud line"));
 }
+
+#[test]
+fn resmon_reports_lua_and_js_resources() {
+    let lb = Loopback::new(&[Resource {
+        name: "lua_mon",
+        script: r"
+            AddEventHandler('mon:ping', function() end)
+            RegisterCommand('emit_mon', function()
+                TriggerEvent('mon:ping')
+            end, false)
+        ",
+        exports: &[],
+    }]);
+    lb.fx.add_resource(
+        "js_mon",
+        &manifest(&["server.js"], &[], &[]),
+        &[(
+            "server.js",
+            r#"
+            globalThis.items = new Array(64).fill("data".repeat(16));
+            on("mon:ping", () => {});
+            "#,
+        )],
+    );
+    lb.fx.server.execute("refresh");
+    lb.fx.server.execute("ensure js_mon");
+    lb.fx.server.execute("set rcon_password super-secret-pw");
+
+    lb.pump();
+    rcon_output(&lb, "emit_mon");
+    lb.pump();
+
+    let usage = rcon_output(&lb, "resmon extra");
+    assert!(
+        usage.iter().any(|l| l.contains("usage: resmon")),
+        "{usage:?}"
+    );
+
+    let out = rcon_output(&lb, "resmon");
+    let lua_line = out
+        .iter()
+        .find(|l| l.starts_with("lua_mon "))
+        .unwrap_or_else(|| panic!("missing lua_mon line in {out:?}"));
+    let js_line = out
+        .iter()
+        .find(|l| l.starts_with("js_mon "))
+        .unwrap_or_else(|| panic!("missing js_mon line in {out:?}"));
+    assert!(lua_line.contains("events 1/1"), "{lua_line}");
+    assert!(js_line.contains("events 1/1"), "{js_line}");
+    assert!(!lua_line.contains("heap 0.0 KiB"), "{lua_line}");
+    assert!(!js_line.contains("heap 0.0 KiB"), "{js_line}");
+}
+
+fn capture_messages(run: impl FnOnce()) -> Vec<String> {
+    use std::fmt::Write as _;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+
+    struct MsgCapture(Arc<Mutex<Vec<String>>>);
+    struct MsgVisitor<'a>(&'a mut String);
+    impl Visit for MsgVisitor<'_> {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            if field.name() == "message" {
+                self.0.push_str(value);
+            }
+        }
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                let _ = write!(self.0, "{value:?}");
+            }
+        }
+    }
+    impl<S: tracing::Subscriber> Layer<S> for MsgCapture {
+        fn on_event(&self, event: &tracing::Event<'_>, _cx: Context<'_, S>) {
+            let mut msg = String::new();
+            event.record(&mut MsgVisitor(&mut msg));
+            self.0.lock().unwrap().push(msg);
+        }
+    }
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(MsgCapture(Arc::clone(&captured)));
+    tracing::subscriber::with_default(subscriber, run);
+    std::mem::take(&mut *captured.lock().unwrap())
+}
+
+#[test]
+fn hitch_warning_logs_slow_frames_and_stops_when_disabled() {
+    let lb = Loopback::new(&[Resource {
+        name: "hitch_res",
+        script: r"
+            local delay_ms = 0
+            RegisterCommand('arm_hitch', function(_, args)
+                delay_ms = tonumber(args[1]) or 0
+            end, false)
+            CreateThread(function()
+                while true do
+                    if delay_ms > 0 then
+                        local start = GetGameTimer()
+                        while GetGameTimer() - start < delay_ms do end
+                        delay_ms = 0
+                    end
+                    Wait(0)
+                end
+            end)
+        ",
+        exports: &[],
+    }]);
+
+    lb.pump();
+    lb.fx.server.execute("set sixm_hitchWarningMs 5");
+    lb.fx.server.execute("arm_hitch 25");
+    let hitches = capture_messages(|| lb.fx.server.tick(Instant::now()));
+    assert!(
+        hitches
+            .iter()
+            .any(|m| m.contains("server frame hitch:") && m.contains("sixm_hitchWarningMs (5 ms)")),
+        "expected hitch warning in {hitches:?}"
+    );
+
+    lb.fx.server.execute("set sixm_hitchWarningMs 0");
+    lb.fx.server.execute("arm_hitch 25");
+    let disabled = capture_messages(|| lb.fx.server.tick(Instant::now()));
+    assert!(
+        !disabled.iter().any(|m| m.contains("server frame hitch:")),
+        "hitch warnings should be disabled when 0: {disabled:?}"
+    );
+}

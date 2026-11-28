@@ -391,6 +391,8 @@ impl JsRuntime {
                 (true, Some(bytes)) => Some(bytes),
                 (true, None) => continue,
             };
+            self.handled_events
+                .set(self.handled_events.get().saturating_add(1));
             let _budget = self.enter_budget(CALLBACK_BUDGET);
             let outcome = (|| -> Result<(), sixm_core::ScriptError> {
                 Self::set_source_global(js_ctx, source)

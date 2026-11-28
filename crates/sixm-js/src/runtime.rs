@@ -118,6 +118,8 @@ pub struct JsRuntime {
     pub(crate) deferred_releases: RefCell<Vec<u32>>,
     pub(crate) kvp_finds: RefCell<Finds>,
     pub(crate) rejections: RefCell<Rejections>,
+    /// Cumulative count of invoked event handlers for `resmon`.
+    pub(crate) handled_events: Cell<u64>,
 }
 
 impl JsRuntime {
@@ -170,6 +172,7 @@ impl JsRuntime {
             deferred_releases: RefCell::default(),
             kvp_finds: RefCell::default(),
             rejections: RefCell::default(),
+            handled_events: Cell::new(0),
         });
 
         runtime.install_rejection_tracker();
@@ -526,6 +529,14 @@ impl ScriptRuntime for JsRuntime {
         if !self.shut.replace(true) {
             self.clear_state();
         }
+    }
+
+    fn memory_bytes(&self) -> usize {
+        usize::try_from(self.rt.memory_usage().malloc_size.max(0)).unwrap_or(0)
+    }
+
+    fn handled_events(&self) -> u64 {
+        self.handled_events.get()
     }
 }
 
