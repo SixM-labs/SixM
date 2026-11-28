@@ -428,6 +428,12 @@ and a positional table with holes cannot represent an exact parameter list.
 JavaScript code that needs explicit `null` fields or bindings can use the SQL
 bridge natives with JavaScript objects and arrays directly.
 
+Use the same `set mysql_connection_string` setting when migrating a MySQL or
+MariaDB server. The [off-by-default SQLite demo](../server.md#database) runs
+without an external database and uses SQLite's conflict-handling syntax.
+When changing engines, use the new database's SQL dialect. Keep schema
+migrations separate from transaction batches and use transactional MySQL tables.
+
 ### 7. Remote console, logging filters, and profiling
 
 SixM's remote console uses an authenticated HTTP `POST /rcon` request (with

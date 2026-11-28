@@ -311,7 +311,7 @@ equivalent / no effect / absent".
 | E1 | done | Gemini | `git log --grep "^E1:"` |
 | E2 | done | Gemini | `git log --grep "^E2:"` |
 | E3 | done | Codex | `git log --grep "^E3:"` |
-| E4 | todo | | |
+| E4 | done | Codex | `git log --grep "^E4:"` |
 | F1 | todo | | |
 | F2 | todo | | |
 | F3 | todo | | |
@@ -499,3 +499,12 @@ what is next, anything surprising.
   tightened transactional statement validation and cancellation. Verified
   type definitions, formatting, Clippy, and the Linux workspace suites.
   Next: `E4` (operator docs, example, and Phase E PR).
+- 2026-11-28, Codex, `feat/fivem-parity-e`: `E4` documents the database setup
+  and migration API and adds the opt-in SQLite `db_demo` to the example
+  server. The demo's counter persists across server restarts. Local checks
+  include types, format, Clippy, workspace tests, the locked fuzz build check,
+  and a live MariaDB integration run. Initial Windows CI exposed a race in
+  the existing state bag test. The test now waits for the participating
+  client mirrors to receive entity ownership before writing state.
+  [PR #29](https://github.com/SixM-labs/SixM/pull/29) is gated on Linux, Windows, and
+  MySQL 8.4 CI. Next: `F1` on `feat/fivem-parity-f` from merged `main`.

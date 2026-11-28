@@ -12,7 +12,8 @@ may change the protocol and the API.
 - Bundled `[system]/oxmysql` resource with asynchronous MySQL, MariaDB, and
   SQLite access, Lua and JavaScript SQL bridge natives, the Lua `MySQL` library,
   and `mysql-async` / `ghmattimysql` aliases. Lua `Await` accepts thenables
-  returned by resource exports.
+  returned by resource exports. The optional `db_demo` in the example server
+  uses SQLite to persist a startup counter.
 - `SetHttpHandler` request object now exposes `req.address` (proxy-resolved via
   `sv_proxyIPRanges` when configured) and `req.setCancelHandler(fn)` in Lua and
   JavaScript, firing when a client disconnects early or the handler times out

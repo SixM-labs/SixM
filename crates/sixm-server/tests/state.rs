@@ -1212,9 +1212,9 @@ exports('js_read_entity', (id, key) => Entity(id).state[key]);
         let Value::Int(srv_ent_id) = srv_ent else {
             panic!("expected server entity id, got {srv_ent:?}");
         };
-        h.wait_until(clients, "Alice receives server-owned entity", || {
-            client_call(alice, "lua_does_exist", &[Value::Int(srv_ent_id)])
-                == vec![Value::Bool(true)]
+        let entity_id = u32::try_from(srv_ent_id).expect("valid server entity ID");
+        h.wait_until(clients, "Alice receives entity ownership", || {
+            alice.entity(entity_id).and_then(|entity| entity.owner) == Some(alice.local_player())
         });
         assert_eq!(
             client_call(
@@ -1387,8 +1387,14 @@ exports('js_read_entity', (id, key) => Entity(id).state[key]);
             "server_set_owner",
             &[Value::Int(srv_ent_id), Value::Int(bob_id)],
         );
-        h.wait_until(clients, "Alice receives ownership transfer", || {
-            let res = client_call(
+        let entity_id = u32::try_from(srv_ent_id).expect("valid server entity ID");
+        h.wait_until(clients, "both clients receive ownership transfer", || {
+            [alice, bob].iter().all(|client| {
+                client.entity(entity_id).and_then(|entity| entity.owner) == Some(bob.local_player())
+            })
+        });
+        assert_client_error(
+            &client_call(
                 alice,
                 "js_try_entity_set",
                 &[
@@ -1397,9 +1403,9 @@ exports('js_read_entity', (id, key) => Entity(id).state[key]);
                     Value::Bool(false),
                     Value::Bool(true),
                 ],
-            );
-            matches!(res.as_slice(), [Value::Array(items)] if items.first() == Some(&Value::Bool(false)))
-        });
+            ),
+            "owned entities",
+        );
         assert_eq!(
             client_call(
                 bob,

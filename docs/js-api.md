@@ -325,6 +325,17 @@ The other operations are `single`, `scalar`, `insert`, `update`, `prepare`,
 for the configured database. For the Lua import and legacy aliases, see the
 [migration guide](guides/from-fivem.md).
 
+```js
+async function readStarts() {
+    await exports.oxmysql.ready_async();
+    return await exports.oxmysql.scalar_async(
+        'SELECT starts FROM sixm_demo_starts WHERE name = ?', ['example']
+    );
+}
+```
+
+The [database demo](server.md#database) creates and fills this table.
+
 The server also exposes the native bridge:
 
 - `SixmSqlIsReady()` reports whether the configured database accepts queries.

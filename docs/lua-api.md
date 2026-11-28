@@ -822,6 +822,15 @@ to callbacks. A failed transaction returns `false` on a database error, and
 other awaitable exports raise database errors. Resource stop discards that
 resource's pending callbacks. See [the migration guide](guides/from-fivem.md).
 
+```lua
+MySQL.ready(function()
+    local row = MySQL.single.await('SELECT starts FROM sixm_demo_starts WHERE name = ?', { 'example' })
+    if row then print(row.starts) end
+end)
+```
+
+The [database demo](server.md#database) creates and fills this table.
+
 ## HTTP (server only)
 
 `PerformHttpRequest(url, callback, method, data, headers, options)` starts an
