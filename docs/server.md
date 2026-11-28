@@ -292,6 +292,9 @@ Convar names are case-insensitive. Scripts read them with `GetConvar` and
 | `sv_masterUrl` | empty | Console-only. Optional HTTP(S) URL to which the server periodically `POST`s JSON discovery heartbeats (`{"info": ..., "dynamic": ...}`). Honors `sv_httpAllowPrivate` and `sixm_httpTimeout`. |
 | `sv_heartbeatInterval` | `30` | Console-only. Seconds between master-server heartbeats when `sv_masterUrl` is set, clamped to 10 to 3600. |
 | `sixm_hitchWarningMs` | `50` | Frame duration threshold in milliseconds above which a hitch warning is logged (`0` disables, clamped up to `60000`). |
+| `sv_proxyIPRanges` | empty | Console-only. Comma- or whitespace-separated trusted reverse-proxy CIDRs (`127.0.0.1/32`, `10.0.0.0/8`, `fd00::/8`). When set, HTTP rate limits, RCON lockouts, and HTTP client `ip:` attribution honor the rightmost untrusted hop in `X-Forwarded-For` (falling back to `X-Real-IP`) only when the TCP peer is inside a listed range. |
+| `sv_prometheusBasicAuthUser` | empty | Console-only. Optional HTTP Basic Auth username protecting `GET /metrics`. When either user or password is set, both must be configured and match (`401` otherwise). |
+| `sv_prometheusBasicAuthPassword` | empty | Console-only credential protecting `GET /metrics` alongside `sv_prometheusBasicAuthUser`. Excluded from script convar APIs. |
 
 Any other convar can be set with `set`, `sets` or `setr`, or with the Lua
 setters, and read by scripts. Script convar writes (`SetConvar*`) are bounded to
@@ -300,7 +303,8 @@ setters, and read by scripts. Script convar writes (`SetConvar*`) are bounded to
 `sv_exposePlayerIdentifiers`, `sixm_identityFile`, `sixm_resourcesPath`,
 `sixm_kvpPath`, `endpoint_add_udp`, `sv_playerEventRateLimit`,
 `sv_metricsEnabled`, `sv_adminUiEnabled`, `sv_masterUrl`,
-`sv_heartbeatInterval`, and `sv_stateBagStrictMode`) cannot be modified by
+`sv_heartbeatInterval`, `sv_stateBagStrictMode`, `sv_proxyIPRanges`,
+`sv_prometheusBasicAuthUser`, and `sv_prometheusBasicAuthPassword`) cannot be modified by
 scripts or remote players. The server checks a value only when the convar is
 replicated (see below).
 
@@ -396,7 +400,7 @@ connection carries one request and is closed after its answer.
 | `/players.json` | JSON array of `{id, name, ping}` per player. `identifiers` is added only with `sv_exposePlayerIdentifiers true`. |
 | `/dynamic.json` | JSON: `hostname`, `clients`, `maxclients` and `server`. |
 | `/healthz` | JSON readiness/liveness summary: `{"ok":true,"resources":<count>,"players":<count>}`. |
-| `/metrics` | Prometheus text exposition (`0.0.4`) when `sv_metricsEnabled` is `true` or `1` (`404` otherwise). Exposes `sixm_players_connected`, `sixm_players_max`, `sixm_resources_running`, `sixm_entities_total`, `sixm_tick_duration_ms` (`avg`, `p50`, `p99`, `max`), `sixm_net_rx_bytes_total`, and `sixm_net_tx_bytes_total`. |
+| `/metrics` | Prometheus text exposition (`0.0.4`) when `sv_metricsEnabled` is `true` or `1` (`404` otherwise, `401` when `sv_prometheusBasicAuthUser`/`sv_prometheusBasicAuthPassword` are configured and credentials fail). Exposes `sixm_players_connected`, `sixm_players_max`, `sixm_resources_running`, `sixm_entities_total`, `sixm_tick_duration_ms` (`avg`, `p50`, `p99`, `max`), `sixm_net_rx_bytes_total`, and `sixm_net_tx_bytes_total`. |
 | `/admin` | Self-contained HTML admin UI when `sv_adminUiEnabled` is `true` or `1` and `rcon_password` is set (`404` when disabled, `403` when `rcon_password` is unset). Includes a live `resmon` table and authenticates commands against `POST /rcon`. |
 | `/resmon.json` | Live per-resource monitor snapshot (`hitch_warning_ms` and per-resource `avg_tick_ms`, `max_tick_ms`, `last_tick_ms`, `heap_bytes`, `window_events`, `total_events`), gated identically to `/admin`. |
 | `/rcon` | [`POST /rcon`](#remote-console) executes one authenticated console command and returns its output as JSON. |

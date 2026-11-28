@@ -7,6 +7,7 @@ use std::time::Duration;
 use ring::digest::{Digest, SHA256, digest};
 use sixm_core::ConvarKind;
 use sixm_net::Identity;
+use subtle::ConstantTimeEq;
 
 /// Convar naming the folder that is scanned for resources.
 const RESOURCES_PATH: &str = "sixm_resourcesPath";
@@ -48,10 +49,16 @@ const STATE_BAG_STRICT_MODE: &str = "sv_statebagstrictmode";
 /// Frame duration threshold in milliseconds above which a hitch warning is logged
 /// (`0` disables, default `50`). Stored in lower case so hot-path checks do not allocate.
 const HITCH_WARNING_MS: &str = "sixm_hitchwarningms";
+/// Trusted reverse-proxy CIDR list for `X-Forwarded-For` / `X-Real-IP`.
+pub(crate) const PROXY_IP_RANGES: &str = "sv_proxyIPRanges";
+/// Optional HTTP Basic Auth username protecting `GET /metrics`.
+const PROMETHEUS_BASIC_AUTH_USER: &str = "sv_prometheusBasicAuthUser";
+/// Optional HTTP Basic Auth password protecting `GET /metrics`.
+pub(crate) const PROMETHEUS_BASIC_AUTH_PASSWORD: &str = "sv_prometheusBasicAuthPassword";
 
 /// Security-critical and bootstrap convars writable only from the server
 /// console or `server.cfg`.
-const CONSOLE_ONLY_CONVARS: [&str; 14] = [
+const CONSOLE_ONLY_CONVARS: [&str; 17] = [
     RCON_PASSWORD,
     HTTP_ALLOW_PRIVATE,
     HTTP_ENABLED,
@@ -66,6 +73,9 @@ const CONSOLE_ONLY_CONVARS: [&str; 14] = [
     MASTER_URL,
     HEARTBEAT_INTERVAL,
     STATE_BAG_STRICT_MODE,
+    PROXY_IP_RANGES,
+    PROMETHEUS_BASIC_AUTH_USER,
+    PROMETHEUS_BASIC_AUTH_PASSWORD,
 ];
 /// Convar naming how many seconds a resource's HTTP handler may take to
 /// complete its response.
@@ -156,6 +166,7 @@ pub(crate) struct Convars {
     values: BTreeMap<String, Entry>,
     readers: BTreeMap<String, BTreeSet<String>>,
     rcon_password: Option<Digest>,
+    prometheus_password: Option<String>,
 }
 
 impl Convars {
@@ -165,6 +176,7 @@ impl Convars {
             values: BTreeMap::new(),
             readers: BTreeMap::new(),
             rcon_password: None,
+            prometheus_password: None,
         };
         convars.set(RESOURCES_PATH, "resources", ConvarKind::Plain);
         convars.set(IDENTITY_FILE, DEFAULT_IDENTITY_FILE, ConvarKind::Plain);
@@ -247,6 +259,9 @@ impl Convars {
     pub(crate) fn add_reader(&mut self, name: &str, resource: &str) -> Result<(), &'static str> {
         if name.eq_ignore_ascii_case(RCON_PASSWORD) {
             return Err("rcon_password is console-only");
+        }
+        if name.eq_ignore_ascii_case(PROMETHEUS_BASIC_AUTH_PASSWORD) {
+            return Err("sv_prometheusBasicAuthPassword is console-only");
         }
         if Self::is_console_only(name) {
             return Err("console-only convars cannot have script readers");
@@ -526,6 +541,46 @@ impl Convars {
         self.rcon_password.as_ref()
     }
 
+    /// Updates `sv_prometheusBasicAuthPassword` outside the convar map exposed to scripts.
+    pub(crate) fn set_prometheus_password(&mut self, password: &str) {
+        self.prometheus_password = (!password.is_empty()).then(|| password.to_owned());
+    }
+
+    /// Verifies `Authorization` on `GET /metrics`. When neither
+    /// `sv_prometheusBasicAuthUser` nor `sv_prometheusBasicAuthPassword` is set,
+    /// returns `true`. When either is non-empty, both must be configured and match
+    /// HTTP Basic Auth in constant time.
+    pub(crate) fn check_prometheus_basic_auth(&self, auth_header: Option<&str>) -> bool {
+        let user = self
+            .get(PROMETHEUS_BASIC_AUTH_USER)
+            .filter(|u| !u.is_empty());
+        let password = self
+            .prometheus_password
+            .as_deref()
+            .filter(|p| !p.is_empty());
+        match (user, password) {
+            (None, None) => true,
+            (Some(u), Some(p)) => {
+                let Some(header) = auth_header else {
+                    return false;
+                };
+                let Some(encoded) = header
+                    .strip_prefix("Basic ")
+                    .or_else(|| header.strip_prefix("basic "))
+                    .map(str::trim)
+                else {
+                    return false;
+                };
+                let expected = encode_base64(format!("{u}:{p}").as_bytes());
+                let expected_digest = digest(&SHA256, expected.as_bytes());
+                let supplied_digest = digest(&SHA256, encoded.as_bytes());
+                bool::from(expected_digest.as_ref().ct_eq(supplied_digest.as_ref()))
+            }
+            // Fail closed if only one of username/password is configured.
+            _ => false,
+        }
+    }
+
     /// The model name of each player's ped, from `sixm_playerModel`.
     pub(crate) fn player_model(&self) -> &str {
         self.get(PLAYER_MODEL).unwrap_or(DEFAULT_PLAYER_MODEL)
@@ -583,6 +638,30 @@ impl Convars {
             .unwrap_or(DEFAULT_HITCH_WARNING_MS)
             .min(MAX_HITCH_WARNING_MS)
     }
+}
+
+fn encode_base64(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        let triple = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+        out.push(TABLE[((triple >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3f) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[((triple >> 6) & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(triple & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -804,8 +883,25 @@ mod tests {
             "sv_masterUrl",
             "sv_heartbeatInterval",
             "sv_stateBagStrictMode",
+            "sv_proxyIPRanges",
+            "sv_prometheusBasicAuthUser",
+            "sv_prometheusBasicAuthPassword",
         ] {
             assert!(Convars::is_console_only(protected), "{protected}");
         }
+        assert!(convars.check_prometheus_basic_auth(None));
+
+        convars.set(PROMETHEUS_BASIC_AUTH_USER, "prom", ConvarKind::Plain);
+        // Half-configured fails closed.
+        assert!(!convars.check_prometheus_basic_auth(None));
+        assert!(!convars.check_prometheus_basic_auth(Some("Basic cHJvbTo=")));
+
+        convars.set_prometheus_password("s3cr3t");
+        assert!(!convars.check_prometheus_basic_auth(None));
+        assert!(!convars.check_prometheus_basic_auth(Some("Bearer s3cr3t")));
+        assert!(!convars.check_prometheus_basic_auth(Some("Basic d3Jvbmc6d3Jvbmc=")));
+        // "prom:s3cr3t" -> cHJvbTpzM2NyM3Q=
+        assert!(convars.check_prometheus_basic_auth(Some("Basic cHJvbTpzM2NyM3Q=")));
+        assert!(convars.check_prometheus_basic_auth(Some("basic cHJvbTpzM2NyM3Q=")));
     }
 }

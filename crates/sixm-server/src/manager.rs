@@ -29,7 +29,9 @@ use tracing::{debug, error, info, warn};
 use crate::access::AccessStore;
 use crate::buckets::BucketSettings;
 use crate::commands::CommandSource;
-use crate::convars::{Convars, KVP_PATH, RCON_PASSWORD};
+use crate::convars::{
+    Convars, KVP_PATH, PROMETHEUS_BASIC_AUTH_PASSWORD, PROXY_IP_RANGES, RCON_PASSWORD,
+};
 use crate::entities::{EntityStore, EntityUpdate};
 use crate::filters::ChannelFilters;
 use crate::host_functions::{HostFunctions, is_host};
@@ -527,6 +529,15 @@ impl ResourceManager {
             self.convars.borrow_mut().set_rcon_password(value);
             return Ok(());
         }
+        if name.eq_ignore_ascii_case(PROMETHEUS_BASIC_AUTH_PASSWORD) {
+            if kind != ConvarKind::Plain {
+                return Err(ScriptError::Runtime(
+                    "use set for sv_prometheusBasicAuthPassword".to_owned(),
+                ));
+            }
+            self.convars.borrow_mut().set_prometheus_password(value);
+            return Ok(());
+        }
         let key = name.to_ascii_lowercase();
         if kind != ConvarKind::Plain && self.convars.borrow().is_restricted(&key) {
             return Err(ScriptError::Runtime(
@@ -538,6 +549,12 @@ impl ResourceManager {
         }
         let previous_value = self.convars.borrow().get(name).map(str::to_owned);
         let previous = self.convars.borrow_mut().set(name, value, kind);
+        if name.eq_ignore_ascii_case(PROXY_IP_RANGES) {
+            let invalid = self.network.trusted_proxies.parse_and_set(value);
+            for bad in invalid {
+                warn!("sv_proxyIPRanges: ignoring invalid CIDR `{bad}`");
+            }
+        }
         match (kind, previous) {
             (ConvarKind::Replicated, _) => self.broadcast_convar(&key, Some(value)),
             (_, Some(ConvarKind::Replicated)) => self.broadcast_convar(&key, None),

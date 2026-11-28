@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 
 use sixm_core::{ClientTarget, EventSource, FuncRef, PlayerInfo, ScriptError, Value};
 use sixm_net::{
-    ConnectionId, Fingerprint, NetError, NetEvent, NetServer, ServerConfig, Traffic, WebServer,
+    ConnectionId, Fingerprint, NetError, NetEvent, NetServer, ServerConfig, Traffic,
+    TrustedProxies, WebServer,
 };
 use tracing::{debug, error, info, warn};
 
@@ -305,6 +306,8 @@ pub(crate) struct Network {
     pub(crate) server: RefCell<Option<NetServer>>,
     /// The HTTP listener on the same address, while the network runs.
     pub(crate) web: RefCell<Option<WebServer>>,
+    /// Trusted proxy CIDRs synchronized from `sv_proxyIPRanges`.
+    pub(crate) trusted_proxies: TrustedProxies,
     pub(crate) players: RefCell<Players>,
     /// Kicks requested by `DropPlayer`, applied by [`ResourceManager::apply_drops`].
     pub(crate) pending_drops: RefCell<Vec<(u32, String, DropOrigin)>>,
@@ -327,15 +330,23 @@ impl ResourceManager {
                 "the network is already running".to_owned(),
             ));
         }
-        let (endpoint, server_name, identity, http_enabled) = {
+        let (endpoint, server_name, identity, http_enabled, proxy_ranges) = {
             let convars = self.convars.borrow();
             (
                 convars.endpoint().to_owned(),
                 convars.server_name().to_owned(),
                 convars.identity(),
                 convars.http_enabled(),
+                convars
+                    .get(crate::convars::PROXY_IP_RANGES)
+                    .unwrap_or_default()
+                    .to_owned(),
             )
         };
+        let invalid_cidrs = self.network.trusted_proxies.parse_and_set(&proxy_ranges);
+        for bad in invalid_cidrs {
+            warn!("sv_proxyIPRanges: ignoring invalid CIDR `{bad}`");
+        }
         let bind: SocketAddr = endpoint.parse().map_err(|_| {
             NetError::Config(format!(
                 "endpoint_add_udp `{endpoint}` is not an ip:port address"
@@ -368,7 +379,11 @@ impl ResourceManager {
                 0
             };
             loop {
-                let error = match WebServer::bind(server.local_addr(), on_web.clone()) {
+                let error = match WebServer::bind_with_proxies(
+                    server.local_addr(),
+                    self.network.trusted_proxies.clone(),
+                    on_web.clone(),
+                ) {
                     Ok(web) => break Some(web),
                     Err(error) => error,
                 };

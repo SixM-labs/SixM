@@ -146,7 +146,7 @@ impl ResourceManager {
     pub(crate) fn handle_web(&self, exchange: WebExchange) {
         let WebExchange { request, responder } = exchange;
         if request.path == "/rcon" {
-            let response = self.handle_rcon(&request, responder.peer_ip());
+            let response = self.handle_rcon(&request, responder.client_ip());
             responder.respond(response);
             return;
         }
@@ -351,12 +351,35 @@ impl ResourceManager {
 
     /// `GET /metrics`: Prometheus text format when `sv_metricsEnabled` is on.
     fn handle_metrics(&self, request: &WebRequest) -> WebResponse {
-        if !self.convars.borrow().metrics_enabled() {
+        let convars = self.convars.borrow();
+        if !convars.metrics_enabled() {
             return text(404, "Not Found");
         }
         if !is_get_or_head(&request.method) {
             return method_not_allowed("GET, HEAD");
         }
+        let auth_header = request
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+            .map(|(_, v)| v.as_str());
+        if !convars.check_prometheus_basic_auth(auth_header) {
+            return WebResponse {
+                status: 401,
+                headers: vec![
+                    (
+                        "www-authenticate".to_owned(),
+                        "Basic realm=\"SixM Metrics\"".to_owned(),
+                    ),
+                    (
+                        "content-type".to_owned(),
+                        "text/plain; charset=utf-8".to_owned(),
+                    ),
+                ],
+                body: b"Unauthorized".to_vec(),
+            };
+        }
+        drop(convars);
         let players_connected = self.player_ids().len();
         let players_max = self.convars.borrow().max_clients();
         let resources_running = self.running_resources().len();
@@ -491,7 +514,7 @@ impl ResourceManager {
     }
 
     /// `POST /rcon`: authenticates with `rcon_password` and runs one console command.
-    fn handle_rcon(&self, request: &WebRequest, peer_ip: IpAddr) -> WebResponse {
+    fn handle_rcon(&self, request: &WebRequest, client_ip: IpAddr) -> WebResponse {
         if request.method != "POST" {
             return WebResponse {
                 status: 405,
@@ -510,7 +533,8 @@ impl ResourceManager {
             return text(403, "RCON is disabled");
         };
         let now = Instant::now();
-        if self.web.rcon_guard.borrow_mut().is_locked(peer_ip, now) {
+        if self.web.rcon_guard.borrow_mut().is_locked(client_ip, now) {
+            warn!("locked out RCON requests from ip:{client_ip}");
             return text(429, "Too many failed RCON attempts");
         }
         let Some((supplied, command)) = parse_rcon_payload(request) else {
@@ -521,14 +545,15 @@ impl ResourceManager {
         };
         let supplied = digest(&SHA256, supplied.as_bytes());
         if !bool::from(expected.as_ref().ct_eq(supplied.as_ref())) {
+            tracing::debug!("rejected unauthorized RCON attempt from ip:{client_ip}");
             self.web
                 .rcon_guard
                 .borrow_mut()
-                .record_failure(peer_ip, now);
+                .record_failure(client_ip, now);
             return text(401, "Unauthorized");
         }
         drop(convars);
-        self.web.rcon_guard.borrow_mut().reset(peer_ip);
+        self.web.rcon_guard.borrow_mut().reset(client_ip);
 
         let output = capture_logs(self.channel_filters(), || {
             commands::run_line(self, &command, &CommandContext::new(CommandSource::Console));

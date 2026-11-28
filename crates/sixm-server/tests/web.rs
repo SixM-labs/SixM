@@ -519,3 +519,126 @@ fn master_heartbeat_posts_info_and_dynamic_to_configured_url() {
     );
     assert_eq!(body["dynamic"]["hostname"], "SixM Server");
 }
+
+#[test]
+fn proxy_ip_ranges_governs_forwarded_rate_limits_and_rcon_attribution() {
+    let lb = started();
+
+    // Without sv_proxyIPRanges, X-Forwarded-For from 127.0.0.1 is ignored and rate limit is shared.
+    let mut saw_429 = false;
+    for i in 1..=80 {
+        let req = format!(
+            "GET /dynamic.json HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 203.0.113.{i}\r\n\r\n"
+        );
+        if send(&lb, req.into_bytes()).status == 429 {
+            saw_429 = true;
+            break;
+        }
+    }
+    assert!(saw_429, "spoofed XFF should not bypass peer rate limit");
+
+    // Trust loopback proxy on a fresh listener: rate limits and RCON lockout isolate by forwarded IP.
+    let lb2 = started();
+    lb2.fx
+        .server
+        .execute("set sv_proxyIPRanges \"127.0.0.1/32\"");
+    lb2.fx.server.execute("set rcon_password super-secret-pw");
+
+    let mut exhausted = false;
+    for _ in 0..80 {
+        let req = b"GET /dynamic.json HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 203.0.113.10\r\n\r\n".to_vec();
+        if send(&lb2, req).status == 429 {
+            exhausted = true;
+            break;
+        }
+    }
+    assert!(exhausted, "203.0.113.10 should hit its own rate limit");
+    let other_client = send(
+        &lb2,
+        b"GET /dynamic.json HTTP/1.1\r\nHost: localhost\r\nX-Real-IP: 203.0.113.11\r\n\r\n"
+            .to_vec(),
+    );
+    assert_eq!(other_client.status, 200);
+
+    let rcon_req = |xff: &str, body: &str| {
+        format!(
+            "POST /rcon HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: {xff}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    };
+
+    // 5 failed RCON attempts lock out forwarded 198.51.100.10 without blocking 198.51.100.11.
+    for _ in 0..5 {
+        let bad = send(
+            &lb2,
+            rcon_req("198.51.100.10", r#"{"password":"wrong","command":"perf"}"#),
+        );
+        assert_eq!(bad.status, 401);
+    }
+    let locked = send(
+        &lb2,
+        rcon_req(
+            "198.51.100.10",
+            r#"{"password":"super-secret-pw","command":"perf"}"#,
+        ),
+    );
+    assert_eq!(locked.status, 429);
+
+    let isolated = send(
+        &lb2,
+        rcon_req(
+            "198.51.100.11",
+            r#"{"password":"super-secret-pw","command":"perf"}"#,
+        ),
+    );
+    assert_eq!(isolated.status, 200);
+}
+
+#[test]
+fn metrics_enforces_basic_auth_and_hides_password_from_scripts() {
+    let lb = started();
+    lb.fx.server.execute("set sv_metricsEnabled true");
+
+    // Half-configured user without password fails closed (`401`).
+    lb.fx.server.execute("set sv_prometheusBasicAuthUser prom");
+    let half = get(&lb, "/metrics");
+    assert_eq!(half.status, 401);
+    assert!(
+        half.head
+            .to_ascii_lowercase()
+            .contains("www-authenticate: basic realm=\"sixm metrics\""),
+        "head: {}",
+        half.head
+    );
+
+    lb.fx
+        .server
+        .execute("set sv_prometheusBasicAuthPassword prom-pw");
+    assert_eq!(get(&lb, "/metrics").status, 401);
+
+    let wrong = send(
+        &lb,
+        b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YmFkOmJhZA==\r\n\r\n"
+            .to_vec(),
+    );
+    assert_eq!(wrong.status, 401);
+
+    // "prom:prom-pw" in base64 is "cHJvbTpwcm9tLXB3".
+    let ok = send(
+        &lb,
+        b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic cHJvbTpwcm9tLXB3\r\n\r\n"
+            .to_vec(),
+    );
+    assert_eq!(ok.status, 200);
+    assert!(ok.text().contains("sixm_players_connected"));
+
+    // Script cannot inspect or alter console-only Prometheus Basic Auth convars.
+    assert_eq!(
+        lb.fx
+            .server
+            .manager()
+            .convar("sv_prometheusBasicAuthPassword"),
+        None
+    );
+}

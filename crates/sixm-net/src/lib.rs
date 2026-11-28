@@ -51,4 +51,4 @@ pub use protocol::{
 };
 pub use server::{ConnectionId, NetEvent, NetServer, ServerConfig};
 pub use traffic::Traffic;
-pub use web::{WebExchange, WebResponder, WebServer};
+pub use web::{IpCidr, TrustedProxies, WebExchange, WebResponder, WebServer};

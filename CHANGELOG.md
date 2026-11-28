@@ -17,6 +17,10 @@ may change the protocol and the API.
   `con_addChannelFilter <channel> <print|none>`, and
   `con_removeChannelFilter <channel>`, backed by `ChannelFilters` (`Server::with_channel_filters`,
   `Server::channel_filters`) across process logs and `POST /rcon`.
+- Proxy and metrics hardening: `sv_proxyIPRanges` (`IpCidr` / `TrustedProxies`)
+  for trusted `X-Forwarded-For` / `X-Real-IP` HTTP client attribution across
+  HTTP rate limits and RCON lockouts, and constant-time Basic Auth on `/metrics`
+  via `sv_prometheusBasicAuthUser` / `sv_prometheusBasicAuthPassword`.
 - Live resource monitor: allocation-free 60-frame `ResourceMonitor` ring buffers,
   `ScriptRuntime::memory_bytes` / `handled_events`, `resmon` console command,
   `/resmon.json` and `/admin` live Resource Monitor table, plus configurable frame

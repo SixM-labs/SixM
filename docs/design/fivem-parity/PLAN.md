@@ -304,7 +304,7 @@ equivalent / no effect / absent".
 | D1 | done | Gemini (Flash impl, Pro review) | `git log --grep "^D1:"` |
 | D2 | done | Gemini (Flash impl, Pro review) | `git log --grep "^D2:"` |
 | D3 | done | Gemini | `git log --grep "^D3:"` |
-| D4 | todo | | |
+| D4 | done | Gemini | `git log --grep "^D4:"` |
 | D5 | todo | | |
 | D6 | todo | | |
 | D7 | todo | | |
@@ -434,3 +434,9 @@ what is next, anything surprising.
   `handled_events` for Lua/JS, `resmon` console command, `sixm_hitchWarningMs`
   frame warnings, and `/resmon.json` + `/admin` panel, with full checks green.
   Next: D4 (`sv_proxyIPRanges` & `/metrics` Basic Auth).
+- 2026-11-28, Gemini, `feat/fivem-parity-d`: `D4: proxy IP ranges and metrics
+  hardening` follows fe35e4d. Added pure-Rust `IpCidr` and `TrustedProxies`
+  (`sv_proxyIPRanges`) in `sixm-net` honoring rightmost untrusted `X-Forwarded-For`
+  / `X-Real-IP` hops across HTTP rate limiting and RCON lockout, plus console-only
+  `sv_prometheusBasicAuthUser` / `sv_prometheusBasicAuthPassword` protecting
+  `/metrics`, with full checks green. Next: D5 (`deferrals.presentCard`).
