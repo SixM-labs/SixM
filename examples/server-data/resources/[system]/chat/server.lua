@@ -60,10 +60,3 @@ RegisterNetEvent('chat:init', function()
     end
     TriggerClientEvent('chat:addSuggestions', player, suggestions)
 end)
-
-RegisterCommand('say', function(player, args)
-    local text = table.concat(args, ' ')
-    SetTimeout(0, function()
-        send_message(player, text)
-    end)
-end, true)

@@ -669,7 +669,7 @@ impl ResourceManager {
             .collect()
     }
 
-    fn ensure_scanned(&self) {
+    pub(crate) fn ensure_scanned(&self) {
         if !self.scanned.get() {
             self.refresh();
         }

@@ -301,7 +301,7 @@ equivalent / no effect / absent".
 | C1 | done | Gemini (Flash impl, Pro review) | `git log --grep "^C1:"` |
 | C2 | done | Gemini (Flash impl, Pro review) | `git log --grep "^C2:"` |
 | C3 | done | Gemini | `git log --grep "^C3:"` |
-| D1 | todo | | |
+| D1 | done | Gemini (Flash impl, Pro review) | `git log --grep "^D1:"` |
 | D2 | todo | | |
 | D3 | todo | | |
 | D4 | todo | | |
@@ -416,3 +416,9 @@ what is next, anything surprising.
   `fuzz` locked check), pushed `feat/fivem-parity-c`, and opened the Phase C
   PR to `main`. Windows CI is verified via GitHub Actions on the PR before
   merging. Next: Phase D (`feat/fivem-parity-d`) after PR merge.
+- 2026-11-28, Gemini, `feat/fivem-parity-d`: Phase C merged as 40aa71f
+  ([PR #27](https://github.com/SixM-labs/SixM/pull/27)) after green Linux and
+  Windows CI. `D1: operator console commands and @resource exec` implements
+  `status`, `clientkick`, built-in `say` (via the `chat` contract when running,
+  else log), `cmdlist`, and `exec @resource/file.cfg`, with full checks green.
+  Next: D2 (console channel filters).

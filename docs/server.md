@@ -62,8 +62,11 @@ the same for `exec`, `+commands` and stdin:
 - `#` or `//` outside quotes starts a comment to the end of the line.
 - An unclosed quote is an error for that line. The rest of the file still runs.
 
-`exec <file>` runs a file. The path is relative to the working directory.
-Files can include other files. Nesting stops at 16 levels.
+`exec <file>` runs a file. The path is relative to the working directory, or
+`@<resource>/<path>` (including `provide` aliases) to read a file inside an
+installed resource directory safely (rejecting symlinks, path traversal, and
+invalid filenames). Files can include other files, preserving the caller's
+permissions. Nesting stops at 16 levels.
 
 Example from `examples/server-data/server.cfg`:
 
@@ -108,6 +111,9 @@ same name is never reached.
 | `perf` | Prints the frame times of the last 1200 frames: count, average, p50, p99 and max, in milliseconds. Then the tick rate and the budget per frame, the players, entities and running resources, and the network rate in KiB/s and frames/s since the previous `perf` call, or since the server started. See [Load testing](#load-testing). |
 | `profiler <record [frames] \| stop \| status \| saveJSON <path>>` | Captures `ServerTick` and per-resource tick durations. See [Frame profiling](#frame-profiling). |
 | `players` | Lists connected players with their id, name, `license` identifier and endpoint. |
+| `status` | Prints the server name, running/installed resource counts, connected/max player counts, and each connected player's id, name, ping, identifiers, and endpoint. |
+| `clientkick <id> [reason]` | Kicks connected player `<id>` with `[reason]` (default `Kicked from server`). Reports `clientDropReason` `1` (with the calling resource name) when invoked by a resource and `2` when invoked by the console or a player. |
+| `say <text>` | Sends a chat message (up to 256 bytes after trimming and replacing control characters with spaces) as `Console` (for console or resource callers) or the calling player's name. When `chat` is started, dispatches local cancelable `chatMessage(player, author, message)` and broadcasts `chat:addMessage`; otherwise logs the message. |
 | `entities` | Lists every entity with its id, kind, model hash, position and heading. |
 | `state [bag]` | Without a name, lists the state bags. With a name, prints the bag's keys and values. Replicated keys are marked. |
 | `set <name> <value>` | Stores a plain convar. The value is the rest of the line, joined with single spaces. See [Convars](#convars). |
@@ -116,7 +122,8 @@ same name is never reached.
 | `add_convar_permission <resource> read <name>` | Grants read access to a plain server convar. See [Private convar readers](#private-convar-readers). |
 | `remove_convar_permission <resource> read <name>` | Revokes `<resource>`'s read access to a restricted convar. When the last reader is removed, the convar becomes readable by every resource again. |
 | `list_convar_permissions` | Lists every private convar reader entry (`console` only). |
-| `exec <file>` | Runs each line of the file. See above. |
+| `exec <file>` | Runs each line of `<file>` (relative to the working directory) or `@<resource>/<path>` inside an installed resource. See above. |
+| `cmdlist` | Lists every built-in command and registered script command in sorted order (marking restricted script commands). |
 | `help` | Lists the built-in commands and the script commands. Restricted commands are marked. |
 | `quit [reason]` | Asks the server to stop. The reason is written to the log. |
 | `add_ace <principal> <object> <allow\|deny>` | Sets the entry of a principal for an object. An earlier entry for the same pair is replaced. See [Permissions](#permissions). |

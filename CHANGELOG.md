@@ -9,6 +9,10 @@ may change the protocol and the API.
 
 ### Added
 
+- Built-in operator console commands `status`, `clientkick <id> [reason]`,
+  `say <text>` (integrating with `[system]/chat` when started and logging
+  directly otherwise), `cmdlist`, and resource-relative `exec @resource/file.cfg`
+  (supporting `provide` aliases and rejecting symlinks and path traversal).
 - Stock `[system]/chat` resource with the FiveM chat event names, a cancelable
   server message pipeline, command suggestions, and headless client `say`.
 - Clean-room stock `[system]/mapmanager`: scalar `resource_type` metadata,
@@ -61,6 +65,9 @@ may change the protocol and the API.
 
 ### Changed
 
+- Moved server `say` from `[system]/chat` into a built-in server command
+  (`command.say` ACE still governs player and resource callers;
+  `GetRegisteredCommands()` / `chat:init` still advertises `/say`).
 - `baseevents` registers the FiveM channel names (`enteringVehicle`,
   `enteringAborted`, `enteredVehicle`, `leftVehicle`, `onPlayerKilled`,
   `onPlayerWasted`, `onPlayerDied`); `onPlayerEnteredVehicle` and

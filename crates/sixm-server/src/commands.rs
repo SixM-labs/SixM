@@ -12,13 +12,17 @@ use std::path::Path;
 use std::time::Instant;
 use std::{fs, io};
 
-use sixm_core::{ConvarKind, Host, ResourceName, Value, normalize_resource_path};
+use sixm_core::{
+    ClientTarget, ConvarKind, EventSource, Host, ResourceDirectory, ResourceName, ResourceState,
+    Value, normalize_resource_path,
+};
 use tracing::{debug, error, info, warn};
 
 use crate::access::Permission;
 use crate::config::tokenize;
 use crate::convars::{Convars, ENDPOINT};
 use crate::manager::{ManagerError, ResourceManager};
+use crate::network::{DROP_SCRIPT, DROP_SERVER, DropOrigin};
 use crate::perf::{format_millis, per_second};
 
 /// Deepest `exec` nesting. A file that includes itself stops here.
@@ -26,15 +30,17 @@ const MAX_EXEC_DEPTH: usize = 16;
 /// Maximum commands drained per console line, input, or frame.
 const MAX_QUEUED_COMMANDS: usize = 1000;
 
-/// Built-in command names, as listed by `help`.
-pub(crate) const BUILT_IN: [&str; 29] = [
+/// Built-in command names, as listed by `help` and `cmdlist`.
+pub(crate) const BUILT_IN: [&str; 33] = [
     "add_ace",
     "add_convar_permission",
     "add_principal",
+    "clientkick",
+    "cmdlist",
     "endpoint_add_tcp",
     "endpoint_add_udp",
-    "entities",
     "ensure",
+    "entities",
     "exec",
     "help",
     "list_aces",
@@ -49,11 +55,13 @@ pub(crate) const BUILT_IN: [&str; 29] = [
     "remove_convar_permission",
     "remove_principal",
     "restart",
+    "say",
     "set",
     "setr",
     "sets",
     "start",
     "state",
+    "status",
     "stop",
     "test_ace",
     "watch_resources",
@@ -175,6 +183,10 @@ pub(crate) fn run_words(
         "perf" => perf(manager, args),
         "profiler" => profiler(manager, args),
         "players" => players(manager),
+        "status" => status(manager, args),
+        "clientkick" => clientkick(manager, args, &context.source),
+        "say" => say(manager, args, &context.source),
+        "cmdlist" => cmdlist(manager, args),
         "entities" => entities(manager),
         "state" => state(manager, args),
         "quit" => quit(manager, args),
@@ -455,6 +467,147 @@ fn players(manager: &ResourceManager) {
     }
 }
 
+/// `status`: prints the server summary and each connected player with id, name,
+/// round-trip ping, identifiers, and endpoint.
+fn status(manager: &ResourceManager, args: &[String]) {
+    if !args.is_empty() {
+        warn!("usage: status");
+        return;
+    }
+    let (server_name, max_clients) = {
+        let convars = manager.convars.borrow();
+        (convars.server_name().to_owned(), convars.max_clients())
+    };
+    let running = manager.running_resources().len();
+    let total = manager.resource_names().len();
+    let players = manager.player_list();
+    info!(
+        "server: {server_name}, resources: {running}/{total}, players: {}/{max_clients}",
+        players.len()
+    );
+    for (id, player) in players {
+        let ping = manager
+            .player_round_trip(id)
+            .map_or_else(|| "-".to_owned(), |rtt| format!("{} ms", rtt.as_millis()));
+        let identifiers = manager.identifiers_of(id).join(", ");
+        info!(
+            "{id:>5}  {}  ping {ping}  {identifiers}  {}",
+            player.name, player.endpoint
+        );
+    }
+}
+
+/// `clientkick <id> [reason]`: kicks a connected player with an optional reason.
+fn clientkick(manager: &ResourceManager, args: &[String], source: &CommandSource) {
+    let Some((id_arg, rest)) = args.split_first() else {
+        warn!("usage: clientkick <id> [reason]");
+        return;
+    };
+    let Ok(id) = id_arg.parse::<u32>() else {
+        warn!("usage: clientkick <id> [reason]");
+        return;
+    };
+    if id == 0 {
+        warn!("usage: clientkick <id> [reason]");
+        return;
+    }
+    if !manager.player_ids().contains(&id) || manager.player_details(id).is_none() {
+        warn!("clientkick: unknown player {id}");
+        return;
+    }
+    let reason = if rest.is_empty() {
+        "Kicked from server".to_owned()
+    } else {
+        rest.join(" ")
+    };
+    let origin = match source {
+        CommandSource::Resource(resource) => DropOrigin {
+            resource: resource.to_string(),
+            code: DROP_SCRIPT,
+        },
+        CommandSource::Console | CommandSource::Player(_) => DropOrigin {
+            resource: String::new(),
+            code: DROP_SERVER,
+        },
+    };
+    manager.queue_drop(id, &reason, origin);
+    info!("kicking player {id}: {reason}");
+}
+
+/// `say <text>`: sends a chat message as `Console` or the calling player.
+fn say(manager: &ResourceManager, args: &[String], source: &CommandSource) {
+    let joined = args.join(" ");
+    let cleaned = clean_control_chars(&joined);
+    let message = cleaned.trim();
+    if message.is_empty() {
+        warn!("usage: say <text>");
+        return;
+    }
+    if message.len() > 256 {
+        warn!("say: message exceeds 256 bytes");
+        return;
+    }
+    let (player, author) = match source {
+        CommandSource::Console | CommandSource::Resource(_) => (0_i64, "Console".to_owned()),
+        CommandSource::Player(id) => {
+            let Some(details) = manager.player_details(*id) else {
+                return;
+            };
+            (i64::from(*id), clean_control_chars(&details.name))
+        }
+    };
+    if manager.resource_state("chat") == ResourceState::Started {
+        let canceled = manager.dispatch(
+            "chatMessage",
+            EventSource::Local,
+            &[
+                Value::Int(player),
+                Value::from(author.as_str()),
+                Value::from(message),
+            ],
+        );
+        if canceled {
+            return;
+        }
+        info!("{author}: {message}");
+        let payload = Value::Map(vec![(
+            Value::from("args"),
+            Value::Array(vec![Value::from(author.as_str()), Value::from(message)]),
+        )]);
+        if let Err(err) =
+            manager.send_client_event("chat:addMessage", ClientTarget::All, &[payload])
+        {
+            warn!("say: failed to broadcast chat:addMessage: {err}");
+        }
+    } else {
+        info!("{author}: {message}");
+    }
+}
+
+fn clean_control_chars(text: &str) -> String {
+    text.chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect()
+}
+
+/// `cmdlist`: lists all built-in and registered script commands in sorted order.
+fn cmdlist(manager: &ResourceManager, args: &[String]) {
+    if !args.is_empty() {
+        warn!("usage: cmdlist");
+        return;
+    }
+    for name in BUILT_IN {
+        info!("{name}");
+    }
+    for (name, restricted) in manager.script_commands() {
+        if restricted {
+            info!("{name} (restricted)");
+        } else {
+            info!("{name}");
+        }
+    }
+}
+
 /// `perf`: prints the frame times of the recent frames against the tick budget,
 /// the load, and the network rates since the previous `perf` call, or since the
 /// server started.
@@ -698,7 +851,8 @@ fn quit(manager: &ResourceManager, args: &[String]) {
 }
 
 /// `exec <file>`: runs each line of a file, as the source that runs `exec`. The
-/// path is relative to the working directory.
+/// path is relative to the working directory, or `@<resource>/<path>` inside
+/// an installed resource directory.
 fn exec(manager: &ResourceManager, args: &[String], context: &CommandContext) {
     let Some(file) = args.first() else {
         warn!("usage: exec <file>");
@@ -708,12 +862,8 @@ fn exec(manager: &ResourceManager, args: &[String], context: &CommandContext) {
         error!("exec {file}: files are nested more than {MAX_EXEC_DEPTH} levels deep");
         return;
     }
-    let bytes = match fs::read(file) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            error!("exec {file}: {err}");
-            return;
-        }
+    let Some(bytes) = read_exec_file(manager, file) else {
+        return;
     };
     let text = String::from_utf8_lossy(&bytes);
     for (index, line) in text.lines().enumerate() {
@@ -723,6 +873,51 @@ fn exec(manager: &ResourceManager, args: &[String], context: &CommandContext) {
         match tokenize(line) {
             Ok(words) => run_words(manager, &words, line.trim(), &context.nested()),
             Err(err) => warn!("{file}:{}: {err}", index + 1),
+        }
+    }
+}
+
+fn read_exec_file(manager: &ResourceManager, file: &str) -> Option<Vec<u8>> {
+    if let Some(spec) = file.strip_prefix('@') {
+        let Some(sep) = spec.find(['/', '\\']) else {
+            error!("exec {file}: expected @<resource>/<path>");
+            return None;
+        };
+        let resource = &spec[..sep];
+        let rel_raw = &spec[sep + 1..];
+        if resource.is_empty() || rel_raw.is_empty() {
+            error!("exec {file}: expected @<resource>/<path>");
+            return None;
+        }
+        let Some(normalized) = normalize_resource_path(rel_raw) else {
+            error!("exec {file}: invalid resource path `{rel_raw}`");
+            return None;
+        };
+        manager.ensure_scanned();
+        let Some(dir) = manager.resource_path(resource) else {
+            error!("exec {file}: unknown resource `{resource}`");
+            return None;
+        };
+        let directory = match ResourceDirectory::open(&dir) {
+            Ok(directory) => directory,
+            Err(err) => {
+                error!("exec {file}: {err}");
+                return None;
+            }
+        };
+        return match directory.read(&normalized) {
+            Ok(bytes) => Some(bytes),
+            Err(err) => {
+                error!("exec {file}: {err}");
+                None
+            }
+        };
+    }
+    match fs::read(file) {
+        Ok(bytes) => Some(bytes),
+        Err(err) => {
+            error!("exec {file}: {err}");
+            None
         }
     }
 }
@@ -876,4 +1071,15 @@ fn test_ace(manager: &ResourceManager, args: &[String]) {
         "denied"
     };
     info!("{principal} is {verdict} {object}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BUILT_IN;
+
+    #[test]
+    fn built_in_list_is_sorted_and_unique() {
+        assert_eq!(BUILT_IN.len(), 33);
+        assert!(BUILT_IN.windows(2).all(|pair| pair[0] < pair[1]));
+    }
 }
