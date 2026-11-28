@@ -191,11 +191,7 @@ fn bag_delete<'js>(target: ProxyTarget<'js>, prop: ProxyProperty<'js>) -> rquick
     };
     let (bag, weak) = bag_target(&target, &ctx)?;
     let rt = JsRuntime::upgrade(&ctx, &weak)?;
-    let prev_skip = rt.skip_self_state.replace(true);
-    let outcome = rt.host(&ctx)?.state_set(&bag, &key, Value::Nil, true);
-    rt.skip_self_state.set(prev_skip);
-    outcome.map_err(|err| Exception::throw_message(&ctx, &err.to_string()))?;
-    rt.dispatch_state_change_in_ctx(&ctx, &bag, &key, &Value::Nil, true);
+    apply_state(&rt, &ctx, &bag, &key, &Value::Nil, true)?;
     Ok(true)
 }
 
@@ -280,8 +276,9 @@ fn apply_state(
     val: &Value,
     replicated: bool,
 ) -> rquickjs::Result<()> {
+    let host = rt.host(ctx)?;
     let prev_skip = rt.skip_self_state.replace(true);
-    let outcome = rt.host(ctx)?.state_set(bag, key, val.clone(), replicated);
+    let outcome = host.state_set(bag, key, val.clone(), replicated);
     rt.skip_self_state.set(prev_skip);
     outcome.map_err(|err| Exception::throw_message(ctx, &err.to_string()))?;
     rt.dispatch_state_change_in_ctx(ctx, bag, key, val, replicated);

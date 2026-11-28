@@ -299,7 +299,7 @@ equivalent / no effect / absent".
 | B3 | done | ChatGPT (Luna impl, Terra review), Gemini (Flash fixes, Pro review) | `git log --grep "^B3:"` |
 | B4 | done | ChatGPT (Luna draft), Gemini (wrap-up) | `git log --grep "^B4:"` |
 | C1 | done | Gemini (Flash impl, Pro review) | `git log --grep "^C1:"` |
-| C2 | todo | | |
+| C2 | done | Gemini (Flash impl, Pro review) | `git log --grep "^C2:"` |
 | C3 | todo | | |
 | D1 | todo | | |
 | D2 | todo | | |
@@ -404,3 +404,8 @@ what is next, anything surprising.
   (`ClientMessage::SetStateBag`), `fuzz/fuzz_targets/set_state_bag.rs`,
   `sv_stateBagStrictMode`, shared `sv_playerEventRateLimit` enforcement,
   ownership checks, and non-echoing relay. Next: C2 (script side).
+- 2026-11-28, Gemini, `feat/fivem-parity-c`: `C2: client script replicated state
+  bags` follows 24d96e2. Enabled client replicated writes on `LocalPlayer.state`,
+  owned `Entity(id).state`, and `SetStateBagValue` in `ClientRuntime::state_set`,
+  added Lua/JS loopback tests (including scoping and mid-life ownership
+  transfer), and updated docs/types. Next: C3 wrap-up and PR.

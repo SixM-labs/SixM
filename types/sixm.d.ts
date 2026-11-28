@@ -406,7 +406,10 @@ type SpawnManagerExports = {
 // =============================================================================
 
 interface StateBag {
-    /** Explicitly writes `value` to `key` (`replicated` defaults to `true`). */
+    /**
+     * Explicitly writes `value` to `key` (`replicated` defaults to `true`).
+     * On a client, `replicated = true` is allowed only on `LocalPlayer.state` and owned `Entity(id).state`.
+     */
     set(key: string, value: unknown, replicated?: boolean): void;
     /** Explicitly reads the value stored under `key`. */
     get(key: string): unknown;

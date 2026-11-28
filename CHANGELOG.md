@@ -49,12 +49,15 @@ may change the protocol and the API.
   `onResourceListRefresh`; `playerJoining` gets `oldID`, `playerDropped` gets
   `resourceName` and `clientDropReason`.
 - Client-written state bags (wire protocol 15, `ClientMessage::SetStateBag`):
-  clients can write replicated keys on their own `player:<id>` bag and owned
-  `entity:<id>` bags (`NetClient::send_state`), subject to key/value/frame
-  limits, ownership, the `sv_stateBagStrictMode` console-only convar (default
-  `false`), and the token-bucket rate limit shared with
-  `sv_playerEventRateLimit`, with server change handlers and non-echoing relay
-  (`NetServer::broadcast_encoded_except`). Plus the `set_state_bag` fuzz target.
+  clients can write replicated keys on `LocalPlayer.state` (`player:<id>`),
+  owned `Entity(id).state` (`entity:<id>`), and via `SetStateBagValue` in Lua
+  and JavaScript (as well as `NetClient::send_state`), updating the local
+  mirror immediately, firing local change handlers once (`replicated = true`),
+  and relaying through the server subject to key/value/frame limits, ownership,
+  the `sv_stateBagStrictMode` console-only convar (default `false`), and the
+  token-bucket rate limit shared with `sv_playerEventRateLimit`, with server
+  change handlers and non-echoing relay (`NetServer::broadcast_encoded_except`).
+  Plus the `set_state_bag` fuzz target.
 
 ### Changed
 

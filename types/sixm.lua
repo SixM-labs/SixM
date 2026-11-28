@@ -784,7 +784,7 @@ function PlayerPedId() end
 local StateBag = {}
 
 --- Writes `value` to `key` in this state bag. `replicated` defaults to `true`.
---- Clients cannot write with `replicated = true`.
+--- On a client, `replicated = true` is allowed only on `LocalPlayer.state` and owned `Entity(id).state`.
 ---@param key string
 ---@param value any
 ---@param replicated? boolean

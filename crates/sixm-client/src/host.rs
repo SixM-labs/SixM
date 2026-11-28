@@ -241,8 +241,8 @@ impl Host for ClientRuntime {
             .collect()
     }
 
-    /// Writes local state. Replicated state belongs to the server, so a
-    /// replicated write is refused here.
+    /// Writes local state, or sends a replicated write for the local player's
+    /// bag or an owned entity bag to the server before applying it locally.
     fn state_set(
         &self,
         bag: &str,
@@ -250,24 +250,42 @@ impl Host for ClientRuntime {
         value: Value,
         replicated: bool,
     ) -> Result<(), ScriptError> {
-        if replicated {
-            return Err(ScriptError::Runtime(
-                "clients cannot write replicated state".to_owned(),
-            ));
-        }
         validate_key(key)?;
         if value.contains_func_ref() {
             return Err(ScriptError::Runtime(
                 "state values cannot contain functions".to_owned(),
             ));
         }
-        if !self.bag_exists(bag) {
+        if replicated {
+            let owned = player_of_bag(bag) == Some(self.local_player)
+                || entity_of_bag(bag).is_some_and(|entity| {
+                    self.entities
+                        .borrow()
+                        .get(&entity)
+                        .is_some_and(|slot| slot.info.owner == Some(self.local_player))
+                });
+            if !owned {
+                if !self.bag_exists(bag) {
+                    return Err(ScriptError::Runtime(format!(
+                        "state bag `{bag}` does not exist"
+                    )));
+                }
+                return Err(ScriptError::Runtime(
+                    "clients can only write replicated state to their own player or owned entities"
+                        .to_owned(),
+                ));
+            }
+            self.client
+                .borrow()
+                .send_state(bag, key, &value)
+                .map_err(|err| ScriptError::Runtime(err.to_string()))?;
+        } else if !self.bag_exists(bag) {
             return Err(ScriptError::Runtime(format!(
                 "state bag `{bag}` does not exist"
             )));
         }
         self.state.borrow_mut().apply(bag, key, &value);
-        self.deliver_state(bag, key, &value, false);
+        self.deliver_state(bag, key, &value, replicated);
         Ok(())
     }
 

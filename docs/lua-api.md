@@ -550,7 +550,7 @@ client: the first is `0`, the second is the server id.
 | `GetStateBagValue` | both | `GetStateBagValue(bagName, key)`. Returns the value, or `nil` when the bag or the key is not set. Bag names are `global`, `player:<id>` and `entity:<id>`. |
 | `StateBagHasKey` | both | `StateBagHasKey(bagName, key)`. Returns a boolean. A key set to `nil` is deleted, so it is `false`. |
 | `GetStateBagKeys` | both | `GetStateBagKeys(bagName)`. Returns the key names sorted ascending, `{}` for a bag without keys, and `nil` for a bag that does not exist. |
-| `SetStateBagValue` | both | `SetStateBagValue(bagName, key, value [, replicated])`. Same semantics as `bag:set`, except that `replicated` defaults to `false`. On a client, `replicated = true` fails with `clients cannot write replicated state`. The FiveM form `SetStateBagValue(bagName, key, valueData, valueLength, replicated)` takes msgpack bytes (a string from `msgpack.pack`), decodes only the first `valueLength` bytes and stores the result. It fails with `valueLength exceeds data` when the length is longer than the data, and with the decoder error for malformed bytes. |
+| `SetStateBagValue` | both | `SetStateBagValue(bagName, key, value [, replicated])`. Same semantics as `bag:set`, except that `replicated` defaults to `false`. On a client, `replicated = true` is allowed only on the local player's bag (`player:<id>`) and entities owned by the local client. The FiveM form `SetStateBagValue(bagName, key, valueData, valueLength, replicated)` takes msgpack bytes (a string from `msgpack.pack`), decodes only the first `valueLength` bytes and stores the result. It fails with `valueLength exceeds data` when the length is longer than the data, and with the decoder error for malformed bytes. |
 | `EnsureEntityStateBag` | both | `EnsureEntityStateBag(entity)`. Does nothing and never fails: an entity's bag exists for the whole life of the entity. Kept for FiveM compatibility. |
 | `Player(id).state` | server | A player's state bag. See above. |
 | `LocalPlayer.state` | client | The local player's state bag. |
@@ -572,8 +572,12 @@ Behaviour:
   load, so it runs no handlers.
 - `set` is a method name, so a key called `set` can be written but reads back
   the method. Choose another key name.
-- On a client, a replicated write raises the error "clients cannot write
-  replicated state". A non-replicated write is kept on the client only.
+- On a client, a replicated write is allowed on `LocalPlayer.state` and on
+  `Entity(id).state` for entities owned by the local client; replicated writes
+  to `GlobalState`, other players' bags, or unowned entities raise an error.
+  The server validates ownership, rate limits, and `sv_stateBagStrictMode`
+  (when enabled, the server ignores client writes). A non-replicated write
+  (`replicated = false`) is kept on the client only.
 - Writing to the bag of a player who is not connected is an error.
 
 ## Vectors
