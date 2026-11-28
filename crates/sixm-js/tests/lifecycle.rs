@@ -101,3 +101,27 @@ fn post_shutdown_calls_are_safe() {
     tick(&host, now);
     let _ = call;
 }
+
+#[test]
+fn memory_bytes_and_handled_events_report_activity() {
+    let host = new_host();
+    let rt = start(
+        &host,
+        "resmon_js",
+        &[],
+        &[(
+            "index.js",
+            r#"
+            globalThis.buf = new Array(100).fill("x".repeat(32));
+            on("ping", () => {});
+            on("ping", () => {});
+            "#,
+        )],
+    );
+    assert!(rt.memory_bytes() > 0);
+    assert_eq!(rt.handled_events(), 0);
+    let ctx = EventContext::default();
+    rt.deliver_event("ping", EventSource::Local, &[], &ctx)
+        .expect("deliver ping");
+    assert_eq!(rt.handled_events(), 2);
+}

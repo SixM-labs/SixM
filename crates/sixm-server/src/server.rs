@@ -7,10 +7,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use sixm_net::{NetError, NetEvent, WebExchange};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::commands::{self, CommandContext, CommandSource};
+use crate::filters::ChannelFilters;
 use crate::manager::ResourceManager;
+use crate::perf::format_millis;
 
 /// Input for the server loop.
 #[derive(Debug)]
@@ -43,6 +45,18 @@ impl Server {
         Self {
             manager: ResourceManager::new(),
         }
+    }
+
+    /// Creates a server sharing `filters` with external logging layers.
+    pub fn with_channel_filters(filters: ChannelFilters) -> Self {
+        Self {
+            manager: ResourceManager::with_channel_filters(filters),
+        }
+    }
+
+    /// Returns the server's console channel filter store.
+    pub fn channel_filters(&self) -> &ChannelFilters {
+        self.manager.channel_filters()
     }
 
     /// The resource manager, for starting resources and calling exports.
@@ -92,6 +106,13 @@ impl Server {
         self.manager.tick_heartbeat(now);
         let elapsed = started.elapsed();
         self.manager.frames.borrow_mut().record(elapsed);
+        let threshold_ms = self.manager.convars.borrow().hitch_warning_ms();
+        if threshold_ms > 0 && elapsed >= Duration::from_millis(threshold_ms) {
+            warn!(
+                "server frame hitch: {} ms exceeds sixm_hitchWarningMs ({threshold_ms} ms)",
+                format_millis(u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX)),
+            );
+        }
         if self.manager.profiler_active.get() {
             let keep_going = self
                 .manager

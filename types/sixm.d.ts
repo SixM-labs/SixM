@@ -121,6 +121,11 @@ interface Deferrals {
     defer(): void;
     /** Sends a progress message (truncated to 4096 bytes) to the connecting client. */
     update(message: string): void;
+    /** Presents an Adaptive Card JSON string or object (up to 64 KiB) during deferral. */
+    presentCard(
+        card: string | Record<string, unknown> | unknown[],
+        cb?: (data: unknown, rawData: string | null) => void,
+    ): void;
     /** Completes the deferral; a non-empty `reason` refuses the connection. */
     done(reason?: string): void;
 }
@@ -933,11 +938,13 @@ interface SixMHttpRequestOptions {
 }
 
 interface SixMHttpRequest {
+    address: string;
     method: string;
     path: string;
     query: string;
     headers: Record<string, string>;
     setDataHandler(callback: (body: string) => void): void;
+    setCancelHandler(callback: () => void): void;
 }
 
 interface SixMHttpResponse {

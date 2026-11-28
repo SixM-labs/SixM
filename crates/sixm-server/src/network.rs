@@ -7,7 +7,7 @@
 //! call `done`. Script calls never run inside these functions: deferral calls
 //! are queued and applied by [`ResourceManager::apply_deferral_calls`].
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
@@ -15,9 +15,10 @@ use std::rc::Rc;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
-use sixm_core::{ClientTarget, EventSource, FuncRef, PlayerInfo, ScriptError, Value};
+use sixm_core::{ClientTarget, EventSource, FuncRef, Host, PlayerInfo, ScriptError, Value};
 use sixm_net::{
-    ConnectionId, Fingerprint, NetError, NetEvent, NetServer, ServerConfig, Traffic, WebServer,
+    ConnectionId, Fingerprint, NetError, NetEvent, NetServer, ServerConfig, Traffic,
+    TrustedProxies, WebServer,
 };
 use tracing::{debug, error, info, warn};
 
@@ -101,6 +102,12 @@ pub(crate) enum DeferralCall {
     Defer,
     /// `update(message)`: progress text for the client.
     Update(String),
+    /// `presentCard(card, cb?)`: sends an Adaptive Card JSON payload during deferral.
+    PresentCard {
+        id: u64,
+        card_json: String,
+        callback: Option<FuncRef>,
+    },
     /// `done(reason)`: the handler is finished. A reason refuses the player.
     Done(Option<String>),
 }
@@ -122,9 +129,11 @@ pub(crate) struct Player {
     admitted: bool,
     /// Set while handlers hold the connection with `defer`.
     deferral: Option<Deferral>,
-    /// The `update` and `done` functions of the `playerConnecting` table. They
-    /// are removed when the player is admitted or refused.
+    /// The `update`, `done`, and `presentCard` functions of the `playerConnecting`
+    /// table. They are removed when the player is admitted or refused.
     functions: Vec<FuncRef>,
+    /// Pending Adaptive Card callbacks keyed by card id while deferred.
+    card_callbacks: HashMap<u64, FuncRef>,
     /// The player's own ped, created when it is admitted and deleted when it
     /// leaves.
     ped: Option<u32>,
@@ -164,6 +173,7 @@ impl Player {
             admitted: false,
             deferral: None,
             functions: Vec::new(),
+            card_callbacks: HashMap::new(),
             ped: None,
             connected_at: Instant::now(),
             last_msg: Instant::now(),
@@ -305,6 +315,8 @@ pub(crate) struct Network {
     pub(crate) server: RefCell<Option<NetServer>>,
     /// The HTTP listener on the same address, while the network runs.
     pub(crate) web: RefCell<Option<WebServer>>,
+    /// Trusted proxy CIDRs synchronized from `sv_proxyIPRanges`.
+    pub(crate) trusted_proxies: TrustedProxies,
     pub(crate) players: RefCell<Players>,
     /// Kicks requested by `DropPlayer`, applied by [`ResourceManager::apply_drops`].
     pub(crate) pending_drops: RefCell<Vec<(u32, String, DropOrigin)>>,
@@ -313,6 +325,8 @@ pub(crate) struct Network {
     /// Deferral calls by player, in the order the scripts made them. Shared
     /// with the deferral functions, which push onto it.
     pub(crate) deferral_calls: Rc<RefCell<Vec<(u32, DeferralCall)>>>,
+    /// Monotonic id generator for `deferrals.presentCard`.
+    pub(crate) next_card_id: Rc<Cell<u64>>,
 }
 
 impl ResourceManager {
@@ -327,15 +341,23 @@ impl ResourceManager {
                 "the network is already running".to_owned(),
             ));
         }
-        let (endpoint, server_name, identity, http_enabled) = {
+        let (endpoint, server_name, identity, http_enabled, proxy_ranges) = {
             let convars = self.convars.borrow();
             (
                 convars.endpoint().to_owned(),
                 convars.server_name().to_owned(),
                 convars.identity(),
                 convars.http_enabled(),
+                convars
+                    .get(crate::convars::PROXY_IP_RANGES)
+                    .unwrap_or_default()
+                    .to_owned(),
             )
         };
+        let invalid_cidrs = self.network.trusted_proxies.parse_and_set(&proxy_ranges);
+        for bad in invalid_cidrs {
+            warn!("sv_proxyIPRanges: ignoring invalid CIDR `{bad}`");
+        }
         let bind: SocketAddr = endpoint.parse().map_err(|_| {
             NetError::Config(format!(
                 "endpoint_add_udp `{endpoint}` is not an ip:port address"
@@ -368,7 +390,11 @@ impl ResourceManager {
                 0
             };
             loop {
-                let error = match WebServer::bind(server.local_addr(), on_web.clone()) {
+                let error = match WebServer::bind_with_proxies(
+                    server.local_addr(),
+                    self.network.trusted_proxies.clone(),
+                    on_web.clone(),
+                ) {
                     Ok(web) => break Some(web),
                     Err(error) => error,
                 };
@@ -468,6 +494,11 @@ impl ResourceManager {
                 self.touch_player(player);
                 self.client_state_set(player, &bag, &key, &value);
             }
+            NetEvent::CardResponse {
+                connection,
+                id,
+                data_json,
+            } => self.card_response(connection, id, data_json),
             NetEvent::Disconnected { player, reason } => self.player_dropped(player, &reason),
             NetEvent::Abandoned { connection } => self.abandoned(connection),
         }
@@ -495,6 +526,7 @@ impl ResourceManager {
 
         if let Some(reason) = self.run_connecting(id, name) {
             self.refuse_pending(id, &reason);
+            self.apply_deferral_calls();
             return;
         }
         self.apply_deferral_calls();
@@ -515,20 +547,25 @@ impl ResourceManager {
             *sink.borrow_mut() = Some(reason.to_owned());
             Ok(Vec::new())
         });
-        let (defer, update, done) = self.deferral_handlers(id);
-        let (kick_ref, defer_ref, update_ref, done_ref) = {
+        let (defer, update, done, present_card) = self.deferral_handlers(id);
+        let (kick_ref, defer_ref, update_ref, done_ref, present_ref) = {
             let mut functions = self.host_functions.borrow_mut();
             (
                 functions.add(set_kick_reason),
                 functions.add(defer),
                 functions.add(update),
                 functions.add(done),
+                functions.add(present_card),
             )
         };
         let table = Value::Map(vec![
             (Value::from("defer"), Value::FuncRef(defer_ref.clone())),
             (Value::from("update"), Value::FuncRef(update_ref.clone())),
             (Value::from("done"), Value::FuncRef(done_ref.clone())),
+            (
+                Value::from("presentCard"),
+                Value::FuncRef(present_ref.clone()),
+            ),
         ]);
         let canceled = self.dispatch(
             "playerConnecting",
@@ -537,14 +574,14 @@ impl ResourceManager {
         );
         // Function references are valid only for the dispatch, so
         // `setKickReason` and `defer` go now. A handler that kept them gets a
-        // stale-reference error. `update` and `done` stay for as long as the
-        // connection is held.
+        // stale-reference error. `update`, `done`, and `presentCard` stay for
+        // as long as the connection is held.
         {
             let mut functions = self.host_functions.borrow_mut();
             functions.remove(&kick_ref);
             functions.remove(&defer_ref);
         }
-        let functions = vec![update_ref, done_ref];
+        let functions = vec![update_ref, done_ref, present_ref];
         let leftover = match self.network.players.borrow_mut().get_mut(id) {
             Some(player) => {
                 player.functions = functions;
@@ -572,7 +609,7 @@ impl ResourceManager {
     /// [`apply_deferral_calls`](Self::apply_deferral_calls) after the script
     /// call returns. A `done` without a reason, or with an empty one, carries no
     /// reason at all.
-    fn deferral_handlers(&self, id: u32) -> (HostFn, HostFn, HostFn) {
+    fn deferral_handlers(&self, id: u32) -> (HostFn, HostFn, HostFn, HostFn) {
         let calls = Rc::clone(&self.network.deferral_calls);
         let defer_calls = Rc::clone(&calls);
         let defer: HostFn = Rc::new(move |_: &[Value]| {
@@ -589,6 +626,47 @@ impl ResourceManager {
                 .push((id, DeferralCall::Update(message.to_owned())));
             Ok(Vec::new())
         });
+        let present_calls = Rc::clone(&calls);
+        let next_card_id = Rc::clone(&self.network.next_card_id);
+        let manager_weak = self.me.clone();
+        let present_card: HostFn = Rc::new(move |args: &[Value]| {
+            let Some(card) = args.first() else {
+                return Err(ScriptError::Runtime(
+                    "deferrals.presentCard expects a JSON string or table".to_owned(),
+                ));
+            };
+            let card_json = card_payload_to_json(card)?;
+            let callback = match args.get(1) {
+                None | Some(Value::Nil) => None,
+                Some(Value::FuncRef(func)) => {
+                    let retained = manager_weak
+                        .upgrade()
+                        .is_some_and(|manager| manager.retain_ref(func));
+                    if !retained {
+                        return Err(ScriptError::Runtime(
+                            "deferrals.presentCard callback is no longer valid".to_owned(),
+                        ));
+                    }
+                    Some(func.clone())
+                }
+                Some(_) => {
+                    return Err(ScriptError::Runtime(
+                        "deferrals.presentCard expects a function as second argument".to_owned(),
+                    ));
+                }
+            };
+            let card_id = next_card_id.get().wrapping_add(1);
+            next_card_id.set(card_id);
+            present_calls.borrow_mut().push((
+                id,
+                DeferralCall::PresentCard {
+                    id: card_id,
+                    card_json,
+                    callback,
+                },
+            ));
+            Ok(Vec::new())
+        });
         let done: HostFn = Rc::new(move |args: &[Value]| {
             let reason = match args.first() {
                 None | Some(Value::Nil) => None,
@@ -600,7 +678,7 @@ impl ResourceManager {
             calls.borrow_mut().push((id, DeferralCall::Done(reason)));
             Ok(Vec::new())
         });
-        (defer, update, done)
+        (defer, update, done, present_card)
     }
 
     /// Applies the deferral calls queued since the last time, in the order they
@@ -650,6 +728,45 @@ impl ResourceManager {
                             warn!("cannot send a deferral update to player {player}: {err}");
                         }
                     });
+                }
+            }
+            DeferralCall::PresentCard {
+                id: card_id,
+                card_json,
+                callback,
+            } => {
+                let target = {
+                    let mut players = self.network.players.borrow_mut();
+                    players
+                        .get_mut(player)
+                        .filter(|found| !found.admitted && found.deferral.is_some())
+                        .map(|found| {
+                            if let Some(deferral) = found.deferral.as_mut() {
+                                deferral.since = Instant::now();
+                            }
+                            if let Some(cb) = &callback {
+                                found.card_callbacks.insert(card_id, cb.clone());
+                            }
+                            found.connection
+                        })
+                };
+                if let Some(connection) = target {
+                    self.with_server(|server| {
+                        if let Err(err) = server.present_card(connection, card_id, &card_json) {
+                            warn!("cannot send deferral card to player {player}: {err}");
+                            if let Some(removed) = self
+                                .network
+                                .players
+                                .borrow_mut()
+                                .get_mut(player)
+                                .and_then(|found| found.card_callbacks.remove(&card_id))
+                            {
+                                self.release_ref(&removed);
+                            }
+                        }
+                    });
+                } else if let Some(cb) = callback {
+                    self.release_ref(&cb);
                 }
             }
             DeferralCall::Done(None) => {
@@ -704,13 +821,17 @@ impl ResourceManager {
                     player.name.clone(),
                     player.endpoint,
                     std::mem::take(&mut player.functions),
+                    std::mem::take(&mut player.card_callbacks),
                 )
             })
         };
-        let Some((connection, name, endpoint, functions)) = admitted else {
+        let Some((connection, name, endpoint, functions, card_callbacks)) = admitted else {
             return;
         };
         self.release_functions(&functions);
+        for cb in card_callbacks.into_values() {
+            self.release_ref(&cb);
+        }
         // The ped is created before the connection is accepted, so the
         // creation is not sent to the player and only the join snapshot brings it.
         let ped = self.spawn_player_ped(id);
@@ -755,10 +876,55 @@ impl ResourceManager {
             }
             players.remove(id)
         };
-        if let Some(player) = &player {
+        if let Some(mut player) = player {
             self.release_functions(&player.functions);
+            for cb in std::mem::take(&mut player.card_callbacks).into_values() {
+                self.release_ref(&cb);
+            }
+            Some(player)
+        } else {
+            None
         }
-        player
+    }
+
+    /// Handles a client's response to an earlier `deferrals.presentCard`.
+    fn card_response(&self, connection: ConnectionId, card_id: u64, data_json: Option<String>) {
+        let found = {
+            let mut players = self.network.players.borrow_mut();
+            let Some(id) = players.of_connection(connection) else {
+                return;
+            };
+            let Some(player) = players
+                .get_mut(id)
+                .filter(|found| !found.admitted && found.deferral.is_some())
+            else {
+                return;
+            };
+            let Some(cb) = player.card_callbacks.remove(&card_id) else {
+                return;
+            };
+            if let Some(deferral) = player.deferral.as_mut() {
+                deferral.since = Instant::now();
+            }
+            (id, cb)
+        };
+        let (player_id, cb) = found;
+        let args = match data_json {
+            Some(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(parsed) => [json_to_value(&parsed), Value::from(raw.as_str())],
+                Err(err) => {
+                    warn!("malformed card response from player {player_id}: {err}");
+                    [Value::Nil, Value::from(raw.as_str())]
+                }
+            },
+            None => [Value::Nil, Value::Nil],
+        };
+        if let Err(err) = self.call_ref(&cb, &args) {
+            warn!("presentCard callback for player {player_id} failed: {err}");
+        }
+        self.release_ref(&cb);
+        self.apply_deferral_calls();
+        self.settle(player_id);
     }
 
     /// Removes the host functions in `functions`. A removed reference is a
@@ -1097,9 +1263,195 @@ impl ResourceManager {
     }
 }
 
+/// Maximum container nesting depth when converting a card payload to JSON.
+const MAX_CARD_JSON_DEPTH: usize = 32;
+
+/// Validates or serializes a `deferrals.presentCard` payload (`String` or `Map`/`Array`)
+/// into a JSON string bounded by [`sixm_net::MAX_CARD_BYTES`].
+fn card_payload_to_json(card: &Value) -> Result<String, ScriptError> {
+    let json = match card {
+        Value::String(bytes) => {
+            let text = std::str::from_utf8(bytes).map_err(|_| {
+                ScriptError::Runtime(
+                    "deferrals.presentCard card string must be valid UTF-8".to_owned(),
+                )
+            })?;
+            if text.len() > sixm_net::MAX_CARD_BYTES {
+                return Err(ScriptError::Runtime(format!(
+                    "deferrals.presentCard card exceeds {} bytes",
+                    sixm_net::MAX_CARD_BYTES
+                )));
+            }
+            serde_json::from_str::<serde_json::Value>(text).map_err(|err| {
+                ScriptError::Runtime(format!("deferrals.presentCard invalid JSON: {err}"))
+            })?;
+            text.to_owned()
+        }
+        Value::Map(_) | Value::Array(_) => {
+            let value = value_to_json(card, 0)?;
+            let serialized = serde_json::to_string(&value).map_err(|err| {
+                ScriptError::Runtime(format!("deferrals.presentCard JSON encoding failed: {err}"))
+            })?;
+            if serialized.len() > sixm_net::MAX_CARD_BYTES {
+                return Err(ScriptError::Runtime(format!(
+                    "deferrals.presentCard card exceeds {} bytes",
+                    sixm_net::MAX_CARD_BYTES
+                )));
+            }
+            serialized
+        }
+        _ => {
+            return Err(ScriptError::Runtime(
+                "deferrals.presentCard expects a JSON string or table".to_owned(),
+            ));
+        }
+    };
+    Ok(json)
+}
+
+/// Converts a script [`Value`] into a [`serde_json::Value`] up to [`MAX_CARD_JSON_DEPTH`].
+fn value_to_json(value: &Value, depth: usize) -> Result<serde_json::Value, ScriptError> {
+    if depth > MAX_CARD_JSON_DEPTH {
+        return Err(ScriptError::Runtime(format!(
+            "deferrals.presentCard card nesting exceeds {MAX_CARD_JSON_DEPTH} levels"
+        )));
+    }
+    match value {
+        Value::Nil => Ok(serde_json::Value::Null),
+        Value::Bool(flag) => Ok(serde_json::Value::Bool(*flag)),
+        Value::Int(number) => Ok(serde_json::Value::Number((*number).into())),
+        Value::Float(number) => serde_json::Number::from_f64(*number)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| {
+                ScriptError::Runtime(
+                    "deferrals.presentCard cannot serialize non-finite float".to_owned(),
+                )
+            }),
+        Value::String(bytes) => std::str::from_utf8(bytes)
+            .map(|text| serde_json::Value::String(text.to_owned()))
+            .map_err(|_| {
+                ScriptError::Runtime("deferrals.presentCard strings must be valid UTF-8".to_owned())
+            }),
+        Value::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(value_to_json(item, depth + 1)?);
+            }
+            Ok(serde_json::Value::Array(out))
+        }
+        Value::Map(pairs) => {
+            let mut map = serde_json::Map::with_capacity(pairs.len());
+            for (key, item) in pairs {
+                let key = key.as_str().ok_or_else(|| {
+                    ScriptError::Runtime(
+                        "deferrals.presentCard object keys must be valid UTF-8 strings".to_owned(),
+                    )
+                })?;
+                map.insert(key.to_owned(), value_to_json(item, depth + 1)?);
+            }
+            Ok(serde_json::Value::Object(map))
+        }
+        Value::Vector2(_)
+        | Value::Vector3(_)
+        | Value::Vector4(_)
+        | Value::Quat(_)
+        | Value::FuncRef(_) => Err(ScriptError::Runtime(
+            "deferrals.presentCard card contains unsupported value".to_owned(),
+        )),
+    }
+}
+
+/// Converts a decoded [`serde_json::Value`] from a client card response into a script [`Value`].
+fn json_to_value(json: &serde_json::Value) -> Value {
+    match json {
+        serde_json::Value::Null => Value::Nil,
+        serde_json::Value::Bool(flag) => Value::Bool(*flag),
+        serde_json::Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                Value::Int(int)
+            } else {
+                Value::Float(number.as_f64().unwrap_or(0.0))
+            }
+        }
+        serde_json::Value::String(text) => Value::from(text.as_str()),
+        serde_json::Value::Array(items) => Value::Array(items.iter().map(json_to_value).collect()),
+        serde_json::Value::Object(map) => Value::Map(
+            map.iter()
+                .map(|(key, value)| (Value::from(key.as_str()), json_to_value(value)))
+                .collect(),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn card_payload_to_json_validates_strings_tables_and_limits() {
+        let valid = card_payload_to_json(&Value::from(r#"{"type":"AdaptiveCard"}"#))
+            .expect("valid JSON string passes");
+        assert_eq!(valid, r#"{"type":"AdaptiveCard"}"#);
+
+        assert!(card_payload_to_json(&Value::from("{not json")).is_err());
+        assert!(card_payload_to_json(&Value::Int(5)).is_err());
+
+        let oversized = format!(r#"{{"text":"{}"}}"#, "a".repeat(sixm_net::MAX_CARD_BYTES));
+        assert!(card_payload_to_json(&Value::from(oversized)).is_err());
+
+        let table = Value::Map(vec![
+            (Value::from("type"), Value::from("AdaptiveCard")),
+            (
+                Value::from("body"),
+                Value::Array(vec![Value::Map(vec![
+                    (Value::from("type"), Value::from("TextBlock")),
+                    (Value::from("text"), Value::from("Welcome")),
+                ])]),
+            ),
+            (Value::from("count"), Value::Int(3)),
+            (Value::from("ok"), Value::Bool(true)),
+            (Value::from("extra"), Value::Nil),
+        ]);
+        let serialized = card_payload_to_json(&table).expect("table serializes");
+        let parsed: serde_json::Value = serde_json::from_str(&serialized).expect("valid JSON");
+        assert_eq!(parsed["type"], "AdaptiveCard");
+        assert_eq!(parsed["body"][0]["text"], "Welcome");
+        assert_eq!(parsed["count"], 3);
+        assert_eq!(parsed["ok"], true);
+        assert!(parsed["extra"].is_null());
+
+        let bad_key = Value::Map(vec![(Value::Int(1), Value::from("x"))]);
+        assert!(card_payload_to_json(&bad_key).is_err());
+        let non_finite = Value::Map(vec![(Value::from("x"), Value::Float(f64::NAN))]);
+        assert!(card_payload_to_json(&non_finite).is_err());
+
+        let mut deep = Value::from("leaf");
+        for _ in 0..=MAX_CARD_JSON_DEPTH {
+            deep = Value::Array(vec![deep]);
+        }
+        assert!(card_payload_to_json(&deep).is_err());
+    }
+
+    #[test]
+    fn json_to_value_round_trips_nested_objects_and_primitives() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{"name":"Alice","age":21,"score":1.5,"ok":true,"none":null,"tags":["a",2]}"#,
+        )
+        .expect("valid JSON");
+        let value = json_to_value(&json);
+        let Value::Map(entries) = value else {
+            panic!("expected Map");
+        };
+        assert!(entries.contains(&(Value::from("name"), Value::from("Alice"))));
+        assert!(entries.contains(&(Value::from("age"), Value::Int(21))));
+        assert!(entries.contains(&(Value::from("score"), Value::Float(1.5))));
+        assert!(entries.contains(&(Value::from("ok"), Value::Bool(true))));
+        assert!(entries.contains(&(Value::from("none"), Value::Nil)));
+        assert!(entries.contains(&(
+            Value::from("tags"),
+            Value::Array(vec![Value::from("a"), Value::Int(2)])
+        )));
+    }
 
     #[test]
     fn event_bucket_allows_burst_refills_and_rate_limits_warnings() {

@@ -424,6 +424,36 @@ fn admin_ui_requires_both_sv_admin_ui_enabled_and_rcon_password() {
 }
 
 #[test]
+fn resmon_json_is_gated_and_reports_running_resources() {
+    let lb = started();
+    assert_eq!(get(&lb, "/resmon.json").status, 404);
+
+    lb.fx.server.execute("set sv_adminUiEnabled 1");
+    assert_eq!(get(&lb, "/resmon.json").status, 403);
+
+    lb.fx.server.execute("set rcon_password admin-pw");
+    lb.fx.server.tick(std::time::Instant::now());
+
+    let admin_html = get(&lb, "/admin").text();
+    assert!(admin_html.contains("/resmon.json"));
+    assert!(admin_html.contains("Resource Monitor (resmon)"));
+
+    let reply = get(&lb, "/resmon.json");
+    assert_eq!(reply.status, 200);
+    assert_eq!(post(&lb, "/resmon.json", "x").status, 405);
+
+    let doc: serde_json::Value = serde_json::from_slice(&reply.body).expect("JSON");
+    assert_eq!(doc["hitch_warning_ms"], 50);
+    let resources = doc["resources"].as_array().expect("resources array");
+    let app = resources
+        .iter()
+        .find(|r| r["name"] == "app")
+        .expect("app resource in resmon");
+    assert!(app["samples"].as_u64().unwrap_or(0) >= 1);
+    assert!(app["heap_bytes"].as_u64().unwrap_or(0) > 0);
+}
+
+#[test]
 fn master_heartbeat_posts_info_and_dynamic_to_configured_url() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock master");
     let port = listener.local_addr().expect("addr").port();
@@ -488,4 +518,281 @@ fn master_heartbeat_posts_info_and_dynamic_to_configured_url() {
         serde_json::json!(["app", "other"])
     );
     assert_eq!(body["dynamic"]["hostname"], "SixM Server");
+}
+
+#[test]
+fn proxy_ip_ranges_governs_forwarded_rate_limits_and_rcon_attribution() {
+    let lb = started();
+
+    // Without sv_proxyIPRanges, X-Forwarded-For from 127.0.0.1 is ignored and rate limit is shared.
+    let mut saw_429 = false;
+    for i in 1..=80 {
+        let req = format!(
+            "GET /dynamic.json HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 203.0.113.{i}\r\n\r\n"
+        );
+        if send(&lb, req.into_bytes()).status == 429 {
+            saw_429 = true;
+            break;
+        }
+    }
+    assert!(saw_429, "spoofed XFF should not bypass peer rate limit");
+
+    // Trust loopback proxy on a fresh listener: rate limits and RCON lockout isolate by forwarded IP.
+    let lb2 = started();
+    lb2.fx
+        .server
+        .execute("set sv_proxyIPRanges \"127.0.0.1/32\"");
+    lb2.fx.server.execute("set rcon_password super-secret-pw");
+
+    let mut exhausted = false;
+    for _ in 0..80 {
+        let req = b"GET /dynamic.json HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 203.0.113.10\r\n\r\n".to_vec();
+        if send(&lb2, req).status == 429 {
+            exhausted = true;
+            break;
+        }
+    }
+    assert!(exhausted, "203.0.113.10 should hit its own rate limit");
+    let other_client = send(
+        &lb2,
+        b"GET /dynamic.json HTTP/1.1\r\nHost: localhost\r\nX-Real-IP: 203.0.113.11\r\n\r\n"
+            .to_vec(),
+    );
+    assert_eq!(other_client.status, 200);
+
+    let rcon_req = |xff: &str, body: &str| {
+        format!(
+            "POST /rcon HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: {xff}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    };
+
+    // 5 failed RCON attempts lock out forwarded 198.51.100.10 without blocking 198.51.100.11.
+    for _ in 0..5 {
+        let bad = send(
+            &lb2,
+            rcon_req("198.51.100.10", r#"{"password":"wrong","command":"perf"}"#),
+        );
+        assert_eq!(bad.status, 401);
+    }
+    let locked = send(
+        &lb2,
+        rcon_req(
+            "198.51.100.10",
+            r#"{"password":"super-secret-pw","command":"perf"}"#,
+        ),
+    );
+    assert_eq!(locked.status, 429);
+
+    let isolated = send(
+        &lb2,
+        rcon_req(
+            "198.51.100.11",
+            r#"{"password":"super-secret-pw","command":"perf"}"#,
+        ),
+    );
+    assert_eq!(isolated.status, 200);
+}
+
+#[test]
+fn metrics_enforces_basic_auth_and_hides_password_from_scripts() {
+    let lb = started();
+    lb.fx.server.execute("set sv_metricsEnabled true");
+
+    // Half-configured user without password fails closed (`401`).
+    lb.fx.server.execute("set sv_prometheusBasicAuthUser prom");
+    let half = get(&lb, "/metrics");
+    assert_eq!(half.status, 401);
+    assert!(
+        half.head
+            .to_ascii_lowercase()
+            .contains("www-authenticate: basic realm=\"sixm metrics\""),
+        "head: {}",
+        half.head
+    );
+
+    lb.fx
+        .server
+        .execute("set sv_prometheusBasicAuthPassword prom-pw");
+    assert_eq!(get(&lb, "/metrics").status, 401);
+
+    let wrong = send(
+        &lb,
+        b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YmFkOmJhZA==\r\n\r\n"
+            .to_vec(),
+    );
+    assert_eq!(wrong.status, 401);
+
+    // "prom:prom-pw" in base64 is "cHJvbTpwcm9tLXB3".
+    let ok = send(
+        &lb,
+        b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic cHJvbTpwcm9tLXB3\r\n\r\n"
+            .to_vec(),
+    );
+    assert_eq!(ok.status, 200);
+    assert!(ok.text().contains("sixm_players_connected"));
+
+    // Script cannot inspect or alter console-only Prometheus Basic Auth convars.
+    assert_eq!(
+        lb.fx
+            .server
+            .manager()
+            .convar("sv_prometheusBasicAuthPassword"),
+        None
+    );
+}
+
+#[test]
+fn lua_and_js_handlers_read_direct_and_forwarded_address() {
+    let lb = started();
+    lb.fx.add_resource(
+        "addr_lua",
+        &common::manifest(&["server.lua"], &[], &[]),
+        &[(
+            "server.lua",
+            "SetHttpHandler(function(req, res) res.send(req.address) end)\n",
+        )],
+    );
+    lb.fx.add_resource(
+        "addr_js",
+        &common::manifest(&["server.js"], &[], &[]),
+        &[(
+            "server.js",
+            "SetHttpHandler((req, res) => { res.send(req.address); });\n",
+        )],
+    );
+    lb.fx.server.execute("refresh");
+    lb.fx.server.execute("ensure addr_lua");
+    lb.fx.server.execute("ensure addr_js");
+
+    // Without sv_proxyIPRanges, X-Forwarded-For is ignored and peer IP is reported.
+    let direct_lua = send(
+        &lb,
+        b"GET /addr_lua/ip HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 203.0.113.55\r\n\r\n"
+            .to_vec(),
+    );
+    assert_eq!(direct_lua.status, 200);
+    assert_eq!(direct_lua.text(), "127.0.0.1");
+
+    let direct_js = send(
+        &lb,
+        b"GET /addr_js/ip HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 203.0.113.55\r\n\r\n"
+            .to_vec(),
+    );
+    assert_eq!(direct_js.status, 200);
+    assert_eq!(direct_js.text(), "127.0.0.1");
+
+    // With loopback trusted, both Lua and JS see the forwarded client IP.
+    lb.fx
+        .server
+        .execute("set sv_proxyIPRanges \"127.0.0.1/32\"");
+
+    let proxied_lua = send(
+        &lb,
+        b"GET /addr_lua/ip HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 203.0.113.55\r\n\r\n"
+            .to_vec(),
+    );
+    assert_eq!(proxied_lua.status, 200);
+    assert_eq!(proxied_lua.text(), "203.0.113.55");
+
+    let proxied_js = send(
+        &lb,
+        b"GET /addr_js/ip HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 203.0.113.55\r\n\r\n"
+            .to_vec(),
+    );
+    assert_eq!(proxied_js.status, 200);
+    assert_eq!(proxied_js.text(), "203.0.113.55");
+}
+
+#[test]
+fn timeout_and_early_disconnect_fire_set_cancel_handler_in_lua_and_js() {
+    let lb = started();
+    lb.fx.add_resource(
+        "cancel_lua",
+        &common::manifest(&["server.lua"], &["log"], &[]),
+        &[(
+            "server.lua",
+            "LOG = {}\n\
+             function log() return table.concat(LOG, ',') end\n\
+             SetHttpHandler(function(req, res)\n\
+               req.setCancelHandler(function() LOG[#LOG + 1] = 'canceled:' .. req.path end)\n\
+               if req.path == '/cancel_lua/ok' then\n\
+                 res.send('ok')\n\
+               else\n\
+                 LOG[#LOG + 1] = 'open:' .. req.path\n\
+               end\n\
+             end)\n",
+        )],
+    );
+    lb.fx.add_resource(
+        "cancel_js",
+        &common::manifest(&["server.js"], &["log"], &[]),
+        &[(
+            "server.js",
+            r#"
+            const LOG = [];
+            exports("log", () => LOG.join(","));
+            SetHttpHandler((req, res) => {
+                req.setCancelHandler(() => LOG.push(`canceled:${req.path}`));
+                if (req.path === "/cancel_js/ok") {
+                    res.send("ok");
+                } else {
+                    LOG.push(`open:${req.path}`);
+                }
+            });
+            "#,
+        )],
+    );
+    lb.fx.server.execute("refresh");
+    lb.fx.server.execute("ensure cancel_lua");
+    lb.fx.server.execute("ensure cancel_js");
+    lb.fx.server.execute("set sixm_httpHandlerTimeout 1");
+
+    // Answered requests never invoke their cancel handler.
+    assert_eq!(get(&lb, "/cancel_lua/ok").status, 200);
+    assert_eq!(get(&lb, "/cancel_js/ok").status, 200);
+    assert_eq!(lb.fx.text("cancel_lua", "log"), "");
+    assert_eq!(lb.fx.text("cancel_js", "log"), "");
+
+    // Early client TCP disconnect fires setCancelHandler promptly (well before the 1s timeout).
+    for (resource, path) in [
+        ("cancel_lua", "/cancel_lua/drop"),
+        ("cancel_js", "/cancel_js/drop"),
+    ] {
+        let mut stream = TcpStream::connect(lb.addr).expect("connect");
+        stream
+            .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+            .expect("write");
+        lb.wait_for(&format!("{resource} open"), || {
+            lb.fx
+                .text(resource, "log")
+                .contains(&format!("open:{path}"))
+                .then_some(())
+        });
+        drop(stream);
+        lb.wait_for(&format!("{resource} disconnect cancel"), || {
+            lb.fx
+                .text(resource, "log")
+                .contains(&format!("canceled:{path}"))
+                .then_some(())
+        });
+    }
+
+    // Timeout cancellation: 504 returns AND setCancelHandler runs for both Lua and JS.
+    assert_eq!(get(&lb, "/cancel_lua/timeout").status, 504);
+    lb.wait_for("cancel_lua timeout cancel", || {
+        lb.fx
+            .text("cancel_lua", "log")
+            .contains("canceled:/cancel_lua/timeout")
+            .then_some(())
+    });
+
+    assert_eq!(get(&lb, "/cancel_js/timeout").status, 504);
+    lb.wait_for("cancel_js timeout cancel", || {
+        lb.fx
+            .text("cancel_js", "log")
+            .contains("canceled:/cancel_js/timeout")
+            .then_some(())
+    });
 }

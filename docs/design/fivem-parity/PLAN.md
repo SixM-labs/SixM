@@ -301,13 +301,13 @@ equivalent / no effect / absent".
 | C1 | done | Gemini (Flash impl, Pro review) | `git log --grep "^C1:"` |
 | C2 | done | Gemini (Flash impl, Pro review) | `git log --grep "^C2:"` |
 | C3 | done | Gemini | `git log --grep "^C3:"` |
-| D1 | todo | | |
-| D2 | todo | | |
-| D3 | todo | | |
-| D4 | todo | | |
-| D5 | todo | | |
-| D6 | todo | | |
-| D7 | todo | | |
+| D1 | done | Gemini (Flash impl, Pro review) | `git log --grep "^D1:"` |
+| D2 | done | Gemini (Flash impl, Pro review) | `git log --grep "^D2:"` |
+| D3 | done | Gemini | `git log --grep "^D3:"` |
+| D4 | done | Gemini | `git log --grep "^D4:"` |
+| D5 | done | Gemini | `git log --grep "^D5:"` |
+| D6 | done | Gemini | `git log --grep "^D6:"` |
+| D7 | done | Gemini | `git log --grep "^D7:"` |
 | E1 | todo | | |
 | E2 | todo | | |
 | E3 | todo | | |
@@ -416,3 +416,48 @@ what is next, anything surprising.
   `fuzz` locked check), pushed `feat/fivem-parity-c`, and opened the Phase C
   PR to `main`. Windows CI is verified via GitHub Actions on the PR before
   merging. Next: Phase D (`feat/fivem-parity-d`) after PR merge.
+- 2026-11-28, Gemini, `feat/fivem-parity-d`: Phase C merged as 40aa71f
+  ([PR #27](https://github.com/SixM-labs/SixM/pull/27)) after green Linux and
+  Windows CI. `D1: operator console commands and @resource exec` implements
+  `status`, `clientkick`, built-in `say` (via the `chat` contract when running,
+  else log), `cmdlist`, and `exec @resource/file.cfg`, with full checks green.
+  Next: D2 (console channel filters).
+- 2026-11-28, Gemini, `feat/fivem-parity-d`: `D2: console channel filters`
+  follows c0224ad. Added `ChannelFilters` (`AtomicBool` fast path + `RwLock`),
+  `ChannelTracingFilter`, `Server::with_channel_filters` / `channel_filters`,
+  and `con_channelFilters`, `con_addChannelFilter`, `con_removeChannelFilter`
+  wired into both process tracing layers and `POST /rcon`, with full checks
+  green. Next: D3 (`resmon`, `sixm_hitchWarningMs`, `/admin` live panel).
+- 2026-11-28, Gemini, `feat/fivem-parity-d`: `D3: live resource monitor and
+  hitch warnings` follows e224c7c. Added allocation-free fixed 60-frame
+  `ResourceMonitor` ring buffers, `ScriptRuntime::memory_bytes` &
+  `handled_events` for Lua/JS, `resmon` console command, `sixm_hitchWarningMs`
+  frame warnings, and `/resmon.json` + `/admin` panel, with full checks green.
+  Next: D4 (`sv_proxyIPRanges` & `/metrics` Basic Auth).
+- 2026-11-28, Gemini, `feat/fivem-parity-d`: `D4: proxy IP ranges and metrics
+  hardening` follows fe35e4d. Added pure-Rust `IpCidr` and `TrustedProxies`
+  (`sv_proxyIPRanges`) in `sixm-net` honoring rightmost untrusted `X-Forwarded-For`
+  / `X-Real-IP` hops across HTTP rate limiting and RCON lockout, plus console-only
+  `sv_prometheusBasicAuthUser` / `sv_prometheusBasicAuthPassword` protecting
+  `/metrics`, with full checks green. Next: D5 (`deferrals.presentCard`).
+- 2026-11-28, Gemini, `feat/fivem-parity-d`: `D5: deferrals.presentCard`
+  follows 00194a6. Bumped `PROTOCOL_VERSION` to `16`, added `PresentCard` and
+  `CardResponse` frames with fuzz/cap coverage, implemented
+  `deferrals.presentCard(card, cb?)` in Lua/JS with callback retention and
+  cleanup, wired headless client interactive prompt, updated protocol/API/type
+  docs, and ran full checks green. Next: D6 (`req.address` & `req.setCancelHandler`).
+- 2026-11-28, Gemini, `feat/fivem-parity-d`: `D6: http handler address and cancel handler`
+  follows 2f95d9d. Added `WebRequest.address` (proxy-resolved via `sv_proxyIPRanges`),
+  `WebResponder::is_canceled`, and `ScriptRuntime::cancel_http_request`, wired timeout and
+  prompt client-disconnect sweeping in `expire_web` plus `req.address` and
+  `req.setCancelHandler` in Lua and JS with leak-free lifecycle cleanup, updated
+  types/docs/changelog, and verified full workspace checks green. Next: D7 wrap-up & PR.
+- 2026-11-28, Gemini, `feat/fivem-parity-d`: `D7: wrap up Phase D` follows
+  0f35ff0. Audited all Phase D docs and guides, updated `docs/server.md`,
+  `docs/protocol.md`, `docs/lua-api.md`, `docs/guides/from-fivem.md`,
+  `docs/guides/deployment.md`, `docs/guides/permissions.md`, and `README.md`,
+  verified full Linux checks (`check_types.py`, `cargo fmt`, `cargo clippy`,
+  `cargo test --workspace`, `fuzz` locked check), pushed `feat/fivem-parity-d`,
+  and opened the Phase D PR to `main`. Windows CI is verified via GitHub
+  Actions on the PR before merging. Next: Phase E (`E1` ADR decision with
+  maintainer).

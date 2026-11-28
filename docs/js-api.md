@@ -85,9 +85,14 @@ Inside an event handler, `globalThis.source` holds the sender (`""` for local
 server events, player id as string/number for client-to-server events, `65535`
 for server-to-client events).
 
-The host events (`playerJoining`, `playerDropped`, `onPlayerBucketChange`,
-`onEntityBucketChange`, `onResourceListRefresh` and the others) take the same
-names and arguments as in the lifecycle table of [`lua-api.md`](lua-api.md#lifecycle-events-fired-by-the-host).
+The host events (`playerConnecting`, `playerJoining`, `playerDropped`,
+`onPlayerBucketChange`, `onEntityBucketChange`, `onResourceListRefresh` and the
+others) take the same names and arguments as in the lifecycle table of
+[`lua-api.md`](lua-api.md#lifecycle-events-fired-by-the-host). In
+`playerConnecting(name, setKickReason, deferrals)`, `deferrals` exposes
+`defer()`, `update(message)`, `presentCard(card, cb?)` (accepting a JSON string
+or plain JS object/array up to 64 KiB and invoking `cb(data, rawData)` or
+`(null, null)` on cancel), and `done(reason?)`.
 
 ### Events provided by the `chat` resource
 
@@ -308,4 +313,4 @@ All core utility, command, convar, resource, and KVP functions match
   `GetRoutingBucketEntityLockdownMode`.
 - **HTTP (server):**
   - `PerformHttpRequest(url, cb, method, data, headers, options)`
-  - `SetHttpHandler((req, res) => { req.setDataHandler((body) => { ... res.writeHead(...); res.write(...); res.send(...); }); })`
+  - `SetHttpHandler((req, res) => { ... })`: `req` exposes `address` (the client IP string, honoring `sv_proxyIPRanges`), `method`, `path`, `query`, `headers`, `setDataHandler((body) => { ... })`, and `setCancelHandler(() => { ... })` (called if the client disconnects or the request times out before `res.send` completes); `res` exposes `writeHead(status, headers)`, `write(data)`, and `send(data)`.

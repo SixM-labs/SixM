@@ -157,12 +157,25 @@
     </form>
     <div class="row" style="margin-top: 10px;">
       <button class="small" type="button" data-cmd="perf">perf</button>
+      <button class="small" type="button" data-cmd="resmon">resmon</button>
       <button class="small" type="button" data-cmd="players">players</button>
       <button class="small" type="button" data-cmd="entities">entities</button>
       <button class="small" type="button" data-cmd="refresh">refresh</button>
       <button class="small" type="button" data-cmd="help">help</button>
     </div>
     <pre class="console" id="rcon-output">Enter RCON password and run a command.</pre>
+  </section>
+
+  <section class="panel" style="margin-bottom: 16px;">
+    <h2>Resource Monitor (resmon)</h2>
+    <table>
+      <thead>
+        <tr><th>Resource</th><th>Avg CPU</th><th>Max CPU</th><th>Heap</th><th>Window Events</th><th>Total Events</th></tr>
+      </thead>
+      <tbody id="resmon-body">
+        <tr><td colspan="6" class="muted">No resources running.</td></tr>
+      </tbody>
+    </table>
   </section>
 
   <section class="grid-2">
@@ -289,23 +302,58 @@
     }
   }
 
+  function renderResmon(resmon) {
+    const tbody = el("resmon-body");
+    tbody.replaceChildren();
+    const list = resmon && Array.isArray(resmon.resources) ? resmon.resources : [];
+    if (list.length === 0) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 6;
+      td.className = "muted";
+      td.textContent = "No resources running.";
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+      return;
+    }
+    for (const r of list) {
+      const tr = document.createElement("tr");
+      const kib = ((r.heap_bytes || 0) / 1024).toFixed(1) + " KiB";
+      for (const value of [
+        r.name,
+        Number(r.avg_tick_ms || 0).toFixed(2) + " ms",
+        Number(r.max_tick_ms || 0).toFixed(2) + " ms",
+        kib,
+        String(r.window_events ?? 0),
+        String(r.total_events ?? 0),
+      ]) {
+        const td = document.createElement("td");
+        td.textContent = value;
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+  }
+
   async function refreshAll() {
     const pill = el("status-pill");
     try {
-      const [infoRes, dynRes, playersRes, healthRes] = await Promise.all([
+      const [infoRes, dynRes, playersRes, healthRes, resmonRes] = await Promise.all([
         fetch("/info.json"),
         fetch("/dynamic.json"),
         fetch("/players.json"),
         fetch("/healthz"),
+        fetch("/resmon.json"),
       ]);
       if (!infoRes.ok || !dynRes.ok || !playersRes.ok) {
         throw new Error("HTTP error");
       }
-      const [info, dyn, players, health] = await Promise.all([
+      const [info, dyn, players, health, resmon] = await Promise.all([
         infoRes.json(),
         dynRes.json(),
         playersRes.json(),
         healthRes.ok ? healthRes.json() : Promise.resolve({ ok: false }),
+        resmonRes.ok ? resmonRes.json() : Promise.resolve({ resources: [] }),
       ]);
       el("hostname").textContent = dyn.hostname || "SixM Server";
       el("server-version").textContent = info.server || "SixM";
@@ -315,6 +363,7 @@
       el("health-status").textContent = health.ok ? "OK" : "Degraded";
       renderPlayers(players);
       renderResources(resources);
+      renderResmon(resmon);
       pill.textContent = "Live";
       pill.className = "pill";
     } catch (_) {

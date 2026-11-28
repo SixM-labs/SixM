@@ -25,7 +25,8 @@ use crate::files::{FileHash, MAX_FILE_SIZE, ResourceEntry, hash_hex};
 use crate::identity::{Credentials, Fingerprint, Identity};
 use crate::latent::{self, LatentJob};
 use crate::protocol::{
-    ClientMessage, MAX_FRAME, MAX_PLAYER_NAME_LEN, PROTOCOL_VERSION, SERVER_NAME, ServerMessage,
+    ClientMessage, MAX_CARD_RESPONSE_BYTES, MAX_FRAME, MAX_PLAYER_NAME_LEN, PROTOCOL_VERSION,
+    SERVER_NAME, ServerMessage,
 };
 use crate::transfer::{HEADER_LEN, parse_file_header};
 use crate::transport::{ServerVerifier, Trust, client_config, close_connection, closing_reason};
@@ -139,7 +140,7 @@ impl NetClient {
         identity: &Identity,
         timeout: Duration,
     ) -> Result<Self, NetError> {
-        Self::connect_with(addr, name, identity, timeout, Trust::Any, |_| {})
+        Self::connect_with(addr, name, identity, timeout, Trust::Any, |_| {}, |_| None)
     }
 
     /// Like [`connect`](Self::connect), and also calls `on_deferral` with the
@@ -153,7 +154,33 @@ impl NetClient {
         timeout: Duration,
         on_deferral: impl FnMut(&str) + Send + 'static,
     ) -> Result<Self, NetError> {
-        Self::connect_with(addr, name, identity, timeout, Trust::Any, on_deferral)
+        Self::connect_with(
+            addr,
+            name,
+            identity,
+            timeout,
+            Trust::Any,
+            on_deferral,
+            |_| None,
+        )
+    }
+
+    /// Connects with optional certificate pinning (`fingerprint`), deferral text
+    /// observer (`on_deferral`), and Adaptive Card handler (`on_card`).
+    pub fn connect_with_card_handler(
+        addr: SocketAddr,
+        name: &str,
+        fingerprint: Option<&Fingerprint>,
+        identity: &Identity,
+        timeout: Duration,
+        on_deferral: impl FnMut(&str) + Send + 'static,
+        on_card: impl FnMut(&str) -> Option<String> + Send + 'static,
+    ) -> Result<Self, NetError> {
+        let trust = match fingerprint {
+            Some(fp) => Trust::Pinned(*fp),
+            None => Trust::Any,
+        };
+        Self::connect_with(addr, name, identity, timeout, trust, on_deferral, on_card)
     }
 
     /// Like [`connect`](Self::connect), but accepts only a server whose
@@ -173,6 +200,7 @@ impl NetClient {
             timeout,
             Trust::Pinned(*fingerprint),
             |_| {},
+            |_| None,
         )
     }
 
@@ -183,6 +211,7 @@ impl NetClient {
         timeout: Duration,
         trust: Trust,
         on_deferral: impl FnMut(&str) + Send + 'static,
+        on_card: impl FnMut(&str) -> Option<String> + Send + 'static,
     ) -> Result<Self, NetError> {
         let name = name.trim().to_owned();
         if name.is_empty() || name.chars().count() > MAX_PLAYER_NAME_LEN {
@@ -208,6 +237,7 @@ impl NetClient {
                     events: events_tx,
                     pending: thread_pending,
                     on_deferral: Box::new(on_deferral),
+                    on_card: Box::new(on_card),
                 };
                 run_thread(addr, name, timeout, trust, credentials, link);
             })
@@ -424,6 +454,9 @@ struct Established {
     recv: RecvStream,
 }
 
+/// Callback invoked when the server presents an Adaptive Card during deferral.
+type CardHandler = Box<dyn FnMut(&str) -> Option<String> + Send>;
+
 /// The channels that connect the caller's thread with the client thread.
 struct Link {
     ready: SyncSender<Result<Welcome, NetError>>,
@@ -433,6 +466,8 @@ struct Link {
     pending: Pending,
     /// Called with every progress message received during the handshake.
     on_deferral: Box<dyn FnMut(&str) + Send>,
+    /// Called when the server presents an Adaptive Card during deferral.
+    on_card: CardHandler,
 }
 
 fn run_thread(
@@ -450,6 +485,7 @@ fn run_thread(
         events,
         pending,
         mut on_deferral,
+        mut on_card,
     } = link;
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -462,8 +498,16 @@ fn run_thread(
         }
     };
     runtime.block_on(async move {
-        let handshake =
-            establish(addr, &name, trust, credentials, timeout, &mut *on_deferral).await;
+        let handshake = establish(
+            addr,
+            &name,
+            trust,
+            credentials,
+            timeout,
+            &mut *on_deferral,
+            &mut *on_card,
+        )
+        .await;
         let established = match handshake {
             Ok((established, welcome)) => {
                 if ready.send(Ok(welcome)).is_err() {
@@ -500,6 +544,7 @@ async fn establish(
     credentials: Credentials,
     timeout: Duration,
     on_deferral: &mut dyn FnMut(&str),
+    on_card: &mut dyn FnMut(&str) -> Option<String>,
 ) -> Result<(Established, Welcome), NetError> {
     let mut deadline = tokio::time::Instant::now() + timeout;
     let bind = if addr.is_ipv4() {
@@ -517,7 +562,16 @@ async fn establish(
     let connection = until(deadline, connecting)
         .await?
         .map_err(|err| verifier.handshake_error(&err))?;
-    match greet(&connection, name, timeout, &mut deadline, on_deferral).await {
+    match greet(
+        &connection,
+        name,
+        timeout,
+        &mut deadline,
+        on_deferral,
+        on_card,
+    )
+    .await
+    {
         Ok((send, recv, welcome)) => Ok((
             Established {
                 endpoint,
@@ -545,6 +599,7 @@ async fn greet(
     timeout: Duration,
     deadline: &mut tokio::time::Instant,
     on_deferral: &mut dyn FnMut(&str),
+    on_card: &mut dyn FnMut(&str) -> Option<String>,
 ) -> Result<(SendStream, RecvStream, Welcome), NetError> {
     let (mut send, mut recv) = until(*deadline, connection.open_bi())
         .await?
@@ -567,6 +622,23 @@ async fn greet(
             ServerMessage::Deferral { message } => {
                 info!("the server defers the connection: {message}");
                 on_deferral(&message);
+                *deadline = tokio::time::Instant::now() + timeout;
+            }
+            ServerMessage::PresentCard { id, card_json } => {
+                let data_json = on_card(&card_json);
+                if let Some(ref json) = data_json
+                    && json.len() > MAX_CARD_RESPONSE_BYTES
+                {
+                    return Err(NetError::InvalidInput(format!(
+                        "card response is over {MAX_CARD_RESPONSE_BYTES} bytes"
+                    )));
+                }
+                let frame =
+                    encode_frame(&ClientMessage::CardResponse { id, data_json }, MAX_FRAME)?;
+                *deadline = tokio::time::Instant::now() + timeout;
+                until(*deadline, send.write_all(&frame))
+                    .await?
+                    .map_err(|err| NetError::Connect(err.to_string()))?;
                 *deadline = tokio::time::Instant::now() + timeout;
             }
             ServerMessage::Welcome {
@@ -910,7 +982,8 @@ fn dispatch_server_message(
         }
         ServerMessage::Welcome { .. }
         | ServerMessage::Rejected { .. }
-        | ServerMessage::Deferral { .. } => {
+        | ServerMessage::Deferral { .. }
+        | ServerMessage::PresentCard { .. } => {
             protocol_violation(connection, events, "unexpected handshake message");
             return false;
         }

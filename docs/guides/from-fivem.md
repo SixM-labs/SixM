@@ -52,7 +52,8 @@ See [manifest.md](../manifest.md) for all manifest rules.
   - Server: `onResourceStarting` (cancellable), `onResourceStart`,
     `onServerResourceStart`, `onResourceStop`, `onServerResourceStop`,
     `playerConnecting(name, setKickReason, deferrals)` (including
-    `deferrals.defer`, `deferrals.update`, `deferrals.done`),
+    `deferrals.defer`, `deferrals.update`, `deferrals.presentCard`,
+    `deferrals.done`),
     `playerJoining(oldID)`, `playerDropped(reason, resourceName,
     clientDropReason)`, `entityCreating` (cancellable), `entityCreated`,
     `entityRemoved`, `onEntityBucketChange`, `onPlayerBucketChange` and
@@ -205,13 +206,17 @@ map/gametype resources; `chat` can start alongside them.
   threads (`sixm_httpWorkers`) so frames never block.
 - **Incoming HTTP routes (server only):**
   `SetHttpHandler(function(req, res) ... end)` serves `/<resource>/...` on the
-  TCP game port using `req.method`, `req.path`, `req.query`, `req.headers`,
-  `req.setDataHandler`, and `res.writeHead` / `res.write` / `res.send`.
+  TCP game port using `req.address` (proxy-resolved via `sv_proxyIPRanges`),
+  `req.method`, `req.path`, `req.query`, `req.headers`, `req.setDataHandler`,
+  `req.setCancelHandler`, and `res.writeHead` / `res.write` / `res.send`.
 - **Built-in HTTP endpoints:** `/info.json`, `/players.json`, `/dynamic.json`,
-  `/healthz`, `/metrics` (when `sv_metricsEnabled` is enabled), and `/admin`
-  (self-contained web admin UI when `sv_adminUiEnabled` is enabled and
-  `rcon_password` is configured) are served on the TCP port of
-  `endpoint_add_udp` (unless `sv_httpEnabled` is `false`).
+  `/healthz`, `/metrics` (when `sv_metricsEnabled` is enabled, optionally
+  protected with `sv_prometheusBasicAuthUser`/`sv_prometheusBasicAuthPassword`),
+  `/admin` (self-contained web admin UI with live `resmon` when
+  `sv_adminUiEnabled` is enabled and `rcon_password` is configured), and
+  `/resmon.json` (live per-resource metrics, gated identically to `/admin`) are
+  served on the TCP port of `endpoint_add_udp` (unless `sv_httpEnabled` is
+  `false`).
 - **Optional discovery heartbeats:** Setting `sv_masterUrl` sends periodic JSON
   heartbeats (`info` and `dynamic`) every `sv_heartbeatInterval` seconds.
 
@@ -350,12 +355,17 @@ state bags. C# (`Mono`) is not present. JS runs in a strict sandbox without Node
 APIs (`require`, `fs`, `process`), `eval`, or `Function` constructors; see
 [js-api.md](../js-api.md).
 
-### 7. Remote console and profiling
+### 7. Remote console, logging filters, and profiling
 
 SixM's remote console uses an authenticated HTTP `POST /rcon` request and
-returns command output as JSON. The `profiler` command captures server frames
-and resource ticks for Chrome Trace Event viewers. See
-[Remote console](../server.md#remote-console) and
+returns command output as JSON. `con_channelFilters`, `con_addChannelFilter`,
+and `con_removeChannelFilter` use case-insensitive `*` / `?` glob patterns
+matching tracing targets or `script:<resource>` instead of regular expressions.
+The `profiler` command captures server frames and resource ticks for Chrome
+Trace Event viewers, while `resmon` and `sixm_hitchWarningMs` monitor live
+per-resource tick times, memory, and frame hitches. See
+[Remote console](../server.md#remote-console),
+[Built-in commands](../server.md#built-in-commands), and
 [Frame profiling](../server.md#frame-profiling).
 
 ## What is missing (not yet implemented)

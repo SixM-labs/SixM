@@ -25,6 +25,7 @@ use tracing::{Event, Subscriber, warn};
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 
 use crate::commands::{self, CommandContext, CommandSource};
+use crate::filters::ChannelFilters;
 use crate::manager::ResourceManager;
 use crate::perf::format_millis;
 
@@ -145,7 +146,7 @@ impl ResourceManager {
     pub(crate) fn handle_web(&self, exchange: WebExchange) {
         let WebExchange { request, responder } = exchange;
         if request.path == "/rcon" {
-            let response = self.handle_rcon(&request, responder.peer_ip());
+            let response = self.handle_rcon(&request, responder.client_ip());
             responder.respond(response);
             return;
         }
@@ -234,26 +235,46 @@ impl ResourceManager {
         Ok(())
     }
 
-    /// Answers the requests that have waited for a handler too long with `504`.
-    /// Runs once per frame.
+    /// Answers timed-out requests with `504` and notifies runtimes of all
+    /// timed-out or client-disconnected pending requests. Runs once per frame.
     pub(crate) fn expire_web(&self, now: Instant) {
-        let expired: Vec<Pending> = {
+        let removed: Vec<(u64, Pending, bool)> = {
             let mut pending = self.web.pending.borrow_mut();
             if pending.is_empty() {
                 return;
             }
             let timeout = self.convars.borrow().http_handler_timeout();
-            let ids: Vec<u64> = pending
+            let ids: Vec<(u64, bool)> = pending
                 .iter()
-                .filter(|(_, entry)| now.saturating_duration_since(entry.since) >= timeout)
-                .map(|(id, _)| *id)
+                .filter_map(|(id, entry)| {
+                    let timed_out = now.saturating_duration_since(entry.since) >= timeout;
+                    let canceled = entry.responder.is_canceled();
+                    (timed_out || canceled).then_some((*id, timed_out))
+                })
                 .collect();
-            ids.iter().filter_map(|id| pending.remove(id)).collect()
+            ids.into_iter()
+                .filter_map(|(id, timed_out)| {
+                    pending.remove(&id).map(|entry| (id, entry, timed_out))
+                })
+                .collect()
         };
-        for entry in expired {
-            entry
-                .responder
-                .respond(text(504, "The HTTP handler did not respond in time"));
+        if removed.is_empty() {
+            return;
+        }
+        let snapshot = self.snapshot();
+        for (id, entry, timed_out) in removed {
+            if timed_out && !entry.responder.is_canceled() {
+                entry
+                    .responder
+                    .respond(text(504, "The HTTP handler did not respond in time"));
+            } else {
+                drop(entry.responder);
+            }
+            for slot in snapshot.iter() {
+                if slot.runtime.resource() == &entry.resource {
+                    slot.runtime.cancel_http_request(id);
+                }
+            }
         }
     }
 
@@ -274,6 +295,7 @@ impl ResourceManager {
             "/healthz" => Some(json_route(request, || self.healthz_document())),
             "/metrics" => Some(self.handle_metrics(request)),
             "/admin" => Some(self.handle_admin(request)),
+            "/resmon.json" => Some(self.handle_resmon(request)),
             _ => None,
         }
     }
@@ -349,12 +371,35 @@ impl ResourceManager {
 
     /// `GET /metrics`: Prometheus text format when `sv_metricsEnabled` is on.
     fn handle_metrics(&self, request: &WebRequest) -> WebResponse {
-        if !self.convars.borrow().metrics_enabled() {
+        let convars = self.convars.borrow();
+        if !convars.metrics_enabled() {
             return text(404, "Not Found");
         }
         if !is_get_or_head(&request.method) {
             return method_not_allowed("GET, HEAD");
         }
+        let auth_header = request
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+            .map(|(_, v)| v.as_str());
+        if !convars.check_prometheus_basic_auth(auth_header) {
+            return WebResponse {
+                status: 401,
+                headers: vec![
+                    (
+                        "www-authenticate".to_owned(),
+                        "Basic realm=\"SixM Metrics\"".to_owned(),
+                    ),
+                    (
+                        "content-type".to_owned(),
+                        "text/plain; charset=utf-8".to_owned(),
+                    ),
+                ],
+                body: b"Unauthorized".to_vec(),
+            };
+        }
+        drop(convars);
         let players_connected = self.player_ids().len();
         let players_max = self.convars.borrow().max_clients();
         let resources_running = self.running_resources().len();
@@ -442,8 +487,54 @@ impl ResourceManager {
         }
     }
 
+    /// `GET /resmon.json`: live per-resource monitor snapshot gated identically to `/admin`.
+    fn handle_resmon(&self, request: &WebRequest) -> WebResponse {
+        let convars = self.convars.borrow();
+        if !convars.admin_ui_enabled() {
+            return text(404, "Not Found");
+        }
+        if convars.rcon_password().is_none() {
+            return text(403, "Admin UI requires rcon_password to be configured");
+        }
+        let hitch_warning_ms = convars.hitch_warning_ms();
+        drop(convars);
+        if !is_get_or_head(&request.method) {
+            return method_not_allowed("GET, HEAD");
+        }
+        let resources: Vec<Json> = self
+            .resmon_snapshot()
+            .into_iter()
+            .map(|(name, stats)| {
+                let avg_u32 = u32::try_from(stats.avg_tick_micros).unwrap_or(u32::MAX);
+                json!({
+                    "name": name.as_ref(),
+                    "samples": stats.samples,
+                    "avg_tick_ms": f64::from(avg_u32) / 1000.0,
+                    "max_tick_ms": f64::from(stats.max_tick_micros) / 1000.0,
+                    "last_tick_ms": f64::from(stats.last_tick_micros) / 1000.0,
+                    "heap_bytes": stats.heap_bytes,
+                    "window_events": stats.window_events,
+                    "total_events": stats.total_events,
+                })
+            })
+            .collect();
+        let body = serde_json::to_vec(&json!({
+            "hitch_warning_ms": hitch_warning_ms,
+            "resources": resources,
+        }))
+        .unwrap_or_default();
+        WebResponse {
+            status: 200,
+            headers: vec![
+                ("content-type".to_owned(), "application/json".to_owned()),
+                ("cache-control".to_owned(), "no-store".to_owned()),
+            ],
+            body,
+        }
+    }
+
     /// `POST /rcon`: authenticates with `rcon_password` and runs one console command.
-    fn handle_rcon(&self, request: &WebRequest, peer_ip: IpAddr) -> WebResponse {
+    fn handle_rcon(&self, request: &WebRequest, client_ip: IpAddr) -> WebResponse {
         if request.method != "POST" {
             return WebResponse {
                 status: 405,
@@ -462,7 +553,8 @@ impl ResourceManager {
             return text(403, "RCON is disabled");
         };
         let now = Instant::now();
-        if self.web.rcon_guard.borrow_mut().is_locked(peer_ip, now) {
+        if self.web.rcon_guard.borrow_mut().is_locked(client_ip, now) {
+            warn!("locked out RCON requests from ip:{client_ip}");
             return text(429, "Too many failed RCON attempts");
         }
         let Some((supplied, command)) = parse_rcon_payload(request) else {
@@ -473,16 +565,17 @@ impl ResourceManager {
         };
         let supplied = digest(&SHA256, supplied.as_bytes());
         if !bool::from(expected.as_ref().ct_eq(supplied.as_ref())) {
+            tracing::debug!("rejected unauthorized RCON attempt from ip:{client_ip}");
             self.web
                 .rcon_guard
                 .borrow_mut()
-                .record_failure(peer_ip, now);
+                .record_failure(client_ip, now);
             return text(401, "Unauthorized");
         }
         drop(convars);
-        self.web.rcon_guard.borrow_mut().reset(peer_ip);
+        self.web.rcon_guard.borrow_mut().reset(client_ip);
 
-        let output = capture_logs(|| {
+        let output = capture_logs(self.channel_filters(), || {
             commands::run_line(self, &command, &CommandContext::new(CommandSource::Console));
             commands::drain_queued(self);
         });
@@ -560,9 +653,10 @@ impl Visit for MessageVisitor {
     }
 }
 
-fn capture_logs(run: impl FnOnce()) -> Vec<String> {
+fn capture_logs(filters: &ChannelFilters, run: impl FnOnce()) -> Vec<String> {
     let lines = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::registry().with(LogCollector(Arc::clone(&lines)));
+    let subscriber = tracing_subscriber::registry()
+        .with(LogCollector(Arc::clone(&lines)).with_filter(filters.tracing_filter()));
     tracing::subscriber::with_default(subscriber, run);
     std::mem::take(&mut *lines.lock().unwrap_or_else(PoisonError::into_inner))
 }

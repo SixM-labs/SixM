@@ -1,7 +1,7 @@
 //! The [`JsRuntime`] type: one isolated `QuickJS` runtime and context per resource instance.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
@@ -117,7 +117,10 @@ pub struct JsRuntime {
     pub(crate) refs: RefCell<RefTable>,
     pub(crate) deferred_releases: RefCell<Vec<u32>>,
     pub(crate) kvp_finds: RefCell<Finds>,
+    pub(crate) http_cancels: RefCell<BTreeMap<u64, crate::web::CancelHandler>>,
     pub(crate) rejections: RefCell<Rejections>,
+    /// Cumulative count of invoked event handlers for `resmon`.
+    pub(crate) handled_events: Cell<u64>,
 }
 
 impl JsRuntime {
@@ -169,7 +172,9 @@ impl JsRuntime {
             refs: RefCell::default(),
             deferred_releases: RefCell::default(),
             kvp_finds: RefCell::default(),
+            http_cancels: RefCell::default(),
             rejections: RefCell::default(),
+            handled_events: Cell::new(0),
         });
 
         runtime.install_rejection_tracker();
@@ -382,6 +387,7 @@ impl JsRuntime {
         let refs = std::mem::take(&mut *self.refs.borrow_mut());
         let deferred = std::mem::take(&mut *self.deferred_releases.borrow_mut());
         let kvp_finds = std::mem::take(&mut *self.kvp_finds.borrow_mut());
+        let http_cancels = std::mem::take(&mut *self.http_cancels.borrow_mut());
         let rejections = std::mem::take(&mut *self.rejections.borrow_mut());
         let sym = self.func_ref_symbol.borrow_mut().take();
         drop((
@@ -393,6 +399,7 @@ impl JsRuntime {
             refs,
             deferred,
             kvp_finds,
+            http_cancels,
             rejections,
             sym,
         ));
@@ -500,6 +507,10 @@ impl ScriptRuntime for JsRuntime {
         self.invoke_web(id, request, data)
     }
 
+    fn cancel_http_request(&self, id: u64) {
+        self.invoke_web_cancel(id);
+    }
+
     fn retain_ref(&self, id: u32) -> bool {
         !self.shut.get() && self.retain_function(id)
     }
@@ -526,6 +537,14 @@ impl ScriptRuntime for JsRuntime {
         if !self.shut.replace(true) {
             self.clear_state();
         }
+    }
+
+    fn memory_bytes(&self) -> usize {
+        usize::try_from(self.rt.memory_usage().malloc_size.max(0)).unwrap_or(0)
+    }
+
+    fn handled_events(&self) -> u64 {
+        self.handled_events.get()
     }
 }
 

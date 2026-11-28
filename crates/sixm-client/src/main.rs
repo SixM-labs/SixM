@@ -5,7 +5,7 @@ use std::io::{self, BufRead, IsTerminal};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -69,17 +69,50 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let client = match Client::connect(
-        options.addr,
-        &options.name,
-        options.fingerprint,
-        &options.identity,
-        &options.cache,
-        CONNECT_TIMEOUT,
-    ) {
-        Ok(client) => client,
-        Err(err) => {
+    let (card_tx, card_rx) = mpsc::sync_channel::<(String, mpsc::SyncSender<Option<String>>)>(1);
+    let addr = options.addr;
+    let name = options.name.clone();
+    let fingerprint = options.fingerprint;
+    let identity = options.identity;
+    let cache = options.cache.clone();
+    let connect_handle = thread::spawn(move || {
+        Client::connect_with_card_handler(
+            addr,
+            &name,
+            fingerprint,
+            &identity,
+            &cache,
+            CONNECT_TIMEOUT,
+            |_| {},
+            move |card_json| {
+                let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+                if card_tx.send((card_json.to_owned(), reply_tx)).is_err() {
+                    return None;
+                }
+                reply_rx.recv().unwrap_or(None)
+            },
+        )
+    });
+
+    while !connect_handle.is_finished() {
+        match card_rx.recv_timeout(Duration::from_millis(25)) {
+            Ok((card_json, reply_tx)) => {
+                let answer = prompt_card(&card_json, &input);
+                let _ = reply_tx.send(answer);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let client = match connect_handle.join() {
+        Ok(Ok(client)) => client,
+        Ok(Err(err)) => {
             error!("cannot connect to {}: {err}", options.addr);
+            return ExitCode::FAILURE;
+        }
+        Err(_) => {
+            error!("client connect thread panicked");
             return ExitCode::FAILURE;
         }
     };
@@ -202,6 +235,82 @@ fn spawn_stdin_reader(sink: Sender<Input>) -> io::Result<JoinHandle<()>> {
         })
 }
 
+/// Extracts a concise human-readable summary from an Adaptive Card JSON value.
+fn card_summary(value: &serde_json::Value) -> Option<String> {
+    let obj = value.as_object()?;
+    let mut parts = Vec::new();
+    if let Some(title) = obj.get("title").and_then(serde_json::Value::as_str)
+        && !title.is_empty()
+    {
+        parts.push(title.to_owned());
+    }
+    if let Some(body) = obj.get("body").and_then(serde_json::Value::as_array) {
+        for item in body {
+            if item.get("type").and_then(serde_json::Value::as_str) == Some("TextBlock")
+                && let Some(text) = item.get("text").and_then(serde_json::Value::as_str)
+                && !text.is_empty()
+            {
+                parts.push(text.to_owned());
+            }
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join(" | "))
+}
+
+/// Logs an Adaptive Card presented during deferral and waits for the user to
+/// enter a JSON response, press Enter for `{}`, or type `cancel`.
+fn prompt_card(card_json: &str, input: &Receiver<Input>) -> Option<String> {
+    if let Some(summary) = serde_json::from_str::<serde_json::Value>(card_json)
+        .ok()
+        .as_ref()
+        .and_then(card_summary)
+    {
+        info!("Adaptive Card ({summary}): {card_json}");
+    } else {
+        info!("Adaptive Card: {card_json}");
+    }
+    info!("Enter JSON response, 'cancel', or press Enter for {{}}:");
+
+    let deadline = std::time::Instant::now() + CONNECT_TIMEOUT;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            warn!("Adaptive Card prompt timed out");
+            return None;
+        }
+        match input.recv_timeout(remaining) {
+            Ok(Input::Line(line)) => {
+                let trimmed = line.trim();
+                if trimmed.eq_ignore_ascii_case("cancel") {
+                    return None;
+                }
+                if trimmed.is_empty() {
+                    return Some("{}".to_owned());
+                }
+                if trimmed.len() > sixm_net::MAX_CARD_RESPONSE_BYTES {
+                    warn!(
+                        "Card response exceeds {} bytes; enter shorter JSON or 'cancel':",
+                        sixm_net::MAX_CARD_RESPONSE_BYTES
+                    );
+                    continue;
+                }
+                match serde_json::from_str::<serde_json::Value>(trimmed) {
+                    Ok(_) => return Some(trimmed.to_owned()),
+                    Err(err) => {
+                        warn!(
+                            "Invalid JSON ({err}); enter valid JSON, 'cancel', or press Enter for {{}}:"
+                        );
+                    }
+                }
+            }
+            Ok(Input::Quit(_))
+            | Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => {
+                return None;
+            }
+        }
+    }
+}
+
 /// Logs to standard output with `RUST_LOG` as the filter, defaulting to `info`.
 fn init_logging() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -211,4 +320,34 @@ fn init_logging() {
         .with_ansi(io::stdout().is_terminal())
         .compact()
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_card_accepts_json_empty_cancel_and_retries_invalid() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Input::Line("not-json".to_owned())).unwrap();
+        tx.send(Input::Line(r#"{"accepted":true}"#.to_owned()))
+            .unwrap();
+        assert_eq!(
+            prompt_card(
+                r#"{"title":"Rules","body":[{"type":"TextBlock","text":"Accept?"}]}"#,
+                &rx
+            )
+            .as_deref(),
+            Some(r#"{"accepted":true}"#)
+        );
+
+        tx.send(Input::Line("   ".to_owned())).unwrap();
+        assert_eq!(prompt_card("{}", &rx).as_deref(), Some("{}"));
+
+        tx.send(Input::Line("CANCEL".to_owned())).unwrap();
+        assert_eq!(prompt_card("{}", &rx), None);
+
+        tx.send(Input::Quit("bye".to_owned())).unwrap();
+        assert_eq!(prompt_card("{}", &rx), None);
+    }
 }

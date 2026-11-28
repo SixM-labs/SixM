@@ -29,12 +29,15 @@ use tracing::{debug, error, info, warn};
 use crate::access::AccessStore;
 use crate::buckets::BucketSettings;
 use crate::commands::CommandSource;
-use crate::convars::{Convars, KVP_PATH, RCON_PASSWORD};
+use crate::convars::{
+    Convars, KVP_PATH, PROMETHEUS_BASIC_AUTH_PASSWORD, PROXY_IP_RANGES, RCON_PASSWORD,
+};
 use crate::entities::{EntityStore, EntityUpdate};
+use crate::filters::ChannelFilters;
 use crate::host_functions::{HostFunctions, is_host};
 use crate::http::{Completion, HttpClient};
 use crate::network::{DROP_SCRIPT, DropOrigin, Network};
-use crate::perf::FrameHistory;
+use crate::perf::{FrameHistory, ResourceMonitor, ResourceResmonStats};
 use crate::profiler::Profiler;
 use crate::resource_files::{FileHashes, listing};
 use crate::scope::Scopes;
@@ -86,6 +89,22 @@ pub(crate) struct ScriptCommand {
 struct RunningResource {
     name: ResourceName,
     runtimes: Vec<Rc<dyn ScriptRuntime>>,
+    monitor: Rc<ResourceMonitor>,
+}
+
+/// One running script runtime paired with its owning resource's monitor.
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeSlot {
+    pub(crate) runtime: Rc<dyn ScriptRuntime>,
+    monitor: Rc<ResourceMonitor>,
+}
+
+/// Per-resource grouping for zero-allocation frame ticking and `resmon` queries.
+#[derive(Debug, Clone)]
+struct ResourceTickGroup {
+    name: ResourceName,
+    monitor: Rc<ResourceMonitor>,
+    runtimes: Rc<[Rc<dyn ScriptRuntime>]>,
 }
 
 /// Owns the installed resources and the running ones, and implements [`Host`]
@@ -96,15 +115,17 @@ struct RunningResource {
 #[derive(Debug)]
 pub struct ResourceManager {
     /// Handed to every runtime as its host.
-    me: Weak<Self>,
+    pub(crate) me: Weak<Self>,
     catalog: RefCell<Catalog>,
     scanned: Cell<bool>,
     pub(crate) convars: RefCell<Convars>,
     /// Running resources in start order.
     running: RefCell<Vec<RunningResource>>,
     /// The running runtimes as one shared slice, rebuilt when `running` changes.
-    /// Event fan-out and frames clone this `Rc` instead of allocating.
-    snapshot: RefCell<Rc<[Rc<dyn ScriptRuntime>]>>,
+    /// Event fan-out clones this `Rc` instead of allocating.
+    snapshot: RefCell<Rc<[RuntimeSlot]>>,
+    /// Per-resource tick groups rebuilt alongside `snapshot` when `running` changes.
+    resource_snapshot: RefCell<Rc<[ResourceTickGroup]>>,
     next_instance: Cell<u64>,
     /// Script commands by lower-case name.
     commands: RefCell<BTreeMap<String, ScriptCommand>>,
@@ -159,12 +180,19 @@ pub struct ResourceManager {
     watcher: RefCell<ResourceWatcher>,
     /// When the last master heartbeat was queued.
     last_heartbeat: Cell<Option<Instant>>,
+    /// Console channel filters shared with logging layers and `/rcon`.
+    channel_filters: ChannelFilters,
 }
 
 impl ResourceManager {
     /// Creates a manager with the default convars. Nothing is scanned until the
     /// first start or refresh.
     pub fn new() -> Rc<Self> {
+        Self::with_channel_filters(ChannelFilters::new())
+    }
+
+    /// Creates a manager sharing `channel_filters` with the caller's logging layers.
+    pub fn with_channel_filters(channel_filters: ChannelFilters) -> Rc<Self> {
         Rc::new_cyclic(|me| Self {
             me: me.clone(),
             catalog: RefCell::default(),
@@ -172,6 +200,7 @@ impl ResourceManager {
             convars: RefCell::new(Convars::new()),
             running: RefCell::default(),
             snapshot: RefCell::new(Rc::from(Vec::new())),
+            resource_snapshot: RefCell::new(Rc::from(Vec::new())),
             next_instance: Cell::new(1),
             commands: RefCell::default(),
             queued: RefCell::default(),
@@ -198,7 +227,13 @@ impl ResourceManager {
             watch_enabled: Cell::new(false),
             watcher: RefCell::default(),
             last_heartbeat: Cell::new(None),
+            channel_filters,
         })
+    }
+
+    /// Returns the console channel filter store used by this manager.
+    pub fn channel_filters(&self) -> &ChannelFilters {
+        &self.channel_filters
     }
 
     /// Resolves `name` through the catalog's `provide` aliases to its canonical
@@ -494,6 +529,15 @@ impl ResourceManager {
             self.convars.borrow_mut().set_rcon_password(value);
             return Ok(());
         }
+        if name.eq_ignore_ascii_case(PROMETHEUS_BASIC_AUTH_PASSWORD) {
+            if kind != ConvarKind::Plain {
+                return Err(ScriptError::Runtime(
+                    "use set for sv_prometheusBasicAuthPassword".to_owned(),
+                ));
+            }
+            self.convars.borrow_mut().set_prometheus_password(value);
+            return Ok(());
+        }
         let key = name.to_ascii_lowercase();
         if kind != ConvarKind::Plain && self.convars.borrow().is_restricted(&key) {
             return Err(ScriptError::Runtime(
@@ -505,6 +549,12 @@ impl ResourceManager {
         }
         let previous_value = self.convars.borrow().get(name).map(str::to_owned);
         let previous = self.convars.borrow_mut().set(name, value, kind);
+        if name.eq_ignore_ascii_case(PROXY_IP_RANGES) {
+            let invalid = self.network.trusted_proxies.parse_and_set(value);
+            for bad in invalid {
+                warn!("sv_proxyIPRanges: ignoring invalid CIDR `{bad}`");
+            }
+        }
         match (kind, previous) {
             (ConvarKind::Replicated, _) => self.broadcast_convar(&key, Some(value)),
             (_, Some(ConvarKind::Replicated)) => self.broadcast_convar(&key, None),
@@ -512,10 +562,14 @@ impl ResourceManager {
         }
         if previous_value.as_deref() != Some(value) {
             let replicated = kind == ConvarKind::Replicated;
-            for runtime in self.snapshot().iter() {
-                let can_read = self.convars.borrow().can_read(&key, runtime.resource());
+            for slot in self.snapshot().iter() {
+                let can_read = self
+                    .convars
+                    .borrow()
+                    .can_read(&key, slot.runtime.resource());
                 if can_read {
-                    runtime.deliver_convar_change(name, Some(value), replicated);
+                    slot.runtime
+                        .deliver_convar_change(name, Some(value), replicated);
                 }
             }
         }
@@ -605,31 +659,39 @@ impl ResourceManager {
         }
     }
 
-    /// Runs one frame of every running resource.
+    /// Runs one frame of every running resource, collecting per-resource CPU time
+    /// and local event counts with zero heap allocations.
     pub(crate) fn tick_all(&self, now: Instant) {
         let profiling = self.profiler_active.get();
-        let snapshot = self.snapshot();
-        for runtime in snapshot.iter() {
-            if profiling {
-                let start = Instant::now();
-                runtime.tick(now);
-                self.profiler.borrow_mut().record_span(
-                    runtime.resource(),
-                    "resource",
-                    start,
-                    start.elapsed(),
-                );
-            } else {
-                runtime.tick(now);
+        let groups = self.resource_snapshot.borrow().clone();
+        for group in groups.iter() {
+            let resource_start = Instant::now();
+            for runtime in group.runtimes.iter() {
+                let events_before = runtime.handled_events();
+                if profiling {
+                    let rt_start = Instant::now();
+                    runtime.tick(now);
+                    self.profiler.borrow_mut().record_span(
+                        runtime.resource(),
+                        "resource",
+                        rt_start,
+                        rt_start.elapsed(),
+                    );
+                } else {
+                    runtime.tick(now);
+                }
+                let delta = runtime.handled_events().saturating_sub(events_before);
+                group.monitor.add_events(delta);
             }
+            group.monitor.record_frame(resource_start.elapsed());
         }
     }
 
     /// Runs the due timers of every running resource, without a frame.
     pub(crate) fn run_timers_all(&self, now: Instant) {
         let snapshot = self.snapshot();
-        for runtime in snapshot.iter() {
-            runtime.run_timers(now);
+        for slot in snapshot.iter() {
+            slot.runtime.run_timers(now);
         }
     }
 
@@ -638,7 +700,7 @@ impl ResourceManager {
         let snapshot = self.snapshot();
         snapshot
             .iter()
-            .filter_map(|runtime| runtime.next_deadline())
+            .filter_map(|slot| slot.runtime.next_deadline())
             .min()
     }
 
@@ -669,7 +731,7 @@ impl ResourceManager {
             .collect()
     }
 
-    fn ensure_scanned(&self) {
+    pub(crate) fn ensure_scanned(&self) {
         if !self.scanned.get() {
             self.refresh();
         }
@@ -738,18 +800,48 @@ impl ResourceManager {
     }
 
     /// The running runtimes, in start order, as a shared slice that needs no borrow.
-    pub(crate) fn snapshot(&self) -> Rc<[Rc<dyn ScriptRuntime>]> {
+    pub(crate) fn snapshot(&self) -> Rc<[RuntimeSlot]> {
         self.snapshot.borrow().clone()
     }
 
     fn rebuild_snapshot(&self) {
-        let fresh: Rc<[Rc<dyn ScriptRuntime>]> = self
-            .running
-            .borrow()
+        let running = self.running.borrow();
+        let fresh: Rc<[RuntimeSlot]> = running
             .iter()
-            .flat_map(|res| res.runtimes.iter().cloned())
+            .flat_map(|res| {
+                let monitor = Rc::clone(&res.monitor);
+                res.runtimes.iter().map(move |rt| RuntimeSlot {
+                    runtime: Rc::clone(rt),
+                    monitor: Rc::clone(&monitor),
+                })
+            })
             .collect();
+        let groups: Rc<[ResourceTickGroup]> = running
+            .iter()
+            .map(|res| ResourceTickGroup {
+                name: res.name.clone(),
+                monitor: Rc::clone(&res.monitor),
+                runtimes: Rc::from(res.runtimes.clone()),
+            })
+            .collect();
+        drop(running);
         *self.snapshot.borrow_mut() = fresh;
+        *self.resource_snapshot.borrow_mut() = groups;
+    }
+
+    /// Live per-resource CPU timing, event count, and VM heap usage for `resmon`.
+    pub(crate) fn resmon_snapshot(&self) -> Vec<(ResourceName, ResourceResmonStats)> {
+        let groups = self.resource_snapshot.borrow().clone();
+        groups
+            .iter()
+            .map(|group| {
+                let heap_bytes = group
+                    .runtimes
+                    .iter()
+                    .fold(0usize, |acc, rt| acc.saturating_add(rt.memory_bytes()));
+                (group.name.clone(), group.monitor.stats(heap_bytes))
+            })
+            .collect()
     }
 
     /// Delivers `event` to every running runtime that handles it, in start
@@ -763,7 +855,7 @@ impl ResourceManager {
     pub(crate) fn has_handler(&self, event: &str) -> bool {
         self.snapshot()
             .iter()
-            .any(|runtime| runtime.handles_event(event))
+            .any(|slot| slot.runtime.handles_event(event))
     }
 
     /// Like [`dispatch`](Self::dispatch), for an event that a resource started.
@@ -779,11 +871,18 @@ impl ResourceManager {
         let ctx = invoker.map_or_else(EventContext::new, |name| {
             EventContext::invoked_by(name.clone())
         });
-        for runtime in snapshot.iter() {
-            if runtime.handles_event(event)
-                && let Err(err) = runtime.deliver_event(event, source, args, &ctx)
-            {
-                error!(target: "sixm::script", "[{}] {event}: {err}", runtime.resource());
+        for slot in snapshot.iter() {
+            if slot.runtime.handles_event(event) {
+                let before = slot.runtime.handled_events();
+                if let Err(err) = slot.runtime.deliver_event(event, source, args, &ctx) {
+                    error!(
+                        target: "sixm::script",
+                        "[{}] {event}: {err}",
+                        slot.runtime.resource()
+                    );
+                }
+                let delta = slot.runtime.handled_events().saturating_sub(before);
+                slot.monitor.add_events(delta);
             }
         }
         ctx.is_canceled()
@@ -829,6 +928,7 @@ impl ResourceManager {
         self.running.borrow_mut().push(RunningResource {
             name: name.clone(),
             runtimes,
+            monitor: Rc::new(ResourceMonitor::new()),
         });
         self.rebuild_snapshot();
         self.advertise(name);

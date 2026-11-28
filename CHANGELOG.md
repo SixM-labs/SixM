@@ -9,6 +9,30 @@ may change the protocol and the API.
 
 ### Added
 
+- `SetHttpHandler` request object now exposes `req.address` (proxy-resolved via
+  `sv_proxyIPRanges` when configured) and `req.setCancelHandler(fn)` in Lua and
+  JavaScript, firing when a client disconnects early or the handler times out
+  (`WebRequest.address`, `WebResponder::is_canceled`, `ScriptRuntime::cancel_http_request`).
+- Adaptive Card deferrals via `deferrals.presentCard(card, cb?)` in Lua and
+  JavaScript (wire protocol 16, `ServerMessage::PresentCard`,
+  `ClientMessage::CardResponse`, `NetClient::connect_with_card_handler`,
+  `NetServer::present_card`, and interactive JSON prompting in `sixm-client`).
+- Built-in operator console commands `status`, `clientkick <id> [reason]`,
+  `say <text>` (integrating with `[system]/chat` when started and logging
+  directly otherwise), `cmdlist`, and resource-relative `exec @resource/file.cfg`
+  (supporting `provide` aliases and rejecting symlinks and path traversal).
+- Console channel filtering commands `con_channelFilters`,
+  `con_addChannelFilter <channel> <print|none>`, and
+  `con_removeChannelFilter <channel>`, backed by `ChannelFilters` (`Server::with_channel_filters`,
+  `Server::channel_filters`) across process logs and `POST /rcon`.
+- Proxy and metrics hardening: `sv_proxyIPRanges` (`IpCidr` / `TrustedProxies`)
+  for trusted `X-Forwarded-For` / `X-Real-IP` HTTP client attribution across
+  HTTP rate limits and RCON lockouts, and constant-time Basic Auth on `/metrics`
+  via `sv_prometheusBasicAuthUser` / `sv_prometheusBasicAuthPassword`.
+- Live resource monitor: allocation-free 60-frame `ResourceMonitor` ring buffers,
+  `ScriptRuntime::memory_bytes` / `handled_events`, `resmon` console command,
+  `/resmon.json` and `/admin` live Resource Monitor table, plus configurable frame
+  hitch log warnings via `sixm_hitchWarningMs`.
 - Stock `[system]/chat` resource with the FiveM chat event names, a cancelable
   server message pipeline, command suggestions, and headless client `say`.
 - Clean-room stock `[system]/mapmanager`: scalar `resource_type` metadata,
@@ -61,6 +85,9 @@ may change the protocol and the API.
 
 ### Changed
 
+- Moved server `say` from `[system]/chat` into a built-in server command
+  (`command.say` ACE still governs player and resource callers;
+  `GetRegisteredCommands()` / `chat:init` still advertises `/say`).
 - `baseevents` registers the FiveM channel names (`enteringVehicle`,
   `enteringAborted`, `enteredVehicle`, `leftVehicle`, `onPlayerKilled`,
   `onPlayerWasted`, `onPlayerDied`); `onPlayerEnteredVehicle` and

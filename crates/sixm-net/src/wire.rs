@@ -12,7 +12,7 @@ use std::cell::Cell;
 use std::fmt;
 use std::sync::Arc;
 
-use quinn::{ReadExactError, RecvStream};
+use quinn::RecvStream;
 use serde::Deserialize as _;
 use serde::de::{
     self, DeserializeSeed, Deserializer, EnumAccess, SeqAccess, VariantAccess, Visitor,
@@ -66,6 +66,7 @@ const CLIENT_VARIANTS: &[&str] = &[
     "CreateEntity",
     "RequestEntityControl",
     "SetStateBag",
+    "CardResponse",
 ];
 const SERVER_VARIANTS: &[&str] = &[
     "Welcome",
@@ -89,6 +90,7 @@ const SERVER_VARIANTS: &[&str] = &[
     "EntityCreateRefused",
     "EntityOwner",
     "EntityStates",
+    "PresentCard",
 ];
 /// Most files one snapshot entry carries. Larger resources are split into
 /// several entries of the same name, so one entry always fits a frame.
@@ -835,6 +837,41 @@ impl Serialize for DeferralFrame<'_> {
     }
 }
 
+/// Encodes an Adaptive Card sent during deferral, checking [`MAX_CARD_BYTES`].
+pub(crate) fn encode_present_card(
+    id: u64,
+    card_json: &str,
+    max_frame: usize,
+) -> Result<Arc<[u8]>, NetError> {
+    if card_json.len() > crate::protocol::MAX_CARD_BYTES {
+        return Err(NetError::InvalidInput(format!(
+            "deferral card exceeds {} bytes",
+            crate::protocol::MAX_CARD_BYTES
+        )));
+    }
+    encode_frame(&PresentCardFrame { id, card_json }, max_frame)
+}
+
+/// Borrowed encoding of [`ServerMessage::PresentCard`], written with its wire tag.
+struct PresentCardFrame<'a> {
+    id: u64,
+    card_json: &'a str,
+}
+
+impl Serialize for PresentCardFrame<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut variant = serializer.serialize_struct_variant(
+            MESSAGE_NAME,
+            ServerMessage::PRESENT_CARD_TAG,
+            "PresentCard",
+            2,
+        )?;
+        variant.serialize_field("id", &self.id)?;
+        variant.serialize_field("card_json", self.card_json)?;
+        variant.end()
+    }
+}
+
 /// Encodes a console line a client sends to the server. The line must be 1 to
 /// [`MAX_COMMAND_LEN`] bytes long.
 pub(crate) fn encode_command(line: &str, max_frame: usize) -> Result<Arc<[u8]>, NetError> {
@@ -922,6 +959,61 @@ fn decode_budgeted<'de, S: DeserializeSeed<'de>>(
     }
 }
 
+/// Cancel-safe frame reader for `RecvStream` across `tokio::select!` arms.
+#[derive(Default)]
+pub(crate) struct FrameReader {
+    header: [u8; FRAME_HEADER_LEN],
+    header_read: usize,
+    payload: Option<Vec<u8>>,
+    payload_read: usize,
+}
+
+impl FrameReader {
+    /// Reads one frame payload, preserving any partially read header or payload
+    /// in `self` if cancelled by an enclosing `select!`.
+    pub(crate) async fn read(
+        &mut self,
+        recv: &mut RecvStream,
+        max_frame: usize,
+    ) -> Result<Option<Vec<u8>>, NetError> {
+        while self.header_read < FRAME_HEADER_LEN {
+            match recv.read(&mut self.header[self.header_read..]).await {
+                Ok(Some(n)) => self.header_read += n,
+                Ok(None) if self.header_read == 0 => return Ok(None),
+                Ok(None) => {
+                    return Err(NetError::Protocol(
+                        "stream ended inside a frame header".to_owned(),
+                    ));
+                }
+                Err(_) => return Err(NetError::Closed),
+            }
+        }
+        if self.payload.is_none() {
+            let len = usize::try_from(u32::from_le_bytes(self.header)).unwrap_or(usize::MAX);
+            if len > max_frame {
+                return Err(NetError::FrameTooLarge {
+                    len,
+                    max: max_frame,
+                });
+            }
+            self.payload = Some(vec![0_u8; len]);
+        }
+        let buf = self.payload.as_mut().expect("payload buffer initialized");
+        while self.payload_read < buf.len() {
+            match recv.read(&mut buf[self.payload_read..]).await {
+                Ok(Some(n)) => self.payload_read += n,
+                Ok(None) => {
+                    return Err(NetError::Protocol("stream ended inside a frame".to_owned()));
+                }
+                Err(_) => return Err(NetError::Closed),
+            }
+        }
+        self.header_read = 0;
+        self.payload_read = 0;
+        Ok(self.payload.take())
+    }
+}
+
 /// Reads one frame payload. Returns `Ok(None)` when the peer finished the
 /// stream cleanly between frames, and [`NetError::Closed`] when the stream
 /// failed for a transport reason.
@@ -932,32 +1024,7 @@ pub(crate) async fn read_frame(
     recv: &mut RecvStream,
     max_frame: usize,
 ) -> Result<Option<Vec<u8>>, NetError> {
-    let mut header = [0_u8; FRAME_HEADER_LEN];
-    match recv.read_exact(&mut header).await {
-        Ok(()) => {}
-        Err(ReadExactError::FinishedEarly(0)) => return Ok(None),
-        Err(ReadExactError::FinishedEarly(_)) => {
-            return Err(NetError::Protocol(
-                "stream ended inside a frame header".to_owned(),
-            ));
-        }
-        Err(ReadExactError::ReadError(_)) => return Err(NetError::Closed),
-    }
-    let len = usize::try_from(u32::from_le_bytes(header)).unwrap_or(usize::MAX);
-    if len > max_frame {
-        return Err(NetError::FrameTooLarge {
-            len,
-            max: max_frame,
-        });
-    }
-    let mut payload = vec![0_u8; len];
-    match recv.read_exact(&mut payload).await {
-        Ok(()) => Ok(Some(payload)),
-        Err(ReadExactError::FinishedEarly(_)) => {
-            Err(NetError::Protocol("stream ended inside a frame".to_owned()))
-        }
-        Err(ReadExactError::ReadError(_)) => Err(NetError::Closed),
-    }
+    FrameReader::default().read(recv, max_frame).await
 }
 
 /// Borrowed sequence of values.
@@ -1148,6 +1215,19 @@ impl<'de> Visitor<'de> for ClientMessageVisitor<'_> {
                     key,
                     value: StateValue(value),
                 }),
+            ClientMessage::CARD_RESPONSE_TAG => variant
+                .newtype_variant::<(u64, Option<String>)>()
+                .and_then(|(id, data_json)| {
+                    if let Some(ref json) = data_json
+                        && json.len() > crate::protocol::MAX_CARD_RESPONSE_BYTES
+                    {
+                        return Err(de::Error::custom(format!(
+                            "card response is over {} bytes",
+                            crate::protocol::MAX_CARD_RESPONSE_BYTES
+                        )));
+                    }
+                    Ok(ClientMessage::CardResponse { id, data_json })
+                }),
             other => Err(de::Error::unknown_variant(
                 &other.to_string(),
                 CLIENT_VARIANTS,
@@ -1195,7 +1275,8 @@ impl<'de> Visitor<'de> for ServerMessageVisitor<'_> {
             | ServerMessage::EVENT_TAG
             | ServerMessage::KICKED_TAG
             | ServerMessage::CONVARS_TAG
-            | ServerMessage::DEFERRAL_TAG => self.visit_session_variant(tag, variant),
+            | ServerMessage::DEFERRAL_TAG
+            | ServerMessage::PRESENT_CARD_TAG => self.visit_session_variant(tag, variant),
             ServerMessage::STATE_BAG_TAG
             | ServerMessage::STATE_BAG_REMOVED_TAG
             | ServerMessage::STATE_SNAPSHOT_TAG
@@ -1254,6 +1335,19 @@ impl<'de> ServerMessageVisitor<'_> {
                 .newtype_variant::<String>()
                 .and_then(checked_deferral::<V::Error>)
                 .map(|message| ServerMessage::Deferral { message }),
+            ServerMessage::PRESENT_CARD_TAG => {
+                variant
+                    .newtype_variant::<(u64, String)>()
+                    .and_then(|(id, card_json)| {
+                        if card_json.len() > crate::protocol::MAX_CARD_BYTES {
+                            return Err(de::Error::custom(format!(
+                                "card json is over {} bytes",
+                                crate::protocol::MAX_CARD_BYTES
+                            )));
+                        }
+                        Ok(ServerMessage::PresentCard { id, card_json })
+                    })
+            }
             _ => unreachable!(),
         }
     }
@@ -3794,6 +3888,51 @@ mod tests {
             }
             other => panic!("expected a deferral, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn present_card_and_card_response_round_trip_and_enforce_caps() {
+        let card = encode_present_card(42, r#"{"type":"AdaptiveCard"}"#, MAX_FRAME)
+            .expect("present card encodes");
+        assert!(matches!(
+            decode_server_message(&card[FRAME_HEADER_LEN..]),
+            Ok(ServerMessage::PresentCard { id: 42, card_json }) if card_json == r#"{"type":"AdaptiveCard"}"#
+        ));
+
+        assert!(
+            encode_present_card(
+                1,
+                &"x".repeat(crate::protocol::MAX_CARD_BYTES + 1),
+                MAX_FRAME
+            )
+            .is_err()
+        );
+
+        let resp = encode_frame(
+            &ClientMessage::CardResponse {
+                id: 42,
+                data_json: Some(r#"{"ok":true}"#.to_owned()),
+            },
+            MAX_FRAME,
+        )
+        .expect("card response encodes");
+        assert!(matches!(
+            decode_client_message(&resp[FRAME_HEADER_LEN..]),
+            Ok(ClientMessage::CardResponse { id: 42, data_json: Some(json) }) if json == r#"{"ok":true}"#
+        ));
+
+        let oversize_resp = encode_frame(
+            &ClientMessage::CardResponse {
+                id: 42,
+                data_json: Some("y".repeat(crate::protocol::MAX_CARD_RESPONSE_BYTES + 1)),
+            },
+            MAX_FRAME,
+        )
+        .expect("raw frame encodes");
+        assert!(matches!(
+            decode_client_message(&oversize_resp[FRAME_HEADER_LEN..]),
+            Err(NetError::Protocol(_))
+        ));
     }
 
     fn convars_of(message: ServerMessage) -> Option<Vec<(String, Option<String>)>> {

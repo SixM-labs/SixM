@@ -1,10 +1,10 @@
 //! `SetHttpHandler` and the `req` / `res` JS objects a handler receives.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
 use rquickjs::function::Opt;
-use rquickjs::{Ctx, Exception, Function, Object, Value as JsValue};
+use rquickjs::{Ctx, Exception, Function, Object, Persistent, Value as JsValue};
 use sixm_core::{Host, ScriptError, WebReply, WebRequest};
 
 use crate::convert::bytes_to_js;
@@ -12,6 +12,12 @@ use crate::http::read_headers;
 use crate::natives::data_bytes;
 use crate::runtime::{CALLBACK_BUDGET, JsRuntime, js_err};
 use crate::sandbox::catch_script;
+
+/// A registered `req.setCancelHandler` callback and the shared open flag of its request.
+pub(crate) struct CancelHandler {
+    pub(crate) func: Option<Persistent<Function<'static>>>,
+    pub(crate) open: Rc<Cell<bool>>,
+}
 
 /// Installs `SetHttpHandler((req, res) => { ... })`, server-only.
 pub(crate) fn install<'js>(ctx: &Ctx<'js>, weak: &Weak<JsRuntime>) -> rquickjs::Result<()> {
@@ -44,33 +50,69 @@ impl JsRuntime {
         let handler = self
             .lookup_function(id)
             .ok_or_else(|| ScriptError::StaleRef(self.func_ref(id)))?;
+        let open = Rc::new(Cell::new(true));
+        self.http_cancels.borrow_mut().insert(
+            request,
+            CancelHandler {
+                func: None,
+                open: Rc::clone(&open),
+            },
+        );
         let _budget = self.enter_budget(CALLBACK_BUDGET);
         let outcome = self.with_ctx(|ctx| {
             let body_handler: Rc<RefCell<Option<Function<'_>>>> = Rc::default();
-            let result = self.run_web(ctx, &handler, request, data, &body_handler);
+            let result = self.run_web(ctx, &handler, request, data, &body_handler, &open);
             let leftover = body_handler.borrow_mut().take();
             drop(leftover);
             result
         });
+        if outcome.is_err() {
+            open.set(false);
+            self.http_cancels.borrow_mut().remove(&request);
+        }
         self.drain_jobs();
         outcome
+    }
+
+    pub(crate) fn invoke_web_cancel(&self, id: u64) {
+        if self.shut.get() {
+            return;
+        }
+        let Some(entry) = self.http_cancels.borrow_mut().remove(&id) else {
+            return;
+        };
+        entry.open.set(false);
+        let Some(saved_func) = entry.func else {
+            return;
+        };
+        let _budget = self.enter_budget(CALLBACK_BUDGET);
+        let outcome = self.with_ctx(|ctx| {
+            let func = saved_func.restore(ctx).map_err(|err| js_err(ctx, err))?;
+            catch_script(ctx, func.call::<_, ()>(()))
+        });
+        if let Err(err) = outcome {
+            tracing::error!(target: "sixm::script", "[{}] {err}", self.resource);
+        }
+        self.drain_jobs();
     }
 
     fn run_web<'js>(
         &self,
         ctx: &Ctx<'js>,
-        handler: &rquickjs::Persistent<Function<'static>>,
+        handler: &Persistent<Function<'static>>,
         request: u64,
         data: &WebRequest,
         body_handler: &Rc<RefCell<Option<Function<'js>>>>,
+        open: &Rc<Cell<bool>>,
     ) -> Result<(), ScriptError> {
         let handler = handler
             .clone()
             .restore(ctx)
             .map_err(|err| js_err(ctx, err))?;
-        let req = build_request(ctx, data, body_handler).map_err(|err| js_err(ctx, err))?;
-        let res =
-            build_response(ctx, self.host.clone(), request).map_err(|err| js_err(ctx, err))?;
+        let req = build_request(ctx, &self.me, request, data, body_handler, open)
+            .map_err(|err| js_err(ctx, err))?;
+        let res = build_response(ctx, self.host.clone(), &self.me, request, open)
+            .map_err(|err| js_err(ctx, err))?;
         catch_script(ctx, handler.call::<_, ()>((req, res)))?;
         let body = body_handler.borrow_mut().take();
         if let Some(body_fn) = body {
@@ -83,10 +125,14 @@ impl JsRuntime {
 
 fn build_request<'js>(
     ctx: &Ctx<'js>,
+    weak: &Weak<JsRuntime>,
+    request: u64,
     data: &WebRequest,
     body_handler: &Rc<RefCell<Option<Function<'js>>>>,
+    open: &Rc<Cell<bool>>,
 ) -> rquickjs::Result<Object<'js>> {
     let req = Object::new(ctx.clone())?;
+    req.set("address", data.address.as_str())?;
     req.set("method", data.method.as_str())?;
     req.set("path", data.path.as_str())?;
     req.set("query", data.query.as_str())?;
@@ -111,13 +157,39 @@ fn build_request<'js>(
         },
     )?;
     req.set("setDataHandler", set_data)?;
+
+    let cancel_open = Rc::clone(open);
+    let cancel_weak = weak.clone();
+    let set_cancel = Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>, cb: JsValue<'js>| -> rquickjs::Result<()> {
+            let Some(func) = cb.into_function() else {
+                return Err(Exception::throw_type(
+                    &ctx,
+                    "setCancelHandler needs a function to call when the request is canceled",
+                ));
+            };
+            if cancel_open.get()
+                && let Some(rt) = cancel_weak.upgrade().filter(|r| !r.shut.get())
+            {
+                let mut cancels = rt.http_cancels.borrow_mut();
+                if let Some(entry) = cancels.get_mut(&request) {
+                    entry.func = Some(Persistent::save(&ctx, func));
+                }
+            }
+            Ok(())
+        },
+    )?;
+    req.set("setCancelHandler", set_cancel)?;
     Ok(req)
 }
 
 fn build_response<'js>(
     ctx: &Ctx<'js>,
     host: Weak<dyn Host>,
+    weak: &Weak<JsRuntime>,
     request: u64,
+    open: &Rc<Cell<bool>>,
 ) -> rquickjs::Result<Object<'js>> {
     let res = Object::new(ctx.clone())?;
 
@@ -154,23 +226,38 @@ fn build_response<'js>(
     )?;
 
     let write_host = host.clone();
+    let write_open = Rc::clone(open);
+    let write_weak = weak.clone();
     res.set(
         "write",
         Function::new(
             ctx.clone(),
             move |ctx: Ctx<'js>, data: Opt<Option<JsValue<'js>>>| -> rquickjs::Result<()> {
                 let bytes = body_of(&ctx, data.0.flatten().as_ref())?;
-                reply(&ctx, &write_host, request, WebReply::Write(bytes))
+                if let Err(err) = reply(&ctx, &write_host, request, WebReply::Write(bytes)) {
+                    write_open.set(false);
+                    if let Some(rt) = write_weak.upgrade() {
+                        rt.http_cancels.borrow_mut().remove(&request);
+                    }
+                    return Err(err);
+                }
+                Ok(())
             },
         )?,
     )?;
 
+    let send_open = Rc::clone(open);
+    let send_weak = weak.clone();
     res.set(
         "send",
         Function::new(
             ctx.clone(),
             move |ctx: Ctx<'js>, data: Opt<Option<JsValue<'js>>>| -> rquickjs::Result<()> {
                 let bytes = body_of(&ctx, data.0.flatten().as_ref())?;
+                send_open.set(false);
+                if let Some(rt) = send_weak.upgrade() {
+                    rt.http_cancels.borrow_mut().remove(&request);
+                }
                 reply(&ctx, &host, request, WebReply::End(bytes))
             },
         )?,

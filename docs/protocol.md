@@ -90,6 +90,8 @@ forge a reference into server code.
 | Metadata key length | 1 to 256 bytes |
 | Metadata value length | 4096 bytes |
 | Deferral message length | 4096 bytes, cut on a character boundary when sent |
+| Adaptive Card JSON length | 64 KiB (`MAX_CARD_BYTES`) |
+| Adaptive Card response JSON length | 64 KiB (`MAX_CARD_RESPONSE_BYTES`) |
 | Refusal reason length | 256 bytes |
 | Resource name length | 256 bytes |
 | Client file name length | 1024 bytes |
@@ -112,6 +114,7 @@ Client to server (`ClientMessage`):
 | 5 | `CreateEntity` | `id: u32`, `kind: u8`, `model: u32`, `position: [f32; 3]`, `rotation: [f32; 3]` |
 | 6 | `RequestEntityControl` | `id: u32` |
 | 7 | `SetStateBag` | `bag: string`, `key: string`, `value: value` (nil deletes the key) |
+| 8 | `CardResponse` | `id: u64`, `data_json: Option<string>` (at most 64 KiB; `None` = canceled) |
 
 `Command` carries a console line typed on the client that the client does not
 know. The server runs it with the player's permissions, and it shares the
@@ -162,6 +165,7 @@ Server to client (`ServerMessage`):
 | 18 | `EntityCreateRefused` | `id: u32`, `reason: string`, at most 256 bytes |
 | 19 | `EntityOwner` | `id: u32`, `owner: u32` (`0` for server), `epoch: u32`, `position: [f32; 3]`, `rotation: [f32; 3]` |
 | 20 | `EntityStates` | list of delta state updates (see [Entity states](#entity-states)) |
+| 21 | `PresentCard` | `id: u64`, `card_json: string` (at most 64 KiB) |
 
 ### Convars
 
@@ -173,19 +177,23 @@ decoding budget. A join snapshot may span several frames.
 
 ### Handshake
 
-1. The client sends `Hello` with `protocol = 15` and its player name. The
+1. The client sends `Hello` with `protocol = 16` and its player name. The
    server has already verified the client certificate, so only a client with a
    certificate gets this far.
 2. A different protocol number is refused with `Rejected`, for example
-   `unsupported protocol version 7, server speaks 8`.
+   `unsupported protocol version 15, server speaks 16`.
 3. A name outside 1 to 64 characters is refused.
 4. The server replies `Welcome`, or `Rejected` with a reason.
 
    While a script holds the connection with a deferral, the server sends any
-   number of `Deferral` messages before that reply. Each carries a progress
-   text. The client keeps waiting, and each `Deferral` restarts its handshake
-   timeout, so a long queue does not time out. The server never sends
-   `Deferral` after `Welcome`.
+   number of `Deferral` and `PresentCard` messages before that reply. Each
+   `Deferral` carries a progress text; each `PresentCard` carries a card id and
+   an Adaptive Card JSON payload, and the client replies with `CardResponse`
+   carrying the same id and either a JSON string or `None` when canceled. Each
+   `Deferral` and `PresentCard` / `CardResponse` exchange restarts the client's
+   handshake timeout, so a long queue or card flow does not time out. The
+   server never sends `Deferral` or `PresentCard` after `Welcome`, and `CardResponse`
+   is ignored once accepted.
 5. The server sends every replicated convar as `Convars`, when there are any.
    It may span several frames. Without replicated convars, no frame is sent.
 6. The server sends every existing entity as an `EntitySnapshot`, which may
@@ -382,7 +390,7 @@ are read from the frame, so their size cannot exceed it.
 
 ## Versioning
 
-- `PROTOCOL_VERSION` is `15`. It is sent in `Hello`. A server refuses any other
+- `PROTOCOL_VERSION` is `16`. It is sent in `Hello`. A server refuses any other
   value.
 - The ALPN string is `sixm/1`. It does not change with the protocol version.
 - Enum order, field order and limits can change between protocol versions.

@@ -15,7 +15,8 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr, TcpListener as StdListener};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -64,18 +65,226 @@ pub struct WebExchange {
     pub responder: WebResponder,
 }
 
+/// A parsed IPv4 or IPv6 CIDR range for trusted reverse-proxy matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IpCidr {
+    /// IPv4 network prefix (`0..=32`).
+    V4 { network: u32, mask: u32 },
+    /// IPv6 network prefix (`0..=128`).
+    V6 { network: u128, mask: u128 },
+}
+
+impl IpCidr {
+    /// Parses a CIDR (`10.0.0.0/8`, `fd00::/8`) or bare IP (`/32`, `/128`).
+    pub fn parse(spec: &str) -> Result<Self, &'static str> {
+        let trimmed = spec.trim();
+        if trimmed.is_empty() {
+            return Err("empty CIDR");
+        }
+        let (addr_str, prefix_opt) = match trimmed.split_once('/') {
+            Some((addr, prefix)) => (addr, Some(prefix)),
+            None => (trimmed, None),
+        };
+        let ip: IpAddr = addr_str.parse().map_err(|_| "invalid IP address")?;
+        match ip {
+            IpAddr::V4(v4) => {
+                let prefix = match prefix_opt {
+                    Some(raw) => raw.parse::<u32>().map_err(|_| "invalid prefix length")?,
+                    None => 32,
+                };
+                if prefix > 32 {
+                    return Err("IPv4 prefix exceeds 32");
+                }
+                let mask = if prefix == 0 {
+                    0
+                } else {
+                    u32::MAX << (32 - prefix)
+                };
+                Ok(Self::V4 {
+                    network: u32::from_be_bytes(v4.octets()) & mask,
+                    mask,
+                })
+            }
+            IpAddr::V6(v6) => {
+                let prefix = match prefix_opt {
+                    Some(raw) => raw.parse::<u32>().map_err(|_| "invalid prefix length")?,
+                    None => 128,
+                };
+                if prefix > 128 {
+                    return Err("IPv6 prefix exceeds 128");
+                }
+                let mask = if prefix == 0 {
+                    0
+                } else {
+                    u128::MAX << (128 - prefix)
+                };
+                Ok(Self::V6 {
+                    network: u128::from_be_bytes(v6.octets()) & mask,
+                    mask,
+                })
+            }
+        }
+    }
+
+    /// Returns whether `ip` belongs to this CIDR range.
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        let normalized = normalize_ip(ip);
+        match (self, normalized) {
+            (Self::V4 { network, mask }, IpAddr::V4(v4)) => {
+                (u32::from_be_bytes(v4.octets()) & *mask) == *network
+            }
+            (Self::V6 { network, mask }, IpAddr::V6(v6)) => {
+                (u128::from_be_bytes(v6.octets()) & *mask) == *network
+            }
+            (Self::V6 { network, mask }, IpAddr::V4(v4)) => {
+                let mapped = v4.to_ipv6_mapped();
+                (u128::from_be_bytes(mapped.octets()) & *mask) == *network
+            }
+            _ => false,
+        }
+    }
+}
+
+fn normalize_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(v6),
+        },
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+    }
+}
+
+/// Shared store of trusted reverse-proxy CIDRs (`sv_proxyIPRanges`).
+///
+/// Cloning shares the same underlying rule set. When no CIDRs are configured,
+/// [`resolve_ip`](Self::resolve_ip) skips locking and returns the TCP peer IP.
+#[derive(Debug, Clone, Default)]
+pub struct TrustedProxies {
+    has_ranges: Arc<AtomicBool>,
+    ranges: Arc<RwLock<Vec<IpCidr>>>,
+}
+
+impl TrustedProxies {
+    /// Creates an empty trusted-proxy store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replaces the trusted ranges with `ranges`.
+    pub fn set_ranges(&self, ranges: Vec<IpCidr>) {
+        let mut guard = self.ranges.write().unwrap_or_else(PoisonError::into_inner);
+        *guard = ranges;
+        self.has_ranges.store(!guard.is_empty(), Ordering::Release);
+    }
+
+    /// Parses comma/whitespace-separated CIDR tokens, applies valid entries, and
+    /// returns any invalid tokens.
+    pub fn parse_and_set(&self, raw: &str) -> Vec<String> {
+        let mut valid = Vec::new();
+        let mut invalid = Vec::new();
+        for token in raw.split(|c: char| c == ',' || c.is_ascii_whitespace()) {
+            let trimmed = token.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match IpCidr::parse(trimmed) {
+                Ok(cidr) => valid.push(cidr),
+                Err(_) => invalid.push(trimmed.to_owned()),
+            }
+        }
+        self.set_ranges(valid);
+        invalid
+    }
+
+    /// Resolves the effective client IP for an HTTP request from `peer_ip`.
+    ///
+    /// Proxy headers (`X-Forwarded-For`, `X-Real-IP`) are honored only when
+    /// `peer_ip` matches a configured CIDR.
+    pub fn resolve_ip<'a>(
+        &self,
+        peer_ip: IpAddr,
+        headers: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> IpAddr {
+        let peer_norm = normalize_ip(peer_ip);
+        if !self.has_ranges.load(Ordering::Acquire) {
+            return peer_norm;
+        }
+        let ranges = self.ranges.read().unwrap_or_else(PoisonError::into_inner);
+        if !ranges.iter().any(|cidr| cidr.contains(peer_norm)) {
+            return peer_norm;
+        }
+
+        let mut xff_tokens: Vec<&str> = Vec::new();
+        let mut real_ip: Option<&str> = None;
+        for (name, value) in headers {
+            if name.eq_ignore_ascii_case("x-forwarded-for") {
+                for part in value.split(',') {
+                    let trimmed = part.trim();
+                    if !trimmed.is_empty() {
+                        xff_tokens.push(trimmed);
+                    }
+                }
+            } else if name.eq_ignore_ascii_case("x-real-ip") && real_ip.is_none() {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    real_ip = Some(trimmed);
+                }
+            }
+        }
+
+        // Walk X-Forwarded-For right-to-left: stop on malformed entries and select
+        // the rightmost valid IP not matching a trusted proxy CIDR.
+        let mut leftmost_trusted: Option<IpAddr> = None;
+        for token in xff_tokens.iter().rev() {
+            let Ok(parsed) = token.parse::<IpAddr>() else {
+                leftmost_trusted = None;
+                break;
+            };
+            let ip = normalize_ip(parsed);
+            if ranges.iter().any(|cidr| cidr.contains(ip)) {
+                leftmost_trusted = Some(ip);
+            } else {
+                return ip;
+            }
+        }
+        if let Some(ip) = leftmost_trusted {
+            return ip;
+        }
+
+        if let Some(raw_real) = real_ip
+            && let Ok(parsed) = raw_real.parse::<IpAddr>()
+        {
+            return normalize_ip(parsed);
+        }
+
+        peer_norm
+    }
+}
+
 /// Sends the answer to one request. Consumed by the send, so one request is
 /// answered at most once.
 #[derive(Debug)]
 pub struct WebResponder {
     sender: oneshot::Sender<WebResponse>,
     peer_ip: IpAddr,
+    client_ip: IpAddr,
 }
 
 impl WebResponder {
     /// The TCP peer's address, as observed by the listener.
     pub fn peer_ip(&self) -> IpAddr {
         self.peer_ip
+    }
+
+    /// The resolved client IP address (honoring [`TrustedProxies`] when configured).
+    pub fn client_ip(&self) -> IpAddr {
+        self.client_ip
+    }
+
+    /// Returns whether the client disconnected or the request timed out in the listener.
+    pub fn is_canceled(&self) -> bool {
+        self.sender.is_closed()
     }
 
     /// Sends `response`. Does nothing when the client has already gone.
@@ -89,6 +298,7 @@ impl WebResponder {
 #[derive(Debug)]
 pub struct WebServer {
     addr: SocketAddr,
+    proxies: TrustedProxies,
     stop: Option<oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -101,19 +311,35 @@ impl WebServer {
         addr: SocketAddr,
         on_request: impl Fn(WebExchange) + Send + Sync + 'static,
     ) -> Result<Self, NetError> {
+        Self::bind_with_proxies(addr, TrustedProxies::new(), on_request)
+    }
+
+    /// Binds `addr` for TCP using shared [`TrustedProxies`] for client IP attribution.
+    pub fn bind_with_proxies(
+        addr: SocketAddr,
+        proxies: TrustedProxies,
+        on_request: impl Fn(WebExchange) + Send + Sync + 'static,
+    ) -> Result<Self, NetError> {
         let listener = StdListener::bind(addr).map_err(|source| NetError::Bind { addr, source })?;
         listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
         let (stop, stop_rx) = oneshot::channel();
         let on_request: Arc<dyn Fn(WebExchange) + Send + Sync> = Arc::new(on_request);
+        let thread_proxies = proxies.clone();
         let thread = thread::Builder::new()
             .name("sixm-web".to_owned())
-            .spawn(move || run(listener, &on_request, stop_rx))?;
+            .spawn(move || run(listener, &on_request, &thread_proxies, stop_rx))?;
         Ok(Self {
             addr,
+            proxies,
             stop: Some(stop),
             thread: Some(thread),
         })
+    }
+
+    /// The trusted-proxy store consulted for client IP attribution.
+    pub fn trusted_proxies(&self) -> &TrustedProxies {
+        &self.proxies
     }
 
     /// The address the listener is bound to, with the port resolved.
@@ -137,6 +363,7 @@ impl Drop for WebServer {
 fn run(
     listener: StdListener,
     on_request: &Arc<dyn Fn(WebExchange) + Send + Sync>,
+    proxies: &TrustedProxies,
     stop: oneshot::Receiver<()>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -175,9 +402,10 @@ fn run(
                 };
                 let on_request = Arc::clone(on_request);
                 let limits = Arc::clone(&limits);
+                let proxies = proxies.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    serve_connection(stream, peer.ip(), on_request, limits).await;
+                    serve_connection(stream, peer.ip(), on_request, limits, proxies).await;
                 });
             }
         };
@@ -194,11 +422,17 @@ async fn serve_connection(
     ip: IpAddr,
     on_request: Arc<dyn Fn(WebExchange) + Send + Sync>,
     limits: Arc<RateLimits>,
+    proxies: TrustedProxies,
 ) {
     let service = service_fn(move |request: Request<Incoming>| {
         let on_request = Arc::clone(&on_request);
         let limits = Arc::clone(&limits);
-        async move { Ok::<_, Infallible>(answer_with_timeout(request, ip, &on_request, &limits).await) }
+        let proxies = proxies.clone();
+        async move {
+            Ok::<_, Infallible>(
+                answer_with_timeout(request, ip, &on_request, &limits, &proxies).await,
+            )
+        }
     });
     let mut builder = http1::Builder::new();
     builder.keep_alive(false);
@@ -218,8 +452,9 @@ async fn answer_with_timeout(
     ip: IpAddr,
     on_request: &Arc<dyn Fn(WebExchange) + Send + Sync>,
     limits: &RateLimits,
+    proxies: &TrustedProxies,
 ) -> Response<Full<Bytes>> {
-    let answer = answer(request, ip, on_request, limits);
+    let answer = answer(request, ip, on_request, limits, proxies);
     match tokio::time::timeout(REQUEST_TIMEOUT, answer).await {
         Ok(response) => response,
         Err(_) => text_response(
@@ -235,11 +470,19 @@ async fn answer(
     ip: IpAddr,
     on_request: &Arc<dyn Fn(WebExchange) + Send + Sync>,
     limits: &RateLimits,
+    proxies: &TrustedProxies,
 ) -> Response<Full<Bytes>> {
-    if !limits.admit(ip, Instant::now()) {
+    let (parts, body) = request.into_parts();
+    let client_ip = proxies.resolve_ip(
+        ip,
+        parts
+            .headers
+            .iter()
+            .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?))),
+    );
+    if !limits.admit(client_ip, Instant::now()) {
         return text_response(StatusCode::TOO_MANY_REQUESTS, "Too many requests");
     }
-    let (parts, body) = request.into_parts();
     if declared_length(&parts.headers).is_some_and(|length| length > MAX_BODY) {
         return text_response(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -273,6 +516,7 @@ async fn answer(
             })
             .collect(),
         body,
+        address: client_ip.to_string(),
     };
     let (sender, receiver) = oneshot::channel();
     on_request(WebExchange {
@@ -280,6 +524,7 @@ async fn answer(
         responder: WebResponder {
             sender,
             peer_ip: ip,
+            client_ip,
         },
     });
     match receiver.await {
@@ -436,5 +681,102 @@ mod tests {
             body: Vec::new(),
         });
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn ip_cidr_parses_masks_and_normalizes_ipv4_mapped_v6() {
+        let net4 = IpCidr::parse("10.20.30.40/8").expect("v4 cidr");
+        assert!(net4.contains("10.0.0.1".parse().unwrap()));
+        assert!(net4.contains("::ffff:10.99.1.2".parse().unwrap()));
+        assert!(!net4.contains("11.0.0.1".parse().unwrap()));
+
+        let bare = IpCidr::parse("127.0.0.1").expect("bare v4");
+        assert!(bare.contains("127.0.0.1".parse().unwrap()));
+        assert!(!bare.contains("127.0.0.2".parse().unwrap()));
+
+        let net6 = IpCidr::parse("fd00::/8").expect("v6 cidr");
+        assert!(net6.contains("fd12:3456::1".parse().unwrap()));
+        assert!(!net6.contains("fe80::1".parse().unwrap()));
+
+        assert!(IpCidr::parse("10.0.0.0/33").is_err());
+        assert!(IpCidr::parse("::1/129").is_err());
+        assert!(IpCidr::parse("not-an-ip").is_err());
+    }
+
+    #[test]
+    fn trusted_proxies_honors_rightmost_untrusted_hop_only_from_listed_cidrs() {
+        let proxies = TrustedProxies::new();
+        let peer: IpAddr = "127.0.0.1".parse().unwrap();
+        let untrusted_peer: IpAddr = "198.51.100.5".parse().unwrap();
+
+        // Disabled by default: ignores forwarded headers.
+        assert_eq!(
+            proxies.resolve_ip(peer, [("x-forwarded-for", "203.0.113.9")]),
+            peer
+        );
+
+        let invalid = proxies.parse_and_set("127.0.0.1/32, bogus/99, 10.0.0.0/8");
+        assert_eq!(invalid, vec!["bogus/99"]);
+
+        // Untrusted peer still cannot spoof headers.
+        assert_eq!(
+            proxies.resolve_ip(untrusted_peer, [("x-forwarded-for", "203.0.113.9")]),
+            untrusted_peer
+        );
+
+        // Trusted peer selects rightmost untrusted hop, ignoring spoofed left hops.
+        assert_eq!(
+            proxies.resolve_ip(
+                peer,
+                [("x-forwarded-for", "198.51.100.1, 203.0.113.42, 10.1.2.3")]
+            ),
+            "203.0.113.42".parse::<IpAddr>().unwrap()
+        );
+
+        // Malformed entry aborts XFF walk cleanly and falls back safely.
+        assert_eq!(
+            proxies.resolve_ip(
+                peer,
+                [
+                    ("x-forwarded-for", "203.0.113.1, evil, 10.1.2.3"),
+                    ("x-real-ip", "203.0.113.77"),
+                ]
+            ),
+            "203.0.113.77".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn client_disconnect_marks_responder_canceled_promptly() {
+        use std::io::Write;
+        use std::net::TcpStream;
+        use std::sync::mpsc;
+
+        let (tx, rx) = mpsc::channel();
+        let server = WebServer::bind("127.0.0.1:0".parse().expect("addr"), move |exchange| {
+            let _ = tx.send(exchange);
+        })
+        .expect("bind");
+
+        let mut stream = TcpStream::connect(server.local_addr()).expect("connect");
+        stream
+            .write_all(b"GET /hang HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .expect("write");
+
+        let exchange = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("received exchange");
+        assert!(!exchange.responder.is_canceled());
+
+        drop(stream);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !exchange.responder.is_canceled() {
+            assert!(
+                Instant::now() < deadline,
+                "responder did not observe client disconnect promptly"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 }

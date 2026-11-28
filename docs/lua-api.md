@@ -174,9 +174,10 @@ template or suggestion payloads are warned about and ignored.
 
 ### Deferrals
 
-`playerConnecting` receives a third argument, `deferrals`, a table of three
+`playerConnecting` receives a third argument, `deferrals`, a table of four
 functions. They let a handler hold the connection while it does slow work, such
-as a lookup, and tell the player what is happening.
+as a lookup or an interactive Adaptive Card prompt, and tell the player what is
+happening.
 
 ```lua
 AddEventHandler('playerConnecting', function(name, setKickReason, deferrals)
@@ -196,6 +197,13 @@ end)
   which shows it and keeps waiting. The text is cut to 4096 bytes on a
   character boundary. An update made before the connection is deferred is not
   sent. Updates are valid until the deferral ends.
+- `deferrals.presentCard(card[, cb])` sends an Adaptive Card payload to the
+  connecting client while the connection is deferred. `card` may be a valid JSON
+  string or a Lua table/array serialized to JSON, up to 64 KiB (`MAX_CARD_BYTES`).
+  When the client responds or cancels, the optional callback `cb(data, rawData)`
+  runs with the decoded JSON response table/value and the raw JSON string, or
+  `(nil, nil)` if the client canceled or dismissed the card. Both sending a
+  card and receiving a card response reset the `sixm_deferralTimeout` timer.
 - `deferrals.done([reason])` finishes the handler. Each `defer` is matched by
   one `done` without a reason. A `done` with a non-empty reason refuses the
   player at once with that reason.
@@ -221,12 +229,13 @@ The rules that follow from these:
   refuses the player with `connection timed out`. See [server.md](server.md#convars).
 - If the client disconnects while it is deferred, the player is forgotten.
   `playerJoining` and `playerDropped` do not run for it.
-- `defer` is removed when the `playerConnecting` dispatch ends, and `update` and
-  `done` are removed when the deferral ends, whether it finished, was refused,
-  timed out or was abandoned. A later call through a saved copy of the table is
-  a stale reference error. Catch it with `pcall` if the script may run late.
-- The effects of `done` and `update` happen once the script call that made
-  them has returned. Within that same call the functions still work.
+- `defer` is removed when the `playerConnecting` dispatch ends, and `update`,
+  `presentCard`, and `done` are removed when the deferral ends, whether it
+  finished, was refused, timed out or was abandoned. A later call through a
+  saved copy of the table is a stale reference error. Catch it with `pcall` if
+  the script may run late.
+- The effects of `done`, `update`, and `presentCard` happen once the script call
+  that made them has returned. Within that same call the functions still work.
 
 ## Exports
 
@@ -837,10 +846,12 @@ calling resource. Requests to `/<resource>` and `/<resource>/...` on the server'
 TCP port call it, after the built-in routes of the server. Calling it again
 replaces the handler. The handler is removed when the resource stops.
 
-- `req.method`, `req.path` (the full path, such as `/res/page`), `req.query`
+- `req.address` (the client's IP string, honoring `sv_proxyIPRanges` when configured),
+  `req.method`, `req.path` (the full path, such as `/res/page`), `req.query`
   (without the `?`) and `req.headers` (lower-case names). The path is the raw one sent by the client: it is not decoded or normalized. The body is not in
   `req`: `req.setDataHandler(function(data) ... end)` registers a function that
-  is called with the whole body after the handler returns. The body is at most
+  is called with the whole body after the handler returns. `req.setCancelHandler(function() ... end)`
+  registers a callback that runs if the client disconnects or the request times out before `res.send` completes. The body is at most
   1 MiB; a larger request is refused before the handler runs.
 - `res.writeHead(status, headers)` sets the status and headers. Optional, and
   the default is `200`.

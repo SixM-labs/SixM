@@ -27,7 +27,8 @@ use crate::traffic::Counters;
 use crate::transfer::{Advertised, Transfer, serve_file};
 use crate::transport::{close_connection, closing_reason};
 use crate::wire::{
-    FRAME_HEADER_LEN, decode_client_message, encode_frame, read_frame, validate_event_name,
+    FRAME_HEADER_LEN, FrameReader, decode_client_message, encode_frame, read_frame,
+    validate_event_name,
 };
 
 /// Application close code for an ordinary end of the connection.
@@ -60,8 +61,10 @@ pub(crate) enum Decision {
 
 /// What the server tells a connection that is still waiting for its decision.
 pub(crate) enum Instruction {
-    /// An encoded frame to send to the client, which keeps waiting.
+    /// An encoded progress deferral frame to send to the client, which keeps waiting.
     Update(Arc<[u8]>),
+    /// An encoded Adaptive Card frame to send to the client, awaiting a `CardResponse`.
+    PresentCard(Arc<[u8]>),
     /// The final answer. Nothing else is sent before it.
     Decide(Decision),
 }
@@ -79,6 +82,51 @@ pub(crate) struct Ticket {
     pub(crate) kick: Arc<watch::Sender<Option<Arc<str>>>>,
 }
 
+/// Accepts the QUIC connection, checks the client certificate, and reads `Hello`.
+async fn accept_hello(shared: &Shared, incoming: Incoming) -> Option<(Connection, Hello)> {
+    let connecting = match incoming.accept() {
+        Ok(connecting) => connecting,
+        Err(err) => {
+            debug!(%err, "incoming connection failed before the handshake");
+            return None;
+        }
+    };
+    let deadline = tokio::time::Instant::now() + shared.handshake_timeout;
+    let connection = match tokio::time::timeout_at(deadline, connecting).await {
+        Ok(Ok(connection)) => connection,
+        Ok(Err(err)) => {
+            debug!(%err, "QUIC handshake failed");
+            return None;
+        }
+        Err(_) => {
+            debug!("QUIC handshake timed out");
+            return None;
+        }
+    };
+    if client_fingerprint(&connection).is_none() {
+        close_connection(&connection, CLOSE_PROTOCOL, NO_CLIENT_CERTIFICATE);
+        return None;
+    }
+    let hello = match tokio::time::timeout_at(
+        deadline,
+        read_hello(&connection, shared.max_frame, &shared.traffic),
+    )
+    .await
+    {
+        Ok(Ok(hello)) => hello,
+        Ok(Err(NetError::Closed)) => return None,
+        Ok(Err(err)) => {
+            close_connection(&connection, CLOSE_PROTOCOL, &err.to_string());
+            return None;
+        }
+        Err(_) => {
+            close_connection(&connection, CLOSE_PROTOCOL, "handshake timed out");
+            return None;
+        }
+    };
+    Some((connection, hello))
+}
+
 /// Drives one connection from its first packet until it ends.
 pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket) {
     let Ticket {
@@ -89,49 +137,16 @@ pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket)
         reply,
         kick,
     } = ticket;
-    let connecting = match incoming.accept() {
-        Ok(connecting) => connecting,
-        Err(err) => {
-            debug!(%err, "incoming connection failed before the handshake");
-            return;
-        }
-    };
-    let deadline = tokio::time::Instant::now() + shared.handshake_timeout;
-    let connection = match tokio::time::timeout_at(deadline, connecting).await {
-        Ok(Ok(connection)) => connection,
-        Ok(Err(err)) => {
-            debug!(%err, "QUIC handshake failed");
-            return;
-        }
-        Err(_) => {
-            debug!("QUIC handshake timed out");
-            return;
-        }
+    let Some((connection, hello)) = accept_hello(&shared, incoming).await else {
+        return;
     };
     let Some(fingerprint) = client_fingerprint(&connection) else {
         close_connection(&connection, CLOSE_PROTOCOL, NO_CLIENT_CERTIFICATE);
         return;
     };
-    let hello = match tokio::time::timeout_at(
-        deadline,
-        read_hello(&connection, shared.max_frame, &shared.traffic),
-    )
-    .await
-    {
-        Ok(Ok(hello)) => hello,
-        Ok(Err(NetError::Closed)) => return,
-        Ok(Err(err)) => {
-            close_connection(&connection, CLOSE_PROTOCOL, &err.to_string());
-            return;
-        }
-        Err(_) => {
-            close_connection(&connection, CLOSE_PROTOCOL, "handshake timed out");
-            return;
-        }
-    };
     let Hello {
         mut send,
-        recv,
+        mut recv,
         protocol,
         name,
     } = hello;
@@ -156,7 +171,16 @@ pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket)
         fingerprint,
     });
 
-    let Some(decided) = decide(&shared, id, &connection, &mut send, &mut instructions).await else {
+    let Some((decided, reader)) = decide(
+        &shared,
+        id,
+        &connection,
+        &mut send,
+        &mut recv,
+        &mut instructions,
+    )
+    .await
+    else {
         return;
     };
     match decided {
@@ -167,6 +191,7 @@ pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket)
                 player,
                 send,
                 recv,
+                reader,
                 outbound,
                 latent,
                 reply,
@@ -178,32 +203,73 @@ pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket)
 }
 
 /// Waits for the server's decision on a connection that sent its `Hello`, and
-/// writes every progress update to the client meanwhile. Returns `None` when
-/// the connection ends first, after reporting it as abandoned.
+/// writes progress updates and card prompts meanwhile. Returns `None` when the
+/// connection ends first, after reporting it as abandoned.
 async fn decide(
     shared: &Shared,
     id: ConnectionId,
     connection: &Connection,
     send: &mut SendStream,
+    recv: &mut RecvStream,
     instructions: &mut mpsc::UnboundedReceiver<Instruction>,
-) -> Option<Decision> {
+) -> Option<(Decision, FrameReader)> {
+    let mut reader = FrameReader::default();
+    let mut pending_cards = 0_usize;
     loop {
         tokio::select! {
+            biased;
             instruction = instructions.recv() => match instruction {
-                Some(Instruction::Decide(decision)) => return Some(decision),
-                Some(Instruction::Update(frame)) => {
-                    if let Err(err) = send.write_all(&frame).await {
-                        close_connection(
-                            connection,
-                            CLOSE_NORMAL,
-                            &format!("deferral update failed: {err}"),
-                        );
-                        (shared.on_event)(NetEvent::Abandoned { connection: id });
+                Some(Instruction::Decide(decision)) => return Some((decision, reader)),
+                Some(Instruction::PresentCard(frame)) => {
+                    if !send_deferral_frame(id, connection, send, &frame, "deferral card", shared).await {
                         return None;
                     }
-                    shared.traffic.sent(frame.len());
+                    pending_cards = pending_cards.saturating_add(1);
                 }
-                None => return Some(Decision::Reject(SHUTTING_DOWN.to_owned())),
+                Some(Instruction::Update(frame)) => {
+                    if !send_deferral_frame(id, connection, send, &frame, "deferral update", shared).await {
+                        return None;
+                    }
+                }
+                None => return Some((Decision::Reject(SHUTTING_DOWN.to_owned()), reader)),
+            },
+            incoming = reader.read(recv, shared.max_frame), if pending_cards > 0 => match incoming {
+                Ok(Some(payload)) => {
+                    shared.traffic.received(FRAME_HEADER_LEN + payload.len());
+                    match decode_client_message(&payload) {
+                        Ok(ClientMessage::CardResponse { id: card_id, data_json }) => {
+                            pending_cards = pending_cards.saturating_sub(1);
+                            (shared.on_event)(NetEvent::CardResponse {
+                                connection: id,
+                                id: card_id,
+                                data_json,
+                            });
+                        }
+                        Ok(_) => {
+                            close_connection(
+                                connection,
+                                CLOSE_PROTOCOL,
+                                "unexpected client message during deferral",
+                            );
+                            (shared.on_event)(NetEvent::Abandoned { connection: id });
+                            return None;
+                        }
+                        Err(err) => {
+                            close_connection(connection, CLOSE_PROTOCOL, &err.to_string());
+                            (shared.on_event)(NetEvent::Abandoned { connection: id });
+                            return None;
+                        }
+                    }
+                }
+                Ok(None) | Err(NetError::Closed) => {
+                    (shared.on_event)(NetEvent::Abandoned { connection: id });
+                    return None;
+                }
+                Err(err) => {
+                    close_connection(connection, CLOSE_PROTOCOL, &err.to_string());
+                    (shared.on_event)(NetEvent::Abandoned { connection: id });
+                    return None;
+                }
             },
             _ = connection.closed() => {
                 (shared.on_event)(NetEvent::Abandoned { connection: id });
@@ -211,6 +277,23 @@ async fn decide(
             }
         }
     }
+}
+
+async fn send_deferral_frame(
+    id: ConnectionId,
+    connection: &Connection,
+    send: &mut SendStream,
+    frame: &[u8],
+    kind: &str,
+    shared: &Shared,
+) -> bool {
+    if let Err(err) = send.write_all(frame).await {
+        close_connection(connection, CLOSE_NORMAL, &format!("{kind} failed: {err}"));
+        (shared.on_event)(NetEvent::Abandoned { connection: id });
+        return false;
+    }
+    shared.traffic.sent(frame.len());
+    true
 }
 
 /// The fingerprint of the client certificate the handshake verified, or `None`
@@ -263,7 +346,8 @@ async fn read_hello(
         | ClientMessage::EntityTransforms { .. }
         | ClientMessage::CreateEntity { .. }
         | ClientMessage::RequestEntityControl { .. }
-        | ClientMessage::SetStateBag { .. } => Err(NetError::Protocol(
+        | ClientMessage::SetStateBag { .. }
+        | ClientMessage::CardResponse { .. } => Err(NetError::Protocol(
             "the first message must be Hello".to_owned(),
         )),
     }
@@ -303,6 +387,7 @@ struct Accepted {
     player: u32,
     send: SendStream,
     recv: RecvStream,
+    reader: FrameReader,
     outbound: mpsc::Receiver<Arc<[u8]>>,
     latent: mpsc::Receiver<LatentJob>,
     reply: mpsc::Sender<Arc<[u8]>>,
@@ -374,6 +459,7 @@ async fn serve(shared: &Shared, accepted: Accepted) {
         player,
         send,
         mut recv,
+        mut reader,
         outbound,
         mut latent,
         reply,
@@ -416,7 +502,14 @@ async fn serve(shared: &Shared, accepted: Accepted) {
         reply,
         Arc::clone(&shared.traffic),
     );
-    let mut reader = pin!(read_loop(shared, player, &mut recv, &mut requests, limiter));
+    let mut reader = pin!(read_loop(
+        shared,
+        player,
+        &mut recv,
+        &mut reader,
+        &mut requests,
+        limiter,
+    ));
     let (code, reason) = tokio::select! {
         stop = &mut reader => match stop {
             Stop::Kick(reason) => {
@@ -449,6 +542,58 @@ fn join_writer(result: Result<String, tokio::task::JoinError>) -> String {
     result.unwrap_or_else(|err| format!("connection task failed: {err}"))
 }
 
+/// Decodes one client frame during an active session. Returns `Ok(None)` when
+/// handled immediately without passing through the event rate limiter.
+fn decode_session_inbound(
+    payload: &[u8],
+    requests: &mut Requests,
+) -> Result<Option<Inbound>, Stop> {
+    match decode_client_message(payload) {
+        Ok(ClientMessage::Event { name, args }) => {
+            if let Err(err) = validate_event_name(&name) {
+                return Err(Stop::Protocol(err.to_string()));
+            }
+            Ok(Some(Inbound::Event { name, args: args.0 }))
+        }
+        Ok(ClientMessage::Command { line }) => Ok(Some(Inbound::Command { line })),
+        Ok(ClientMessage::EntityTransforms { updates }) => {
+            Ok(Some(Inbound::EntityTransforms { updates }))
+        }
+        Ok(ClientMessage::CreateEntity {
+            id,
+            kind,
+            model,
+            position,
+            rotation,
+        }) => Ok(Some(Inbound::CreateEntity {
+            id,
+            kind,
+            model,
+            position,
+            rotation,
+        })),
+        Ok(ClientMessage::RequestEntityControl { id }) => {
+            Ok(Some(Inbound::RequestEntityControl { id }))
+        }
+        Ok(ClientMessage::SetStateBag { bag, key, value }) => Ok(Some(Inbound::SetStateBag {
+            bag,
+            key,
+            value: value.0,
+        })),
+        Ok(ClientMessage::RequestFile { hash }) => {
+            if let Err(reason) = requests.request(hash) {
+                return Err(Stop::Kick(reason.to_owned()));
+            }
+            Ok(None)
+        }
+        Ok(ClientMessage::CardResponse { .. }) => Ok(None),
+        Ok(ClientMessage::Hello { .. }) => {
+            Err(Stop::Protocol("Hello may only be sent once".to_owned()))
+        }
+        Err(err) => Err(Stop::Protocol(err.to_string())),
+    }
+}
+
 /// Receives events, commands, entity transforms and file requests from the
 /// player until the stream ends or the player is kicked for breaking a limit.
 /// Events, commands and transform messages share one rate limit.
@@ -456,11 +601,12 @@ async fn read_loop(
     shared: &Shared,
     player: u32,
     recv: &mut RecvStream,
+    reader: &mut FrameReader,
     requests: &mut Requests,
     limiter: Arc<std::sync::Mutex<RateLimiter>>,
 ) -> Stop {
     loop {
-        let payload = match read_frame(recv, shared.max_frame).await {
+        let payload = match reader.read(recv, shared.max_frame).await {
             Ok(Some(payload)) => {
                 shared.traffic.received(FRAME_HEADER_LEN + payload.len());
                 payload
@@ -468,46 +614,10 @@ async fn read_loop(
             Ok(None) | Err(NetError::Closed) => return Stop::Closed,
             Err(err) => return Stop::Protocol(err.to_string()),
         };
-        let inbound = match decode_client_message(&payload) {
-            Ok(ClientMessage::Event { name, args }) => {
-                if let Err(err) = validate_event_name(&name) {
-                    return Stop::Protocol(err.to_string());
-                }
-                Inbound::Event { name, args: args.0 }
-            }
-            Ok(ClientMessage::Command { line }) => Inbound::Command { line },
-            Ok(ClientMessage::EntityTransforms { updates }) => {
-                Inbound::EntityTransforms { updates }
-            }
-            Ok(ClientMessage::CreateEntity {
-                id,
-                kind,
-                model,
-                position,
-                rotation,
-            }) => Inbound::CreateEntity {
-                id,
-                kind,
-                model,
-                position,
-                rotation,
-            },
-            Ok(ClientMessage::RequestEntityControl { id }) => Inbound::RequestEntityControl { id },
-            Ok(ClientMessage::SetStateBag { bag, key, value }) => Inbound::SetStateBag {
-                bag,
-                key,
-                value: value.0,
-            },
-            Ok(ClientMessage::RequestFile { hash }) => {
-                if let Err(reason) = requests.request(hash) {
-                    return Stop::Kick(reason.to_owned());
-                }
-                continue;
-            }
-            Ok(ClientMessage::Hello { .. }) => {
-                return Stop::Protocol("Hello may only be sent once".to_owned());
-            }
-            Err(err) => return Stop::Protocol(err.to_string()),
+        let inbound = match decode_session_inbound(&payload, requests) {
+            Ok(Some(inbound)) => inbound,
+            Ok(None) => continue,
+            Err(stop) => return stop,
         };
         let now = Instant::now();
         let verdict = limiter

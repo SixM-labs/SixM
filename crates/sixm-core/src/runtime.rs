@@ -154,6 +154,9 @@ pub struct WebRequest {
     pub headers: Vec<(String, String)>,
     /// The request body.
     pub body: Vec<u8>,
+    /// The resolved client IP address (e.g. `127.0.0.1`), honoring `sv_proxyIPRanges`
+    /// when configured.
+    pub address: String,
 }
 
 /// What a resource sends back for a request, once its response is complete.
@@ -733,6 +736,10 @@ pub trait ScriptRuntime: fmt::Debug {
     fn call_web_handler(&self, id: u32, request: u64, data: &WebRequest)
     -> Result<(), ScriptError>;
 
+    /// Notifies the runtime that pending HTTP request `id` was canceled
+    /// (client disconnected or timed out) before a response was sent.
+    fn cancel_http_request(&self, _id: u64) {}
+
     /// See [`Host::retain_ref`]. Returns `false` for an unknown id.
     fn retain_ref(&self, id: u32) -> bool;
 
@@ -749,6 +756,16 @@ pub trait ScriptRuntime: fmt::Debug {
     /// Drops all tasks, handlers and references. The runtime is unusable
     /// afterwards; the host removes it.
     fn shutdown(&self);
+
+    /// Current script VM allocator/heap usage in bytes (called off the hot path).
+    fn memory_bytes(&self) -> usize {
+        0
+    }
+
+    /// Cumulative count of script event handler invocations executed by this runtime.
+    fn handled_events(&self) -> u64 {
+        0
+    }
 }
 
 /// Case-insensitive glob matching for `AddConvarChangeListener` filters.

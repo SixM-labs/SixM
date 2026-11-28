@@ -46,9 +46,9 @@ pub use files::{
 };
 pub use identity::{Fingerprint, Identity, ParseFingerprintError};
 pub use protocol::{
-    DEFAULT_LATENT_RATE, MAX_CONVAR_NAME_LEN, MAX_CONVAR_VALUE_LEN, MAX_LATENT_EVENT_LEN,
-    MAX_LATENT_RATE, MIN_LATENT_RATE, PROTOCOL_VERSION,
+    DEFAULT_LATENT_RATE, MAX_CARD_BYTES, MAX_CARD_RESPONSE_BYTES, MAX_CONVAR_NAME_LEN,
+    MAX_CONVAR_VALUE_LEN, MAX_LATENT_EVENT_LEN, MAX_LATENT_RATE, MIN_LATENT_RATE, PROTOCOL_VERSION,
 };
 pub use server::{ConnectionId, NetEvent, NetServer, ServerConfig};
 pub use traffic::Traffic;
-pub use web::{WebExchange, WebResponder, WebServer};
+pub use web::{IpCidr, TrustedProxies, WebExchange, WebResponder, WebServer};

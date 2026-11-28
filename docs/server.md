@@ -62,8 +62,11 @@ the same for `exec`, `+commands` and stdin:
 - `#` or `//` outside quotes starts a comment to the end of the line.
 - An unclosed quote is an error for that line. The rest of the file still runs.
 
-`exec <file>` runs a file. The path is relative to the working directory.
-Files can include other files. Nesting stops at 16 levels.
+`exec <file>` runs a file. The path is relative to the working directory, or
+`@<resource>/<path>` (including `provide` aliases) to read a file inside an
+installed resource directory safely (rejecting symlinks, path traversal, and
+invalid filenames). Files can include other files, preserving the caller's
+permissions. Nesting stops at 16 levels.
 
 Example from `examples/server-data/server.cfg`:
 
@@ -85,8 +88,8 @@ ensure hello
 Start map and gametype resources after `spawnmanager` and `mapmanager`.
 The example grants `command.start`, `command.stop`, and `command.restart`
 to `resource.mapmanager` for switching maps and gametypes and restarting a
-round. `command.say` allows players to submit chat messages to the `chat`
-resource.
+round. `command.say` allows players to use built-in server `say` and submit
+chat messages through the `chat` resource.
 
 ## Console commands
 
@@ -106,8 +109,12 @@ same name is never reached.
 | `endpoint_add_udp <ip:port>` | Stores the listen address in `endpoint_add_udp`. It applies at the next start. The address must parse. |
 | `endpoint_add_tcp <ip:port>` | The same as `endpoint_add_udp`: TCP (HTTP) and UDP (the game) share one address, so this sets both. |
 | `perf` | Prints the frame times of the last 1200 frames: count, average, p50, p99 and max, in milliseconds. Then the tick rate and the budget per frame, the players, entities and running resources, and the network rate in KiB/s and frames/s since the previous `perf` call, or since the server started. See [Load testing](#load-testing). |
+| `resmon` | Prints live per-resource telemetry over the last 60 frames: average and max tick CPU (ms), script VM heap (`KiB`), window events, and total events. |
 | `profiler <record [frames] \| stop \| status \| saveJSON <path>>` | Captures `ServerTick` and per-resource tick durations. See [Frame profiling](#frame-profiling). |
 | `players` | Lists connected players with their id, name, `license` identifier and endpoint. |
+| `status` | Prints the server name, running/installed resource counts, connected/max player counts, and each connected player's id, name, ping, identifiers, and endpoint. |
+| `clientkick <id> [reason]` | Kicks connected player `<id>` with `[reason]` (default `Kicked from server`). Reports `clientDropReason` `1` (with the calling resource name) when invoked by a resource and `2` when invoked by the console or a player. |
+| `say <text>` | Sends a chat message (up to 256 bytes after trimming and replacing control characters with spaces) as `Console` (for console or resource callers) or the calling player's name. When `chat` is started, dispatches local cancelable `chatMessage(player, author, message)` and broadcasts `chat:addMessage`; otherwise logs the message. |
 | `entities` | Lists every entity with its id, kind, model hash, position and heading. |
 | `state [bag]` | Without a name, lists the state bags. With a name, prints the bag's keys and values. Replicated keys are marked. |
 | `set <name> <value>` | Stores a plain convar. The value is the rest of the line, joined with single spaces. See [Convars](#convars). |
@@ -116,7 +123,11 @@ same name is never reached.
 | `add_convar_permission <resource> read <name>` | Grants read access to a plain server convar. See [Private convar readers](#private-convar-readers). |
 | `remove_convar_permission <resource> read <name>` | Revokes `<resource>`'s read access to a restricted convar. When the last reader is removed, the convar becomes readable by every resource again. |
 | `list_convar_permissions` | Lists every private convar reader entry (`console` only). |
-| `exec <file>` | Runs each line of the file. See above. |
+| `exec <file>` | Runs each line of `<file>` (relative to the working directory) or `@<resource>/<path>` inside an installed resource. See above. |
+| `cmdlist` | Lists every built-in command and registered script command in sorted order (marking restricted script commands). |
+| `con_channelFilters` | Lists active console channel filter rules in evaluation order, or reports none active. |
+| `con_addChannelFilter <channel> <print\|none>` | Adds or updates a case-insensitive glob filter (`*`, `?`) matching tracing targets (e.g. `sixm_server::*`) or `script:<resource>` for `sixm::script` logs. Actions are `print` or `none` (last matching rule wins; default `print`). |
+| `con_removeChannelFilter <channel>` | Removes the console channel filter matching `<channel>` (case-insensitive). |
 | `help` | Lists the built-in commands and the script commands. Restricted commands are marked. |
 | `quit [reason]` | Asks the server to stop. The reason is written to the log. |
 | `add_ace <principal> <object> <allow\|deny>` | Sets the entry of a principal for an object. An earlier entry for the same pair is replaced. See [Permissions](#permissions). |
@@ -280,6 +291,10 @@ Convar names are case-insensitive. Scripts read them with `GetConvar` and
 | `sv_adminUiEnabled` | `false` | Console-only. Whether `GET /admin` serves the built-in admin UI (`true` or `1` turns it on; also requires `rcon_password`). |
 | `sv_masterUrl` | empty | Console-only. Optional HTTP(S) URL to which the server periodically `POST`s JSON discovery heartbeats (`{"info": ..., "dynamic": ...}`). Honors `sv_httpAllowPrivate` and `sixm_httpTimeout`. |
 | `sv_heartbeatInterval` | `30` | Console-only. Seconds between master-server heartbeats when `sv_masterUrl` is set, clamped to 10 to 3600. |
+| `sixm_hitchWarningMs` | `50` | Frame duration threshold in milliseconds above which a hitch warning is logged (`0` disables, clamped up to `60000`). |
+| `sv_proxyIPRanges` | empty | Console-only. Comma- or whitespace-separated trusted reverse-proxy CIDRs (`127.0.0.1/32`, `10.0.0.0/8`, `fd00::/8`). When set, HTTP rate limits, RCON lockouts, `SetHttpHandler` `req.address`, and HTTP client IP attribution honor the rightmost untrusted hop in `X-Forwarded-For` (falling back to `X-Real-IP`) only when the TCP peer is inside a listed range. |
+| `sv_prometheusBasicAuthUser` | empty | Console-only. Optional HTTP Basic Auth username protecting `GET /metrics`. When either user or password is set, both must be configured and match (`401` otherwise). |
+| `sv_prometheusBasicAuthPassword` | empty | Console-only credential protecting `GET /metrics` alongside `sv_prometheusBasicAuthUser`. Excluded from script convar APIs. |
 
 Any other convar can be set with `set`, `sets` or `setr`, or with the Lua
 setters, and read by scripts. Script convar writes (`SetConvar*`) are bounded to
@@ -288,7 +303,8 @@ setters, and read by scripts. Script convar writes (`SetConvar*`) are bounded to
 `sv_exposePlayerIdentifiers`, `sixm_identityFile`, `sixm_resourcesPath`,
 `sixm_kvpPath`, `endpoint_add_udp`, `sv_playerEventRateLimit`,
 `sv_metricsEnabled`, `sv_adminUiEnabled`, `sv_masterUrl`,
-`sv_heartbeatInterval`, and `sv_stateBagStrictMode`) cannot be modified by
+`sv_heartbeatInterval`, `sv_stateBagStrictMode`, `sv_proxyIPRanges`,
+`sv_prometheusBasicAuthUser`, and `sv_prometheusBasicAuthPassword`) cannot be modified by
 scripts or remote players. The server checks a value only when the convar is
 replicated (see below).
 
@@ -384,8 +400,9 @@ connection carries one request and is closed after its answer.
 | `/players.json` | JSON array of `{id, name, ping}` per player. `identifiers` is added only with `sv_exposePlayerIdentifiers true`. |
 | `/dynamic.json` | JSON: `hostname`, `clients`, `maxclients` and `server`. |
 | `/healthz` | JSON readiness/liveness summary: `{"ok":true,"resources":<count>,"players":<count>}`. |
-| `/metrics` | Prometheus text exposition (`0.0.4`) when `sv_metricsEnabled` is `true` or `1` (`404` otherwise). Exposes `sixm_players_connected`, `sixm_players_max`, `sixm_resources_running`, `sixm_entities_total`, `sixm_tick_duration_ms` (`avg`, `p50`, `p99`, `max`), `sixm_net_rx_bytes_total`, and `sixm_net_tx_bytes_total`. |
-| `/admin` | Self-contained HTML admin UI when `sv_adminUiEnabled` is `true` or `1` and `rcon_password` is set (`404` when disabled, `403` when `rcon_password` is unset). Authenticates against `POST /rcon`. |
+| `/metrics` | Prometheus text exposition (`0.0.4`) when `sv_metricsEnabled` is `true` or `1` (`404` otherwise, `401` when `sv_prometheusBasicAuthUser`/`sv_prometheusBasicAuthPassword` are configured and credentials fail). Exposes `sixm_players_connected`, `sixm_players_max`, `sixm_resources_running`, `sixm_entities_total`, `sixm_tick_duration_ms` (`avg`, `p50`, `p99`, `max`), `sixm_net_rx_bytes_total`, and `sixm_net_tx_bytes_total`. |
+| `/admin` | Self-contained HTML admin UI when `sv_adminUiEnabled` is `true` or `1` and `rcon_password` is set (`404` when disabled, `403` when `rcon_password` is unset). Includes a live `resmon` table and authenticates commands against `POST /rcon`. |
+| `/resmon.json` | Live per-resource monitor snapshot (`hitch_warning_ms` and per-resource `samples`, `avg_tick_ms`, `max_tick_ms`, `last_tick_ms`, `heap_bytes`, `window_events`, `total_events`), gated identically to `/admin`. |
 | `/rcon` | [`POST /rcon`](#remote-console) executes one authenticated console command and returns its output as JSON. |
 | `/<resource>/...` | The `SetHttpHandler` function of that resource, if it has one. See [HTTP handlers](lua-api.md#http-handlers-server-only). |
 
@@ -422,9 +439,10 @@ a plain-text command body. A `200` response has the shape
 
 The endpoint returns `400` for an invalid request, `401` for a bad password,
 `403` when disabled and `405` for other methods. After five consecutive
-failures from the same TCP peer IP, it returns `429` until 30 seconds have
-elapsed since the first failure. Clients sharing a reverse proxy's connection
-address share that limit.
+failures from the same resolved client IP (TCP peer IP, or forwarded IP when
+`sv_proxyIPRanges` trusts the proxy), it returns `429` until 30 seconds have
+elapsed since the first failure. Without `sv_proxyIPRanges`, clients sharing a
+reverse proxy's connection address share that limit.
 
 ## Players
 

@@ -10,7 +10,9 @@ use std::sync::{Mutex, mpsc};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value as Json};
-use sixm_server::{CliInvocation, CliOptions, Input, Server, parse_cli, spawn_stdin_reader};
+use sixm_server::{
+    ChannelFilters, CliInvocation, CliOptions, Input, Server, parse_cli, spawn_stdin_reader,
+};
 use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber, error, warn};
 use tracing_subscriber::fmt::format::Writer;
@@ -51,7 +53,8 @@ fn main() -> ExitCode {
         }
     };
 
-    init_logging(&options);
+    let filters = ChannelFilters::new();
+    init_logging(&options, &filters);
 
     if commands.is_empty() {
         if Path::new("server.cfg").is_file() {
@@ -73,7 +76,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let server = Server::new();
+    let server = Server::with_channel_filters(filters);
     if options.watch {
         server.set_watch(true);
     }
@@ -86,10 +89,11 @@ fn main() -> ExitCode {
 
 /// Logs to standard output (and optionally a log file) with `RUST_LOG` as the
 /// filter, defaulting to `info`.
-fn init_logging(options: &CliOptions) {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+fn init_logging(options: &CliOptions, filters: &ChannelFilters) {
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    let stdout_layer = build_layer(options.log_json, io::stdout().is_terminal(), io::stdout);
+    let stdout_layer = build_layer(options.log_json, io::stdout().is_terminal(), io::stdout)
+        .with_filter(filters.tracing_filter());
 
     let file_layer = options.log_file.as_ref().and_then(|path| {
         if let Some(parent) = path.parent()
@@ -103,7 +107,10 @@ fn init_logging(options: &CliOptions) {
             return None;
         }
         match OpenOptions::new().create(true).append(true).open(path) {
-            Ok(file) => Some(build_layer(options.log_json, false, Mutex::new(file))),
+            Ok(file) => Some(
+                build_layer(options.log_json, false, Mutex::new(file))
+                    .with_filter(filters.tracing_filter()),
+            ),
             Err(err) => {
                 eprintln!(
                     "sixm-server: cannot open log file `{}`: {err}",
@@ -115,7 +122,7 @@ fn init_logging(options: &CliOptions) {
     });
 
     let _ = tracing_subscriber::registry()
-        .with(filter)
+        .with(env_filter)
         .with(stdout_layer)
         .with(file_layer)
         .try_init();
