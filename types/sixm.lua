@@ -261,6 +261,8 @@ source = ""
 
 --- Registers a local event handler for `name`.
 ---@overload fun(name: 'playerSpawned', fn: fun(spawnInfo: SpawnInfo)): EventHandlerHandle
+---@overload fun(name: 'onMapStart' | 'onGameTypeStart' | 'onClientMapStart' | 'onClientMapStop' | 'onClientGameTypeStart' | 'onClientGameTypeStop', fn: fun(resourceName: string)): EventHandlerHandle
+---@overload fun(name: 'getMapDirectives', fn: fun(add: fun(name: string, handler: fun(data: any, mapResourceName: string)))): EventHandlerHandle
 ---@overload fun(name: 'chatMessage', fn: fun(playerId: integer, author: string, text: string)): EventHandlerHandle
 ---@overload fun(name: 'chat:addMessage', fn: fun(message: SixMChatMessage)): EventHandlerHandle
 ---@overload fun(name: 'chat:addTemplate', fn: fun(templateId: string, html: string)): EventHandlerHandle
@@ -297,6 +299,8 @@ function RegisterNetEvent(name, fn) end
 function RegisterServerEvent(name, fn) end
 
 --- Synchronously triggers all local handlers of `name` on this host.
+---@overload fun(name: 'onMapStart' | 'onGameTypeStart' | 'onClientMapStart' | 'onClientMapStop' | 'onClientGameTypeStart' | 'onClientGameTypeStop', resourceName: string)
+---@overload fun(name: 'getMapDirectives', add: fun(name: string, handler: fun(data: any, mapResourceName: string)))
 ---@overload fun(name: 'chatMessage', playerId: integer, author: string, text: string)
 ---@overload fun(name: 'chat:addMessage', message: SixMChatMessage)
 ---@overload fun(name: 'chat:addTemplate', templateId: string, html: string)
@@ -373,9 +377,23 @@ function TriggerLatentClientEvent(name, target, bytesPerSecond, ...) end
 ---@field setAutoSpawnCallback fun(callback: fun())
 ---@field forceRespawn fun()
 
+---@class MapManagerMapInfo
+---@field name string
+---@field gameTypes? string[]
+
+---@class MapManagerExports
+---@field getCurrentGameType fun(): string?
+---@field getCurrentMap fun(): string?
+---@field changeGameType fun(gameType: string): boolean
+---@field changeMap fun(map: string): boolean
+---@field doesMapSupportGameType fun(gameType: string, map: string): boolean
+---@field getMaps fun(): table<string, MapManagerMapInfo>
+---@field roundEnded fun(): boolean
+
 ---@class SixMExports
 ---@field [string] table<string, function>
 ---@field spawnmanager SpawnManagerExports
+---@field mapmanager MapManagerExports
 ---@overload fun(name: string, fn: function)
 ---@overload fun(manifestNames: FxManifestValue): FxManifestChain
 exports = {}

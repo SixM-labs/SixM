@@ -296,7 +296,7 @@ equivalent / no effect / absent".
 | A8 | done | ChatGPT (Luna docs, Terra review) | `git log --grep "^A8:"` |
 | B1 | done | ChatGPT (Luna impl, Terra review) | `git log --grep "^B1:"` |
 | B2 | done | ChatGPT (Luna impl, Terra review), Gemini (Flash fixes, Pro review) | `git log --grep "^B2:"` |
-| B3 | todo | | |
+| B3 | done | ChatGPT (Luna impl, Terra review), Gemini (Flash fixes, Pro review) | `git log --grep "^B3:"` |
 | B4 | todo | | |
 | C1 | todo | | |
 | C2 | todo | | |
@@ -382,3 +382,10 @@ what is next, anything surprising.
   added `sim_adapter` tests for missing/frozen/attached peds, retry
   cancellation, deferred ped/config, non-spawning callback latch, direct spawns,
   and numeric 32-bit model hashes. Next: B3 (`mapmanager`).
+- 2026-11-28, Gemini, `feat/fivem-parity-b`: `B3: ship stock mapmanager`
+  follows 6d56dab. Imported the B3 worktree, added canonical-name checks
+  (rejecting `provide` aliases), fixed `onResourceStop` transaction handling,
+  hardened `isSafeRelativePath` and temporary `getMapDirectives` registry
+  cleanup, added `mapmanager` type stubs in `types/sixm.lua` and
+  `types/sixm.d.ts`, aligned docs/spec for Lua+JS directive handlers, and
+  expanded `mapmanager` tests to 16 passing cases. Next: B4 wrap-up.

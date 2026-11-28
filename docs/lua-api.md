@@ -132,6 +132,8 @@ Server (`EventSource::Local` unless noted):
 | `playerDropped` | `reason`, `resourceName`, `clientDropReason` | `source` is the player's id. The player is still listed while the handlers run. `reason` is the text shown to the player. `resourceName` is the resource that called `DropPlayer`, or `""` when none did. `clientDropReason` is `0` when the client closed or lost the connection, `1` for a `DropPlayer` call from a script, and `2` for a kick the server decides itself (for example an entity id that was not leased). These numbers are SixM's own; FiveM's values are not documented here. |
 | `onPlayerBucketChange` | `player`, `bucket`, `oldBucket` | `player` is the player id as a string, like `GetPlayers`. Fired only when `SetPlayerRoutingBucket` really changes the bucket (a call with the same bucket, or for an unknown player, fires nothing), after the move is complete. |
 | `onEntityBucketChange` | `entity`, `bucket`, `oldBucket` | Fired only when `SetEntityRoutingBucket` really changes the bucket, after the move is complete. It fires for every entity kind. A player's ped moves with the player, so a change of the player fires this event for the ped too, after `onPlayerBucketChange`, when the ped's own bucket was different. A player without a ped fires no entity event. |
+| `onMapStart` | `resourceName` | Server local event fired by the stock `mapmanager` after a map resource starts. |
+| `onGameTypeStart` | `resourceName` | Server local event fired by the stock `mapmanager` after a gametype resource starts. |
 
 Client (`EventSource::Local`):
 
@@ -141,6 +143,10 @@ Client (`EventSource::Local`):
 | `onResourceStart` | `name` | Same time as `onClientResourceStart`. |
 | `onClientResourceStop` | `name` | Before the resource stops. |
 | `onResourceStop` | `name` | Same time as `onClientResourceStop`. |
+| `onClientMapStart` | `resourceName` | Stock `mapmanager`: a map resource has started on this client; its JSON directives are processed immediately afterward. |
+| `onClientMapStop` | `resourceName` | Stock `mapmanager`: a map resource is stopping on this client. |
+| `onClientGameTypeStart` | `resourceName` | Stock `mapmanager`: a gametype resource has started on this client. |
+| `onClientGameTypeStop` | `resourceName` | Stock `mapmanager`: a gametype resource is stopping on this client. |
 
 The client has no `onResourceStarting`. Clients do not cancel starts.
 
@@ -356,6 +362,39 @@ library can tell who called it. It is `nil` when no resource caused it.
   Values come in declaration order. On the server, any installed resource can
   be read. On the client, only running resources are known, and the metadata
   is what the server sent with them.
+
+## Stock resource: `mapmanager`
+
+`mapmanager` is a server resource shipped under `[system]`. Its exports are
+called as `exports.mapmanager:exportName(...)` in Lua:
+
+| Export | Side | Signature and result |
+|---|---|---|
+| `getCurrentGameType` | server | `getCurrentGameType()`. Canonical resource name, or `nil`. |
+| `getCurrentMap` | server | `getCurrentMap()`. Canonical resource name, or `nil`. |
+| `changeGameType` | server | `changeGameType(gameType)`. Starts a known gametype; returns a boolean. Stops the previous gametype and any current map that explicitly excludes the new gametype after starting it; repeated calls for the already-active gametype are idempotent and return `true`. |
+| `changeMap` | server | `changeMap(map)`. Starts a known map; returns false without side effects if the current gametype explicitly excludes it. Stops the previous map after starting the new one; repeated calls for the already-active map are idempotent and return `true`. |
+| `doesMapSupportGameType` | server | `doesMapSupportGameType(gameType, map)`. Boolean; a map with no `gameTypes` metadata supports any known gametype. |
+| `getMaps` | server | `getMaps()`. Map keyed by canonical resource name; values contain `name` and optional `gameTypes`. |
+| `roundEnded` | server | `roundEnded()`. Restarts the current gametype and returns whether the restart succeeded. A dependent map follows normal resource lifecycle; an independent map stays running. |
+
+`changeGameType`, `changeMap` and `roundEnded` use the synchronous resource
+lifecycle natives. Grant the mapmanager resource `command.start`,
+`command.stop`, and `command.restart` in `server.cfg`; denied operations return
+false. Changes are rolled back and current state is reconciled if a lifecycle
+step fails. `SetGameType` and `SetMapName` publish the display names to server
+info after a committed change.
+
+Client map directives are JSON data named by the map resource's `map` metadata
+and listed in `files`. At each map start `mapmanager` fires
+`getMapDirectives(add)` before reading those files. Both Lua and JavaScript
+client resources can call `add(name, handler)` (JavaScript handlers are passed
+as SixM function references and invoked after `TriggerEvent('getMapDirectives',
+add)` returns); each directive calls matching handlers with
+`(data, mapResourceName)` (`null` or absent `data` arrives as `nil`).
+Registrations are temporary for that map start, so a provider started later
+takes effect on the next map start. Invalid files and handler errors are logged
+and skipped; this path never loads game assets or executes code.
 
 ## Key-value storage
 

@@ -130,7 +130,7 @@ const sum = exports.myresource.add(2, 3);
   through JS callback arguments); functions passed as callbacks become
   cross-runtime references released when GC collects them.
 
-## Stock client resources
+## Stock resources
 
 ### `spawnmanager`
 
@@ -160,6 +160,33 @@ death integration require a game adapter.
 `loadSpawns` validates JSON shape with a private parser before converting the
 spawn array to Lua. It rejects object-shaped `spawns`, null entries (including
 a trailing null), and non-object spawn entries before the registry is changed.
+
+### `mapmanager`
+
+The server-side exports are available through `exports.mapmanager`:
+`getCurrentGameType()` and `getCurrentMap()` return canonical resource names or
+`null`; `changeGameType(gameType)` and `changeMap(map)` switch the active
+gametype or map and return booleans; `doesMapSupportGameType(gameType, map)`
+returns a boolean; `getMaps()` returns an object keyed by canonical map name
+with `{ name, gameTypes? }` values; and `roundEnded()` restarts the current
+gametype in place (leaving an independent map active, while dependent maps
+follow resource lifecycle) and returns a boolean. Resource lifecycle operations
+require the mapmanager resource's `command.start`, `command.stop`, and
+`command.restart` ACE grants. Server scripts can listen for local
+`onMapStart(resourceName)` and `onGameTypeStart(resourceName)` events. See
+[Lua API: mapmanager](lua-api.md#stock-resource-mapmanager) for selection,
+rollback, and compatibility rules.
+
+Client scripts can listen for `onClientMapStart(resourceName)`,
+`onClientMapStop(resourceName)`, `onClientGameTypeStart(resourceName)`, and
+`onClientGameTypeStop(resourceName)`. Both Lua and JavaScript client resources
+can register directive handlers through `getMapDirectives(add)`; handlers run
+after the registration event completes and receive `(data, mapResourceName)`
+from the map's JSON directive files (`{ "directives": [{ "name", "data" }] }`,
+declared via `map` and `files` in `fxmanifest.lua`; `null` or missing `data`
+arrives as `null` in JS / `nil` in Lua). See
+[manifest.md](manifest.md#mapmanager-metadata-and-json-directives) for the
+directive schema.
 
 ## State bags
 

@@ -170,6 +170,13 @@ interface SixMChatNetworkEvents extends SixMChatClientEvents, SixMChatServerNetw
 interface SixMStockEvents extends SixMChatNetworkEvents {
     chatMessage: [playerId: number, author: string, text: string];
     playerSpawned: [spawnInfo: SpawnInfo];
+    onMapStart: [resourceName: string];
+    onGameTypeStart: [resourceName: string];
+    onClientMapStart: [resourceName: string];
+    onClientMapStop: [resourceName: string];
+    onClientGameTypeStart: [resourceName: string];
+    onClientGameTypeStop: [resourceName: string];
+    getMapDirectives: [add: (name: string, handler: (data: any, mapResourceName: string) => void) => void];
 }
 
 /**
@@ -348,9 +355,26 @@ interface ExportsProxy {
     [resource: string]: Record<string, (...args: any[]) => any>;
     /** Client exports provided by the stock [system]/spawnmanager resource. */
     spawnmanager: SpawnManagerExports;
+    /** Server exports provided by the stock [system]/mapmanager resource. */
+    mapmanager: MapManagerExports;
 }
 
 declare var exports: ExportsProxy;
+
+interface MapManagerMapInfo {
+    name: string;
+    gameTypes?: string[];
+}
+
+type MapManagerExports = {
+    getCurrentGameType(): string | null;
+    getCurrentMap(): string | null;
+    changeGameType(gameType: string): boolean;
+    changeMap(map: string): boolean;
+    doesMapSupportGameType(gameType: string, map: string): boolean;
+    getMaps(): Record<string, MapManagerMapInfo>;
+    roundEnded(): boolean;
+};
 
 interface SpawnPoint {
     x: number;

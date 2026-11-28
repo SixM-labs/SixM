@@ -11,6 +11,8 @@ may change the protocol and the API.
 
 - Stock `[system]/chat` resource with the FiveM chat event names, a cancelable
   server message pipeline, command suggestions, and headless client `say`.
+- Clean-room stock `[system]/mapmanager`: scalar `resource_type` metadata,
+  map/gametype exports and lifecycle events, and client-side JSON map directives.
 - `start`, `stop`, `restart` and `ensure` accept a `[category]`; manifest
   `server_only 'yes'`; new `Catalog::category_members`, `category_start_order`, `Manifest::server_only`.
 - ACE and info natives: `IsAceAllowed`, `GetGameName`, `GetGameBuildNumber`,

@@ -81,10 +81,13 @@ stored as `this_i`. A plain string with an unknown name keeps its spelling.
 | `fx_version` | `fx_version` | Stored only. The host does not read it. |
 | `game` / `games` | `games` | Stored only. The host does not read it. |
 | `lua54 'yes'` | `lua54` | Stored only. Any value other than `'yes'` is false. The host does not read it. |
+| `resource_type 'map'` / `'gametype'` | `resource_type` | Stored as metadata. The stock `mapmanager` recognizes these exact values. |
+| `name 'Display name'` | `name` | Stored as metadata; `mapmanager` uses the first value as the map/gametype display name. |
+| `gameTypes 'race'` | `gameTypes` | Repeated scalar metadata. A map's optional compatible gametype resource names; no entries means any known gametype. |
+| `map 'directives.json'` | `map` | Repeated scalar metadata. A mapmanager JSON directive file, also listed in `files`. Never loads game assets or executes code. |
 | anything else | `metadata` | Stored in order as `(name, value)`. The host does not read it. |
 
-The first group and `server_only` change behaviour. `fx_version`, `game`, `lua54`
-and metadata are parsed and kept, but nothing in SixM uses them yet.
+The first group and `server_only` change behaviour directly. `resource_type`, `name`, `gameTypes` and `map` remain ordinary metadata and are interpreted by the stock `mapmanager` when it is running. `fx_version`, `game`, `lua54` and all other metadata are parsed and kept, but nothing else in SixM uses them yet.
 
 The server does not directly sync a `server_only` resource to clients. A
 different, client-synced resource may explicitly reference one of its files
@@ -92,6 +95,43 @@ with a path such as `@server_only_res/data/config.json` in `files`,
 `client_scripts`, or `shared_scripts`. That file is sent as part of the
 referencing resource; this does not advertise or start the `server_only`
 resource on clients.
+
+## Mapmanager metadata and JSON directives
+
+The stock `mapmanager` reads scalar metadata in this supported form:
+
+```lua
+resource_type 'map'
+name 'Downtown'
+gameTypes 'race'
+gameTypes 'arena'
+map 'directives.json'
+files { 'directives.json' }
+```
+
+Use `resource_type 'gametype'` for a gametype. The table form
+`resource_type 'gametype' { name = '...' }` is not preserved by SixM's scalar
+metadata recorder; use `name '...'` instead. Resource names in `gameTypes` are
+canonical resource names. If a map has no `gameTypes` values, it supports any
+known gametype.
+
+Each `map` path names UTF-8 JSON data relative to the map resource and must
+also appear in `files`. The top-level object contains a dense `directives`
+array. Each item has a nonempty string `name` and may have a JSON `data` value; absent or `null` data is passed to handlers as Lua `nil`. For
+example:
+
+```json
+{"directives":[{"name":"spawnpoints","data":[{"x":1,"y":2,"z":3,"heading":90}]}]}
+```
+
+On a client map start, `mapmanager` fires `getMapDirectives(add)` immediately
+before reading the files. Both Lua and JavaScript client resources can register
+handlers with `add(name, handler)` (JavaScript callbacks are passed through
+SixM function references and invoked after the registration event returns); each
+matching handler receives `(data, mapResourceName)`. The handler registry exists
+only for that map start. Invalid or unreadable files are logged and skipped;
+handler errors do not prevent later directives from running. JSON cannot execute
+scripts, and SixM does not load map or game assets.
 
 ## Script load order
 

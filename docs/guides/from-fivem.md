@@ -94,6 +94,28 @@ an explicit repeatable attempt.
 - Clients cannot write replicated state (`bag:set(k, v, false)` keeps local
   client state only).
 
+### Stock resource: mapmanager
+
+SixM ships a clean-room `mapmanager` for resources marked with scalar
+`resource_type 'map'` or `resource_type 'gametype'`. `name` supplies the
+server-info display name; repeated `gameTypes` values on a map restrict which
+gametypes it supports. The resource exposes the familiar map/gametype exports
+and publishes `SetMapName` / `SetGameType` after a successful change. Resource
+start/stop calls are ACE-gated: grant `command.start`, `command.stop`, and
+`command.restart` to `resource.mapmanager` in `server.cfg`.
+
+Map resources may list JSON files with `map 'directives.json'` and
+`files { 'directives.json' }`. Client resources register directive
+handlers through `getMapDirectives(add)`; registration is temporary for that
+map start. This headless implementation does not load game map assets or
+execute Lua from JSON. Both Lua and JavaScript client resources can register
+directive handlers through `getMapDirectives(add)` using SixM function
+references; handlers receive parsed JSON data (or `nil` for `null`/missing
+data) and the map resource name. `roundEnded()` restarts the current
+gametype; maps that depend on it follow normal resource lifecycle, while an
+independent map remains active. Start `spawnmanager`, then `mapmanager`, then
+map/gametype resources; `chat` can start alongside them.
+
 ### Script API compatibility additions
 
 - **Lua vectors:** `vector(...)` flattens numbers and vectors, then chooses
@@ -340,15 +362,17 @@ following FiveM areas are missing:
 - **Default resources:** The example server includes clean-room
   `[system]` resources `sessionmanager` (session ready handshake via
   `sixm_session:ready`, `Player(src).state.sessionActive`, `isPlayerActive`,
-  `getPlayerSession`, `isSessionReady`) and `baseevents` (registers the FiveM
+  `getPlayerSession`, `isSessionReady`), `baseevents` (registers the FiveM
   channels `baseevents:onPlayerDied`, `onPlayerKilled`, `onPlayerWasted`,
   `enteringVehicle`, `enteringAborted`, `enteredVehicle` and `leftVehicle` for
-  scripts and a future GameAdapter; nothing emits them yet), plus `chat` with
-  the `chatMessage`, `chat:addMessage`, suggestion and clear event contract.
-  The headless client sends `say` through `_chat:messageEntered`, and the server
-  derives the author from the connection and checks `command.say`. Messages are
-  printed to the client log; templates render as plain text and there is no
-  NUI. `mapmanager` is not bundled.
+  scripts and a future GameAdapter; nothing emits them yet), `spawnmanager`
+  (headless ped-transform spawning and `playerSpawned`), `mapmanager`
+  (canonical map/gametype lifecycle and JSON directive dispatch), and `chat`
+  with the `chatMessage`, `chat:addMessage`, suggestion and clear event
+  contract. The headless client sends `say` through `_chat:messageEntered`, and
+  the server derives the author from the connection and checks `command.say`.
+  Messages are printed to the client log; templates render as plain text and
+  there is no NUI.
 - **No public server browser UI:** `sets` / `SetConvarServerInfo` marks convars
   as server info (exposed on `/info.json`), and `sv_masterUrl` /
   `sv_heartbeatInterval` optionally send periodic JSON heartbeats to a
