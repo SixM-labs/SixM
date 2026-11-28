@@ -1,7 +1,7 @@
 //! The [`LuaRuntime`] type: one sandboxed Lua state per resource instance.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
@@ -73,6 +73,8 @@ pub struct LuaRuntime {
     pub(crate) deferred_releases: RefCell<Vec<u32>>,
     /// Open `StartFindKvp` cursors.
     pub(crate) kvp_finds: RefCell<Finds>,
+    /// Active `req.setCancelHandler` callbacks keyed by pending HTTP request id.
+    pub(crate) http_cancels: RefCell<BTreeMap<u64, crate::web::CancelHandler>>,
     /// Cumulative count of invoked event handlers for `resmon`.
     pub(crate) handled_events: Cell<u64>,
 }
@@ -120,6 +122,7 @@ impl LuaRuntime {
             refs: RefCell::default(),
             deferred_releases: RefCell::default(),
             kvp_finds: RefCell::default(),
+            http_cancels: RefCell::default(),
             handled_events: Cell::new(0),
         });
         natives::install(&runtime, &helpers).into_script()?;
@@ -186,6 +189,7 @@ impl LuaRuntime {
         let exports = std::mem::take(&mut *self.exports.borrow_mut());
         let refs = std::mem::take(&mut *self.refs.borrow_mut());
         let deferred = std::mem::take(&mut *self.deferred_releases.borrow_mut());
+        let http_cancels = std::mem::take(&mut *self.http_cancels.borrow_mut());
         drop((
             sched,
             promises,
@@ -195,6 +199,7 @@ impl LuaRuntime {
             exports,
             refs,
             deferred,
+            http_cancels,
         ));
 
         if let Err(err) = self.drop_globals() {
@@ -306,6 +311,10 @@ impl ScriptRuntime for LuaRuntime {
     ) -> Result<(), ScriptError> {
         self.ensure_running()?;
         self.invoke_web(id, request, data)
+    }
+
+    fn cancel_http_request(&self, id: u64) {
+        self.invoke_web_cancel(id);
     }
 
     fn retain_ref(&self, id: u32) -> bool {

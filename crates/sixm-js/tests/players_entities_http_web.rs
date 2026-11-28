@@ -195,6 +195,7 @@ fn http_client_and_web_handler_work() {
         query: "a=1".to_owned(),
         headers: vec![("host".to_owned(), "localhost".to_owned())],
         body: b"AB".to_vec(),
+        address: "127.0.0.1".to_owned(),
     };
     rt.call_web_handler(web_cb.id, 7, &web_req)
         .expect("call_web_handler");
@@ -208,6 +209,96 @@ fn http_client_and_web_handler_work() {
         &replies[2].1,
         WebReply::End(chunk) if chunk == b"POST:/echo:a=1:AB"
     ));
+}
+
+#[test]
+fn web_handler_address_and_cancel_handler_lifecycle() {
+    let host = new_host();
+    let rt = start(
+        &host,
+        "web_cancel",
+        &["state", "bind_late"],
+        &[(
+            "index.js",
+            r#"
+            const events = [];
+            let lastAddr = "";
+            let lateReq = null;
+            exports("state", () => `${lastAddr}:${events.join(",")}`);
+            exports("bind_late", () => {
+                if (lateReq) {
+                    lateReq.setCancelHandler(() => events.push("late"));
+                }
+            });
+            SetHttpHandler((req, res) => {
+                lastAddr = req.address;
+                if (req.path === "/web_cancel/answered") {
+                    req.setCancelHandler(() => events.push("answered"));
+                    res.send("ok");
+                    req.setCancelHandler(() => events.push("after_send"));
+                } else if (req.path === "/web_cancel/hang") {
+                    req.setCancelHandler(() => events.push("canceled"));
+                } else if (req.path === "/web_cancel/late") {
+                    lateReq = req;
+                } else if (req.path === "/web_cancel/bad") {
+                    try {
+                        req.setCancelHandler(42);
+                    } catch (_e) {
+                        events.push("err");
+                    }
+                } else if (req.path === "/web_cancel/throw_cancel") {
+                    req.setCancelHandler(() => { throw new Error("cancel boom"); });
+                } else if (req.path === "/web_cancel/retain") {
+                    req.setCancelHandler(() => events.push("retained"));
+                }
+            });
+            "#,
+        )],
+    );
+
+    let (_, web_cb) = host.web_handlers.borrow()[0].clone();
+    let make_req = |path: &str| WebRequest {
+        method: "GET".to_owned(),
+        path: path.to_owned(),
+        query: String::new(),
+        headers: Vec::new(),
+        body: Vec::new(),
+        address: "198.51.100.7".to_owned(),
+    };
+
+    rt.call_web_handler(web_cb.id, 1, &make_req("/web_cancel/answered"))
+        .expect("answered");
+    rt.cancel_http_request(1);
+
+    rt.call_web_handler(web_cb.id, 2, &make_req("/web_cancel/hang"))
+        .expect("hang");
+    rt.cancel_http_request(2);
+    rt.cancel_http_request(2);
+
+    rt.call_web_handler(web_cb.id, 3, &make_req("/web_cancel/bad"))
+        .expect("bad");
+
+    rt.call_web_handler(web_cb.id, 4, &make_req("/web_cancel/throw_cancel"))
+        .expect("throw_cancel");
+    rt.cancel_http_request(4);
+
+    // Late registration after cancellation must be ignored without leaking Persistent refs.
+    rt.call_web_handler(web_cb.id, 6, &make_req("/web_cancel/late"))
+        .expect("late");
+    rt.cancel_http_request(6);
+    call(&rt, "bind_late", &[]);
+    rt.cancel_http_request(6);
+
+    assert_eq!(
+        call(&rt, "state", &[]),
+        vec![Value::from("198.51.100.7:canceled,err")]
+    );
+
+    // Retained cancel handler on open request drops cleanly on shutdown without QuickJS GC leaks.
+    rt.call_web_handler(web_cb.id, 5, &make_req("/web_cancel/retain"))
+        .expect("retain");
+    rt.shutdown();
+    rt.cancel_http_request(5);
 }
 
 #[test]

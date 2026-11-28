@@ -1417,11 +1417,13 @@ function GetRoutingBucketEntityLockdownMode(bucket) end
 ---@field timeout? number Request timeout in milliseconds.
 
 ---@class SixMHttpRequest
+---@field address string
 ---@field method string
 ---@field path string
 ---@field query string
 ---@field headers table<string, string>
 ---@field setDataHandler fun(callback: fun(data: string))
+---@field setCancelHandler fun(callback: fun())
 
 ---@class SixMHttpResponse
 ---@field writeHead fun(status: integer, headers?: table<string, string | number>)

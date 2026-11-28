@@ -235,26 +235,46 @@ impl ResourceManager {
         Ok(())
     }
 
-    /// Answers the requests that have waited for a handler too long with `504`.
-    /// Runs once per frame.
+    /// Answers timed-out requests with `504` and notifies runtimes of all
+    /// timed-out or client-disconnected pending requests. Runs once per frame.
     pub(crate) fn expire_web(&self, now: Instant) {
-        let expired: Vec<Pending> = {
+        let removed: Vec<(u64, Pending, bool)> = {
             let mut pending = self.web.pending.borrow_mut();
             if pending.is_empty() {
                 return;
             }
             let timeout = self.convars.borrow().http_handler_timeout();
-            let ids: Vec<u64> = pending
+            let ids: Vec<(u64, bool)> = pending
                 .iter()
-                .filter(|(_, entry)| now.saturating_duration_since(entry.since) >= timeout)
-                .map(|(id, _)| *id)
+                .filter_map(|(id, entry)| {
+                    let timed_out = now.saturating_duration_since(entry.since) >= timeout;
+                    let canceled = entry.responder.is_canceled();
+                    (timed_out || canceled).then_some((*id, timed_out))
+                })
                 .collect();
-            ids.iter().filter_map(|id| pending.remove(id)).collect()
+            ids.into_iter()
+                .filter_map(|(id, timed_out)| {
+                    pending.remove(&id).map(|entry| (id, entry, timed_out))
+                })
+                .collect()
         };
-        for entry in expired {
-            entry
-                .responder
-                .respond(text(504, "The HTTP handler did not respond in time"));
+        if removed.is_empty() {
+            return;
+        }
+        let snapshot = self.snapshot();
+        for (id, entry, timed_out) in removed {
+            if timed_out && !entry.responder.is_canceled() {
+                entry
+                    .responder
+                    .respond(text(504, "The HTTP handler did not respond in time"));
+            } else {
+                drop(entry.responder);
+            }
+            for slot in snapshot.iter() {
+                if slot.runtime.resource() == &entry.resource {
+                    slot.runtime.cancel_http_request(id);
+                }
+            }
         }
     }
 

@@ -642,3 +642,157 @@ fn metrics_enforces_basic_auth_and_hides_password_from_scripts() {
         None
     );
 }
+
+#[test]
+fn lua_and_js_handlers_read_direct_and_forwarded_address() {
+    let lb = started();
+    lb.fx.add_resource(
+        "addr_lua",
+        &common::manifest(&["server.lua"], &[], &[]),
+        &[(
+            "server.lua",
+            "SetHttpHandler(function(req, res) res.send(req.address) end)\n",
+        )],
+    );
+    lb.fx.add_resource(
+        "addr_js",
+        &common::manifest(&["server.js"], &[], &[]),
+        &[(
+            "server.js",
+            "SetHttpHandler((req, res) => { res.send(req.address); });\n",
+        )],
+    );
+    lb.fx.server.execute("refresh");
+    lb.fx.server.execute("ensure addr_lua");
+    lb.fx.server.execute("ensure addr_js");
+
+    // Without sv_proxyIPRanges, X-Forwarded-For is ignored and peer IP is reported.
+    let direct_lua = send(
+        &lb,
+        b"GET /addr_lua/ip HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 203.0.113.55\r\n\r\n"
+            .to_vec(),
+    );
+    assert_eq!(direct_lua.status, 200);
+    assert_eq!(direct_lua.text(), "127.0.0.1");
+
+    let direct_js = send(
+        &lb,
+        b"GET /addr_js/ip HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 203.0.113.55\r\n\r\n"
+            .to_vec(),
+    );
+    assert_eq!(direct_js.status, 200);
+    assert_eq!(direct_js.text(), "127.0.0.1");
+
+    // With loopback trusted, both Lua and JS see the forwarded client IP.
+    lb.fx
+        .server
+        .execute("set sv_proxyIPRanges \"127.0.0.1/32\"");
+
+    let proxied_lua = send(
+        &lb,
+        b"GET /addr_lua/ip HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 203.0.113.55\r\n\r\n"
+            .to_vec(),
+    );
+    assert_eq!(proxied_lua.status, 200);
+    assert_eq!(proxied_lua.text(), "203.0.113.55");
+
+    let proxied_js = send(
+        &lb,
+        b"GET /addr_js/ip HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 203.0.113.55\r\n\r\n"
+            .to_vec(),
+    );
+    assert_eq!(proxied_js.status, 200);
+    assert_eq!(proxied_js.text(), "203.0.113.55");
+}
+
+#[test]
+fn timeout_and_early_disconnect_fire_set_cancel_handler_in_lua_and_js() {
+    let lb = started();
+    lb.fx.add_resource(
+        "cancel_lua",
+        &common::manifest(&["server.lua"], &["log"], &[]),
+        &[(
+            "server.lua",
+            "LOG = {}\n\
+             function log() return table.concat(LOG, ',') end\n\
+             SetHttpHandler(function(req, res)\n\
+               req.setCancelHandler(function() LOG[#LOG + 1] = 'canceled:' .. req.path end)\n\
+               if req.path == '/cancel_lua/ok' then\n\
+                 res.send('ok')\n\
+               else\n\
+                 LOG[#LOG + 1] = 'open:' .. req.path\n\
+               end\n\
+             end)\n",
+        )],
+    );
+    lb.fx.add_resource(
+        "cancel_js",
+        &common::manifest(&["server.js"], &["log"], &[]),
+        &[(
+            "server.js",
+            r#"
+            const LOG = [];
+            exports("log", () => LOG.join(","));
+            SetHttpHandler((req, res) => {
+                req.setCancelHandler(() => LOG.push(`canceled:${req.path}`));
+                if (req.path === "/cancel_js/ok") {
+                    res.send("ok");
+                } else {
+                    LOG.push(`open:${req.path}`);
+                }
+            });
+            "#,
+        )],
+    );
+    lb.fx.server.execute("refresh");
+    lb.fx.server.execute("ensure cancel_lua");
+    lb.fx.server.execute("ensure cancel_js");
+    lb.fx.server.execute("set sixm_httpHandlerTimeout 1");
+
+    // Answered requests never invoke their cancel handler.
+    assert_eq!(get(&lb, "/cancel_lua/ok").status, 200);
+    assert_eq!(get(&lb, "/cancel_js/ok").status, 200);
+    assert_eq!(lb.fx.text("cancel_lua", "log"), "");
+    assert_eq!(lb.fx.text("cancel_js", "log"), "");
+
+    // Early client TCP disconnect fires setCancelHandler promptly (well before the 1s timeout).
+    for (resource, path) in [
+        ("cancel_lua", "/cancel_lua/drop"),
+        ("cancel_js", "/cancel_js/drop"),
+    ] {
+        let mut stream = TcpStream::connect(lb.addr).expect("connect");
+        stream
+            .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+            .expect("write");
+        lb.wait_for(&format!("{resource} open"), || {
+            lb.fx
+                .text(resource, "log")
+                .contains(&format!("open:{path}"))
+                .then_some(())
+        });
+        drop(stream);
+        lb.wait_for(&format!("{resource} disconnect cancel"), || {
+            lb.fx
+                .text(resource, "log")
+                .contains(&format!("canceled:{path}"))
+                .then_some(())
+        });
+    }
+
+    // Timeout cancellation: 504 returns AND setCancelHandler runs for both Lua and JS.
+    assert_eq!(get(&lb, "/cancel_lua/timeout").status, 504);
+    lb.wait_for("cancel_lua timeout cancel", || {
+        lb.fx
+            .text("cancel_lua", "log")
+            .contains("canceled:/cancel_lua/timeout")
+            .then_some(())
+    });
+
+    assert_eq!(get(&lb, "/cancel_js/timeout").status, 504);
+    lb.wait_for("cancel_js timeout cancel", || {
+        lb.fx
+            .text("cancel_js", "log")
+            .contains("canceled:/cancel_js/timeout")
+            .then_some(())
+    });
+}

@@ -313,4 +313,4 @@ All core utility, command, convar, resource, and KVP functions match
   `GetRoutingBucketEntityLockdownMode`.
 - **HTTP (server):**
   - `PerformHttpRequest(url, cb, method, data, headers, options)`
-  - `SetHttpHandler((req, res) => { req.setDataHandler((body) => { ... res.writeHead(...); res.write(...); res.send(...); }); })`
+  - `SetHttpHandler((req, res) => { ... })`: `req` exposes `address` (the client IP string, honoring `sv_proxyIPRanges`), `method`, `path`, `query`, `headers`, `setDataHandler((body) => { ... })`, and `setCancelHandler(() => { ... })` (called if the client disconnects or the request times out before `res.send` completes); `res` exposes `writeHead(status, headers)`, `write(data)`, and `send(data)`.

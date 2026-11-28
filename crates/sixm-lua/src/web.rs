@@ -1,12 +1,13 @@
 //! `SetHttpHandler`, and the request and response objects a handler is given.
 //!
-//! A handler is called as `handler(req, res)`. `req` has `method`, `path`,
-//! `query` and `headers`; `req.setDataHandler(fn)` registers a function that is
-//! given the body once the handler returns. `res` has `writeHead(status,
-//! headers)`, `write(data)` and `send(data)`, which completes the response. The
-//! functions work with both `.` and `:` call syntax.
+//! A handler is called as `handler(req, res)`. `req` has `address`, `method`,
+//! `path`, `query` and `headers`; `req.setDataHandler(fn)` registers a function
+//! that is given the body once the handler returns, and `req.setCancelHandler(fn)`
+//! registers a function called if the client disconnects or the request times out.
+//! `res` has `writeHead(status, headers)`, `write(data)` and `send(data)`, which
+//! completes the response. The functions work with both `.` and `:` call syntax.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
 use mlua::{Function, Lua, MultiValue, Table, Value as LuaValue};
@@ -14,6 +15,12 @@ use sixm_core::{Host, ScriptError, WebReply, WebRequest};
 
 use crate::http::read_headers;
 use crate::runtime::{IntoScriptResult, LuaRuntime, bind_fn, lua_err};
+
+/// A registered `req.setCancelHandler` callback and the shared open flag of its request.
+pub(crate) struct CancelHandler {
+    pub(crate) func: Option<Function>,
+    pub(crate) open: Rc<Cell<bool>>,
+}
 
 /// Installs `SetHttpHandler(function(req, res) ... end)`, which registers the
 /// calling resource's HTTP handler.
@@ -44,14 +51,42 @@ impl LuaRuntime {
             .lookup_function(id)
             .ok_or_else(|| ScriptError::StaleRef(self.func_ref(id)))?;
         let body_handler: Rc<RefCell<Option<Function>>> = Rc::default();
+        let open = Rc::new(Cell::new(true));
+        self.http_cancels.borrow_mut().insert(
+            request,
+            CancelHandler {
+                func: None,
+                open: Rc::clone(&open),
+            },
+        );
         let outcome = self
             .budget
-            .run(|| self.run_web(&handler, request, data, &body_handler));
+            .run(|| self.run_web(&handler, request, data, &body_handler, &open));
         // Released here, so that a body handler which captures the request
         // cannot keep it alive past this call.
         let leftover = body_handler.borrow_mut().take();
         drop(leftover);
+        if outcome.is_err() {
+            open.set(false);
+            self.http_cancels.borrow_mut().remove(&request);
+        }
         outcome.into_script()
+    }
+
+    pub(crate) fn invoke_web_cancel(&self, id: u64) {
+        if self.shut.get() {
+            return;
+        }
+        let Some(entry) = self.http_cancels.borrow_mut().remove(&id) else {
+            return;
+        };
+        entry.open.set(false);
+        let Some(func) = entry.func else {
+            return;
+        };
+        if let Err(err) = self.budget.run(|| func.call::<()>(())) {
+            tracing::error!(target: "sixm::script", "[{}] {err}", self.resource);
+        }
     }
 
     fn run_web(
@@ -60,9 +95,10 @@ impl LuaRuntime {
         request: u64,
         data: &WebRequest,
         body_handler: &Rc<RefCell<Option<Function>>>,
+        open: &Rc<Cell<bool>>,
     ) -> mlua::Result<()> {
-        let req = build_request(&self.lua, data, body_handler)?;
-        let res = build_response(&self.lua, self.host.clone(), request)?;
+        let req = build_request(&self.lua, &self.me, request, data, body_handler, open)?;
+        let res = build_response(&self.lua, self.host.clone(), &self.me, request, open)?;
         handler.call::<()>((req, res))?;
         let body = body_handler.borrow_mut().take();
         if let Some(body) = body {
@@ -76,10 +112,14 @@ impl LuaRuntime {
 /// The `req` table of a request.
 fn build_request(
     lua: &Lua,
+    weak: &Weak<LuaRuntime>,
+    request: u64,
     data: &WebRequest,
     body_handler: &Rc<RefCell<Option<Function>>>,
+    open: &Rc<Cell<bool>>,
 ) -> mlua::Result<Table> {
     let req = lua.create_table()?;
+    req.set("address", data.address.as_str())?;
     req.set("method", data.method.as_str())?;
     req.set("path", data.path.as_str())?;
     req.set("query", data.query.as_str())?;
@@ -100,12 +140,38 @@ fn build_request(
             )),
         })?;
     req.set("setDataHandler", set_data)?;
+    let cancel_open = Rc::clone(open);
+    let cancel_weak = weak.clone();
+    let set_cancel =
+        lua.create_function(move |_, args: MultiValue| match arguments(args).first() {
+            Some(LuaValue::Function(function)) => {
+                if cancel_open.get()
+                    && let Some(rt) = cancel_weak.upgrade().filter(|r| !r.shut.get())
+                {
+                    let mut cancels = rt.http_cancels.borrow_mut();
+                    if let Some(entry) = cancels.get_mut(&request) {
+                        entry.func = Some(function.clone());
+                    }
+                }
+                Ok(())
+            }
+            _ => Err(mlua::Error::runtime(
+                "setCancelHandler needs a function to call when the request is canceled",
+            )),
+        })?;
+    req.set("setCancelHandler", set_cancel)?;
     Ok(req)
 }
 
 /// The `res` table of a request. Each function sends its step to the host,
 /// which keeps the response until it is complete.
-fn build_response(lua: &Lua, host: Weak<dyn Host>, request: u64) -> mlua::Result<Table> {
+fn build_response(
+    lua: &Lua,
+    host: Weak<dyn Host>,
+    weak: &Weak<LuaRuntime>,
+    request: u64,
+    open: &Rc<Cell<bool>>,
+) -> mlua::Result<Table> {
     let res = lua.create_table()?;
     let head_host = host.clone();
     res.set(
@@ -127,17 +193,32 @@ fn build_response(lua: &Lua, host: Weak<dyn Host>, request: u64) -> mlua::Result
         })?,
     )?;
     let write_host = host.clone();
+    let write_open = Rc::clone(open);
+    let write_weak = weak.clone();
     res.set(
         "write",
         lua.create_function(move |_, args: MultiValue| {
             let data = body_of(arguments(args).first())?;
-            reply(&write_host, request, WebReply::Write(data))
+            if let Err(err) = reply(&write_host, request, WebReply::Write(data)) {
+                write_open.set(false);
+                if let Some(rt) = write_weak.upgrade() {
+                    rt.http_cancels.borrow_mut().remove(&request);
+                }
+                return Err(err);
+            }
+            Ok(())
         })?,
     )?;
+    let send_open = Rc::clone(open);
+    let send_weak = weak.clone();
     res.set(
         "send",
         lua.create_function(move |_, args: MultiValue| {
             let data = body_of(arguments(args).first())?;
+            send_open.set(false);
+            if let Some(rt) = send_weak.upgrade() {
+                rt.http_cancels.borrow_mut().remove(&request);
+            }
             reply(&host, request, WebReply::End(data))
         })?,
     )?;

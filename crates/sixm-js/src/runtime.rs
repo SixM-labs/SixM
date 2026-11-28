@@ -1,7 +1,7 @@
 //! The [`JsRuntime`] type: one isolated `QuickJS` runtime and context per resource instance.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
@@ -117,6 +117,7 @@ pub struct JsRuntime {
     pub(crate) refs: RefCell<RefTable>,
     pub(crate) deferred_releases: RefCell<Vec<u32>>,
     pub(crate) kvp_finds: RefCell<Finds>,
+    pub(crate) http_cancels: RefCell<BTreeMap<u64, crate::web::CancelHandler>>,
     pub(crate) rejections: RefCell<Rejections>,
     /// Cumulative count of invoked event handlers for `resmon`.
     pub(crate) handled_events: Cell<u64>,
@@ -171,6 +172,7 @@ impl JsRuntime {
             refs: RefCell::default(),
             deferred_releases: RefCell::default(),
             kvp_finds: RefCell::default(),
+            http_cancels: RefCell::default(),
             rejections: RefCell::default(),
             handled_events: Cell::new(0),
         });
@@ -385,6 +387,7 @@ impl JsRuntime {
         let refs = std::mem::take(&mut *self.refs.borrow_mut());
         let deferred = std::mem::take(&mut *self.deferred_releases.borrow_mut());
         let kvp_finds = std::mem::take(&mut *self.kvp_finds.borrow_mut());
+        let http_cancels = std::mem::take(&mut *self.http_cancels.borrow_mut());
         let rejections = std::mem::take(&mut *self.rejections.borrow_mut());
         let sym = self.func_ref_symbol.borrow_mut().take();
         drop((
@@ -396,6 +399,7 @@ impl JsRuntime {
             refs,
             deferred,
             kvp_finds,
+            http_cancels,
             rejections,
             sym,
         ));
@@ -501,6 +505,10 @@ impl ScriptRuntime for JsRuntime {
     ) -> Result<(), ScriptError> {
         self.ensure_running()?;
         self.invoke_web(id, request, data)
+    }
+
+    fn cancel_http_request(&self, id: u64) {
+        self.invoke_web_cancel(id);
     }
 
     fn retain_ref(&self, id: u32) -> bool {

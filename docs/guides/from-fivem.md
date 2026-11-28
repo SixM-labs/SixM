@@ -206,8 +206,9 @@ map/gametype resources; `chat` can start alongside them.
   threads (`sixm_httpWorkers`) so frames never block.
 - **Incoming HTTP routes (server only):**
   `SetHttpHandler(function(req, res) ... end)` serves `/<resource>/...` on the
-  TCP game port using `req.method`, `req.path`, `req.query`, `req.headers`,
-  `req.setDataHandler`, and `res.writeHead` / `res.write` / `res.send`.
+  TCP game port using `req.address` (proxy-resolved via `sv_proxyIPRanges`),
+  `req.method`, `req.path`, `req.query`, `req.headers`, `req.setDataHandler`,
+  `req.setCancelHandler`, and `res.writeHead` / `res.write` / `res.send`.
 - **Built-in HTTP endpoints:** `/info.json`, `/players.json`, `/dynamic.json`,
   `/healthz`, `/metrics` (when `sv_metricsEnabled` is enabled), and `/admin`
   (self-contained web admin UI when `sv_adminUiEnabled` is enabled and

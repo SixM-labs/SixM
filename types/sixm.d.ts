@@ -938,11 +938,13 @@ interface SixMHttpRequestOptions {
 }
 
 interface SixMHttpRequest {
+    address: string;
     method: string;
     path: string;
     query: string;
     headers: Record<string, string>;
     setDataHandler(callback: (body: string) => void): void;
+    setCancelHandler(callback: () => void): void;
 }
 
 interface SixMHttpResponse {

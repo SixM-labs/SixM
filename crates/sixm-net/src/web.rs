@@ -282,6 +282,11 @@ impl WebResponder {
         self.client_ip
     }
 
+    /// Returns whether the client disconnected or the request timed out in the listener.
+    pub fn is_canceled(&self) -> bool {
+        self.sender.is_closed()
+    }
+
     /// Sends `response`. Does nothing when the client has already gone.
     pub fn respond(self, response: WebResponse) {
         let _ = self.sender.send(response);
@@ -511,6 +516,7 @@ async fn answer(
             })
             .collect(),
         body,
+        address: client_ip.to_string(),
     };
     let (sender, receiver) = oneshot::channel();
     on_request(WebExchange {
@@ -738,5 +744,39 @@ mod tests {
             ),
             "203.0.113.77".parse::<IpAddr>().unwrap()
         );
+    }
+
+    #[test]
+    fn client_disconnect_marks_responder_canceled_promptly() {
+        use std::io::Write;
+        use std::net::TcpStream;
+        use std::sync::mpsc;
+
+        let (tx, rx) = mpsc::channel();
+        let server = WebServer::bind("127.0.0.1:0".parse().expect("addr"), move |exchange| {
+            let _ = tx.send(exchange);
+        })
+        .expect("bind");
+
+        let mut stream = TcpStream::connect(server.local_addr()).expect("connect");
+        stream
+            .write_all(b"GET /hang HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .expect("write");
+
+        let exchange = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("received exchange");
+        assert!(!exchange.responder.is_canceled());
+
+        drop(stream);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !exchange.responder.is_canceled() {
+            assert!(
+                Instant::now() < deadline,
+                "responder did not observe client disconnect promptly"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 }

@@ -9,6 +9,10 @@ may change the protocol and the API.
 
 ### Added
 
+- `SetHttpHandler` request object now exposes `req.address` (proxy-resolved via
+  `sv_proxyIPRanges` when configured) and `req.setCancelHandler(fn)` in Lua and
+  JavaScript, firing when a client disconnects early or the handler times out
+  (`WebRequest.address`, `WebResponder::is_canceled`, `ScriptRuntime::cancel_http_request`).
 - Adaptive Card deferrals via `deferrals.presentCard(card, cb?)` in Lua and
   JavaScript (wire protocol 16, `ServerMessage::PresentCard`,
   `ClientMessage::CardResponse`, `NetClient::connect_with_card_handler`,

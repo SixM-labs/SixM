@@ -846,10 +846,12 @@ calling resource. Requests to `/<resource>` and `/<resource>/...` on the server'
 TCP port call it, after the built-in routes of the server. Calling it again
 replaces the handler. The handler is removed when the resource stops.
 
-- `req.method`, `req.path` (the full path, such as `/res/page`), `req.query`
+- `req.address` (the client's IP string, honoring `sv_proxyIPRanges` when configured),
+  `req.method`, `req.path` (the full path, such as `/res/page`), `req.query`
   (without the `?`) and `req.headers` (lower-case names). The path is the raw one sent by the client: it is not decoded or normalized. The body is not in
   `req`: `req.setDataHandler(function(data) ... end)` registers a function that
-  is called with the whole body after the handler returns. The body is at most
+  is called with the whole body after the handler returns. `req.setCancelHandler(function() ... end)`
+  registers a callback that runs if the client disconnects or the request times out before `res.send` completes. The body is at most
   1 MiB; a larger request is refused before the handler runs.
 - `res.writeHead(status, headers)` sets the status and headers. Optional, and
   the default is `200`.

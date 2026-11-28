@@ -154,6 +154,9 @@ pub struct WebRequest {
     pub headers: Vec<(String, String)>,
     /// The request body.
     pub body: Vec<u8>,
+    /// The resolved client IP address (e.g. `127.0.0.1`), honoring `sv_proxyIPRanges`
+    /// when configured.
+    pub address: String,
 }
 
 /// What a resource sends back for a request, once its response is complete.
@@ -732,6 +735,10 @@ pub trait ScriptRuntime: fmt::Debug {
     /// body afterwards.
     fn call_web_handler(&self, id: u32, request: u64, data: &WebRequest)
     -> Result<(), ScriptError>;
+
+    /// Notifies the runtime that pending HTTP request `id` was canceled
+    /// (client disconnected or timed out) before a response was sent.
+    fn cancel_http_request(&self, _id: u64) {}
 
     /// See [`Host::retain_ref`]. Returns `false` for an unknown id.
     fn retain_ref(&self, id: u32) -> bool;

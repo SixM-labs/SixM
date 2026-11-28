@@ -306,7 +306,7 @@ equivalent / no effect / absent".
 | D3 | done | Gemini | `git log --grep "^D3:"` |
 | D4 | done | Gemini | `git log --grep "^D4:"` |
 | D5 | done | Gemini | `git log --grep "^D5:"` |
-| D6 | todo | | |
+| D6 | done | Gemini | `git log --grep "^D6:"` |
 | D7 | todo | | |
 | E1 | todo | | |
 | E2 | todo | | |
@@ -446,3 +446,9 @@ what is next, anything surprising.
   `deferrals.presentCard(card, cb?)` in Lua/JS with callback retention and
   cleanup, wired headless client interactive prompt, updated protocol/API/type
   docs, and ran full checks green. Next: D6 (`req.address` & `req.setCancelHandler`).
+- 2026-11-28, Gemini, `feat/fivem-parity-d`: `D6: http handler address and cancel handler`
+  follows 2f95d9d. Added `WebRequest.address` (proxy-resolved via `sv_proxyIPRanges`),
+  `WebResponder::is_canceled`, and `ScriptRuntime::cancel_http_request`, wired timeout and
+  prompt client-disconnect sweeping in `expire_web` plus `req.address` and
+  `req.setCancelHandler` in Lua and JS with leak-free lifecycle cleanup, updated
+  types/docs/changelog, and verified full workspace checks green. Next: D7 wrap-up & PR.
