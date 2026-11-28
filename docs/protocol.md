@@ -181,7 +181,7 @@ decoding budget. A join snapshot may span several frames.
    server has already verified the client certificate, so only a client with a
    certificate gets this far.
 2. A different protocol number is refused with `Rejected`, for example
-   `unsupported protocol version 7, server speaks 8`.
+   `unsupported protocol version 15, server speaks 16`.
 3. A name outside 1 to 64 characters is refused.
 4. The server replies `Welcome`, or `Rejected` with a reason.
 

@@ -237,6 +237,12 @@ HTTP/1.1** listener on the **TCP** port of `endpoint_add_udp` (default
 - `/info.json`
 - `/players.json`
 - `/dynamic.json`
+- `/healthz`
+- `/metrics` (when `sv_metricsEnabled` is enabled; optional HTTP Basic Auth via
+  `sv_prometheusBasicAuthUser` / `sv_prometheusBasicAuthPassword`)
+- `/admin` and `/resmon.json` (when `sv_adminUiEnabled` is enabled and
+  `rcon_password` is configured)
+- `/rcon` (when `rcon_password` is configured)
 - `/<resource>/...` for resources using `SetHttpHandler`
 
 Because this TCP listener does not speak TLS:
@@ -298,12 +304,13 @@ server {
 ```
 
 > [!NOTE]
-> SixM's built-in HTTP listener enforces its own per-peer-address rate limit
+> SixM's built-in HTTP listener enforces its own per-client-address rate limit
 > (`20` requests/second sustained, burst `60`, max `128` concurrent
-> connections) on the TCP peer IP. When traffic arrives through a local reverse
-> proxy, SixM sees `127.0.0.1` as the peer for all requests, so configure
-> per-client-IP rate limiting at the reverse proxy if your HTTP endpoints are
-> exposed to untrusted traffic.
+> connections) and RCON lockout tracking. When traffic arrives through a local
+> reverse proxy, SixM sees `127.0.0.1` by default unless `sv_proxyIPRanges`
+> trusts the proxy CIDR (e.g. `127.0.0.1/32`), in which case it honors the
+> rightmost untrusted `X-Forwarded-For` / `X-Real-IP` hop. If `sv_proxyIPRanges`
+> is left empty, configure per-client-IP rate limiting at the reverse proxy.
 
 ## 7. Firewall rules (UDP + TCP)
 
@@ -313,7 +320,7 @@ server {
 | Protocol | Port | Purpose | Expose publicly? |
 |---|---|---|---|
 | **UDP** | `30120` | QUIC game traffic (encrypted with TLS 1.3) | Yes (required for players) |
-| **TCP** | `30120` | Plain HTTP/1.1 (`/info.json`, `/players.json`, `/dynamic.json`, `SetHttpHandler`) | Only if `sv_httpEnabled` is `true` and no reverse proxy handles TLS; otherwise block externally |
+| **TCP** | `30120` | Plain HTTP/1.1 (`/info.json`, `/players.json`, `/dynamic.json`, `/healthz`, `/metrics`, `/admin`, `/resmon.json`, `/rcon`, `SetHttpHandler`) | Only if `sv_httpEnabled` is `true` and no reverse proxy handles TLS; otherwise block externally |
 | **TCP** | `443` | Reverse proxy HTTPS (optional) | Yes, if using a TLS reverse proxy |
 
 Remember to configure both your **host firewall** and any **cloud security

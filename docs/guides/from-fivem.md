@@ -210,10 +210,13 @@ map/gametype resources; `chat` can start alongside them.
   `req.method`, `req.path`, `req.query`, `req.headers`, `req.setDataHandler`,
   `req.setCancelHandler`, and `res.writeHead` / `res.write` / `res.send`.
 - **Built-in HTTP endpoints:** `/info.json`, `/players.json`, `/dynamic.json`,
-  `/healthz`, `/metrics` (when `sv_metricsEnabled` is enabled), and `/admin`
-  (self-contained web admin UI when `sv_adminUiEnabled` is enabled and
-  `rcon_password` is configured) are served on the TCP port of
-  `endpoint_add_udp` (unless `sv_httpEnabled` is `false`).
+  `/healthz`, `/metrics` (when `sv_metricsEnabled` is enabled, optionally
+  protected with `sv_prometheusBasicAuthUser`/`sv_prometheusBasicAuthPassword`),
+  `/admin` (self-contained web admin UI with live `resmon` when
+  `sv_adminUiEnabled` is enabled and `rcon_password` is configured), and
+  `/resmon.json` (live per-resource metrics, gated identically to `/admin`) are
+  served on the TCP port of `endpoint_add_udp` (unless `sv_httpEnabled` is
+  `false`).
 - **Optional discovery heartbeats:** Setting `sv_masterUrl` sends periodic JSON
   heartbeats (`info` and `dynamic`) every `sv_heartbeatInterval` seconds.
 
@@ -355,10 +358,12 @@ APIs (`require`, `fs`, `process`), `eval`, or `Function` constructors; see
 ### 7. Remote console, logging filters, and profiling
 
 SixM's remote console uses an authenticated HTTP `POST /rcon` request and
-returns command output as JSON. `con_addChannelFilter` uses case-insensitive
-`*` / `?` glob patterns matching tracing targets or `script:<resource>` instead
-of regular expressions. The `profiler` command captures server frames
-and resource ticks for Chrome Trace Event viewers. See
+returns command output as JSON. `con_channelFilters`, `con_addChannelFilter`,
+and `con_removeChannelFilter` use case-insensitive `*` / `?` glob patterns
+matching tracing targets or `script:<resource>` instead of regular expressions.
+The `profiler` command captures server frames and resource ticks for Chrome
+Trace Event viewers, while `resmon` and `sixm_hitchWarningMs` monitor live
+per-resource tick times, memory, and frame hitches. See
 [Remote console](../server.md#remote-console),
 [Built-in commands](../server.md#built-in-commands), and
 [Frame profiling](../server.md#frame-profiling).

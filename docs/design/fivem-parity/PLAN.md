@@ -307,7 +307,7 @@ equivalent / no effect / absent".
 | D4 | done | Gemini | `git log --grep "^D4:"` |
 | D5 | done | Gemini | `git log --grep "^D5:"` |
 | D6 | done | Gemini | `git log --grep "^D6:"` |
-| D7 | todo | | |
+| D7 | done | Gemini | `git log --grep "^D7:"` |
 | E1 | todo | | |
 | E2 | todo | | |
 | E3 | todo | | |
@@ -452,3 +452,12 @@ what is next, anything surprising.
   prompt client-disconnect sweeping in `expire_web` plus `req.address` and
   `req.setCancelHandler` in Lua and JS with leak-free lifecycle cleanup, updated
   types/docs/changelog, and verified full workspace checks green. Next: D7 wrap-up & PR.
+- 2026-11-28, Gemini, `feat/fivem-parity-d`: `D7: wrap up Phase D` follows
+  0f35ff0. Audited all Phase D docs and guides, updated `docs/server.md`,
+  `docs/protocol.md`, `docs/lua-api.md`, `docs/guides/from-fivem.md`,
+  `docs/guides/deployment.md`, `docs/guides/permissions.md`, and `README.md`,
+  verified full Linux checks (`check_types.py`, `cargo fmt`, `cargo clippy`,
+  `cargo test --workspace`, `fuzz` locked check), pushed `feat/fivem-parity-d`,
+  and opened the Phase D PR to `main`. Windows CI is verified via GitHub
+  Actions on the PR before merging. Next: Phase E (`E1` ADR decision with
+  maintainer).

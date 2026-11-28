@@ -105,13 +105,16 @@ add_ace builtin.everyone command.help allow
 
 - **Server console (`stdin`, `server.cfg`, `exec`, `+commands`):** Always
   allowed to run every command.
-- **Built-in commands:** All 24 built-in server commands (`start`, `stop`,
+- **Built-in commands:** All 37 built-in server commands (`start`, `stop`,
   `restart`, `ensure`, `refresh`, `set`, `sets`, `setr`, `exec`, `quit`,
-  `players`, `entities`, `state`, `perf`, `help`, `endpoint_add_udp`,
+  `status`, `clientkick`, `say`, `cmdlist`, `players`, `entities`, `state`,
+  `perf`, `resmon`, `profiler`, `con_channelFilters`, `con_addChannelFilter`,
+  `con_removeChannelFilter`, `watch_resources`, `help`, `endpoint_add_udp`,
   `endpoint_add_tcp`, `add_ace`, `remove_ace`, `add_principal`,
-  `remove_principal`, `list_aces`, `list_principals`, `test_ace`) require
-  `command.<name>` when invoked by a player or by a resource via
-  `ExecuteCommand`.
+  `remove_principal`, `list_aces`, `list_principals`, `test_ace`,
+  `add_convar_permission`, `remove_convar_permission`,
+  `list_convar_permissions`) require `command.<name>` when invoked by a player
+  or by a resource via `ExecuteCommand`.
 - **Restricted script commands:** Registering a command with `restricted = true`
   checks `command.<name>`:
 
@@ -129,9 +132,13 @@ add_ace builtin.everyone command.help allow
 - **Console-only & restricted convars:** Security-critical and bootstrap
   convars (`rcon_password`, `sv_httpAllowPrivate`, `sv_httpEnabled`,
   `sv_exposePlayerIdentifiers`, `sixm_identityFile`, `sixm_resourcesPath`,
-  `sixm_kvpPath`, `endpoint_add_udp`) cannot be modified from scripts or remote
-  commands, and restricted convars (`add_convar_permission`) cannot be
-  overwritten by resources without read access.
+  `sixm_kvpPath`, `endpoint_add_udp`, `sv_playerEventRateLimit`,
+  `sv_metricsEnabled`, `sv_adminUiEnabled`, `sv_masterUrl`,
+  `sv_heartbeatInterval`, `sv_stateBagStrictMode`, `sv_proxyIPRanges`,
+  `sv_prometheusBasicAuthUser`, and `sv_prometheusBasicAuthPassword`) cannot be
+  modified from scripts or remote commands, and restricted convars
+  (`add_convar_permission`) cannot be overwritten by resources without read
+  access.
 
 > [!CAUTION]
 > Granting `add_ace group.admin command allow` grants `command.exec`,

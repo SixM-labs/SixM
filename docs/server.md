@@ -88,8 +88,8 @@ ensure hello
 Start map and gametype resources after `spawnmanager` and `mapmanager`.
 The example grants `command.start`, `command.stop`, and `command.restart`
 to `resource.mapmanager` for switching maps and gametypes and restarting a
-round. `command.say` allows players to submit chat messages to the `chat`
-resource.
+round. `command.say` allows players to use built-in server `say` and submit
+chat messages through the `chat` resource.
 
 ## Console commands
 
@@ -292,7 +292,7 @@ Convar names are case-insensitive. Scripts read them with `GetConvar` and
 | `sv_masterUrl` | empty | Console-only. Optional HTTP(S) URL to which the server periodically `POST`s JSON discovery heartbeats (`{"info": ..., "dynamic": ...}`). Honors `sv_httpAllowPrivate` and `sixm_httpTimeout`. |
 | `sv_heartbeatInterval` | `30` | Console-only. Seconds between master-server heartbeats when `sv_masterUrl` is set, clamped to 10 to 3600. |
 | `sixm_hitchWarningMs` | `50` | Frame duration threshold in milliseconds above which a hitch warning is logged (`0` disables, clamped up to `60000`). |
-| `sv_proxyIPRanges` | empty | Console-only. Comma- or whitespace-separated trusted reverse-proxy CIDRs (`127.0.0.1/32`, `10.0.0.0/8`, `fd00::/8`). When set, HTTP rate limits, RCON lockouts, and HTTP client `ip:` attribution honor the rightmost untrusted hop in `X-Forwarded-For` (falling back to `X-Real-IP`) only when the TCP peer is inside a listed range. |
+| `sv_proxyIPRanges` | empty | Console-only. Comma- or whitespace-separated trusted reverse-proxy CIDRs (`127.0.0.1/32`, `10.0.0.0/8`, `fd00::/8`). When set, HTTP rate limits, RCON lockouts, `SetHttpHandler` `req.address`, and HTTP client IP attribution honor the rightmost untrusted hop in `X-Forwarded-For` (falling back to `X-Real-IP`) only when the TCP peer is inside a listed range. |
 | `sv_prometheusBasicAuthUser` | empty | Console-only. Optional HTTP Basic Auth username protecting `GET /metrics`. When either user or password is set, both must be configured and match (`401` otherwise). |
 | `sv_prometheusBasicAuthPassword` | empty | Console-only credential protecting `GET /metrics` alongside `sv_prometheusBasicAuthUser`. Excluded from script convar APIs. |
 
@@ -402,7 +402,7 @@ connection carries one request and is closed after its answer.
 | `/healthz` | JSON readiness/liveness summary: `{"ok":true,"resources":<count>,"players":<count>}`. |
 | `/metrics` | Prometheus text exposition (`0.0.4`) when `sv_metricsEnabled` is `true` or `1` (`404` otherwise, `401` when `sv_prometheusBasicAuthUser`/`sv_prometheusBasicAuthPassword` are configured and credentials fail). Exposes `sixm_players_connected`, `sixm_players_max`, `sixm_resources_running`, `sixm_entities_total`, `sixm_tick_duration_ms` (`avg`, `p50`, `p99`, `max`), `sixm_net_rx_bytes_total`, and `sixm_net_tx_bytes_total`. |
 | `/admin` | Self-contained HTML admin UI when `sv_adminUiEnabled` is `true` or `1` and `rcon_password` is set (`404` when disabled, `403` when `rcon_password` is unset). Includes a live `resmon` table and authenticates commands against `POST /rcon`. |
-| `/resmon.json` | Live per-resource monitor snapshot (`hitch_warning_ms` and per-resource `avg_tick_ms`, `max_tick_ms`, `last_tick_ms`, `heap_bytes`, `window_events`, `total_events`), gated identically to `/admin`. |
+| `/resmon.json` | Live per-resource monitor snapshot (`hitch_warning_ms` and per-resource `samples`, `avg_tick_ms`, `max_tick_ms`, `last_tick_ms`, `heap_bytes`, `window_events`, `total_events`), gated identically to `/admin`. |
 | `/rcon` | [`POST /rcon`](#remote-console) executes one authenticated console command and returns its output as JSON. |
 | `/<resource>/...` | The `SetHttpHandler` function of that resource, if it has one. See [HTTP handlers](lua-api.md#http-handlers-server-only). |
 
@@ -439,9 +439,10 @@ a plain-text command body. A `200` response has the shape
 
 The endpoint returns `400` for an invalid request, `401` for a bad password,
 `403` when disabled and `405` for other methods. After five consecutive
-failures from the same TCP peer IP, it returns `429` until 30 seconds have
-elapsed since the first failure. Clients sharing a reverse proxy's connection
-address share that limit.
+failures from the same resolved client IP (TCP peer IP, or forwarded IP when
+`sv_proxyIPRanges` trusts the proxy), it returns `429` until 30 seconds have
+elapsed since the first failure. Without `sv_proxyIPRanges`, clients sharing a
+reverse proxy's connection address share that limit.
 
 ## Players
 

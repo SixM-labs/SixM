@@ -98,10 +98,15 @@ cd examples/server-data
 cargo run --release -p sixm-server
 ```
 
-The console accepts `start`, `stop`, `restart`, `ensure`, `refresh`, `set`,
-`exec`, `endpoint_add_udp`, `players`, `entities`, `state`, `perf`, `help` and
-`quit`, plus every command registered with `RegisterCommand`. `perf` prints the
-frame times and the network load; see [Load testing](docs/server.md#load-testing).
+The console accepts built-in management commands (`start`, `stop`, `restart`,
+`ensure`, `refresh`, `set`, `sets`, `setr`, `exec`, `status`, `clientkick`,
+`say`, `cmdlist`, `players`, `entities`, `state`, `perf`, `resmon`,
+`profiler`, `con_channelFilters`, `con_addChannelFilter`,
+`con_removeChannelFilter`, `help`, `quit`, and ACE/bootstrap commands; run
+`cmdlist` for the full list), plus every command registered with
+`RegisterCommand`. `perf` and `resmon` report frame times, resource usage, and
+network load; see [Load testing](docs/server.md#load-testing) and
+[Built-in commands](docs/server.md#built-in-commands).
 
 A test client can connect while the example server runs:
 
@@ -109,8 +114,8 @@ A test client can connect while the example server runs:
 cargo run -p sixm-net --example bot -- 127.0.0.1:30120 Tester hello:ping hi
 ```
 
-To try the example chat, connect the headless client and type `say Hello` in
-its console:
+To try the example chat, use `say Hello` in either the server console or the
+connected headless client console:
 
 ```sh
 cargo run -p sixm-client -- 127.0.0.1:30120 Tester
@@ -244,8 +249,10 @@ GetPlayerFromStateBagName('player:3') -- 3, or 0 for any other bag name
 - Keys are 1 to 256 bytes. Values are plain data: functions cannot be stored.
 - `set` is the method name of a bag. A key called `set` can be written, but
   reading it returns the method, so choose another name.
-- Clients cannot write state. The server accepts no state messages from
-  clients, so only server scripts change it.
+- Client scripts may replicate writes to their own `LocalPlayer.state` or an
+  owned `Entity(id).state` when ownership and permission checks succeed (subject
+  to `sv_playerEventRateLimit` and `sv_stateBagStrictMode`); unauthorized writes
+  to `global` or unowned bags are ignored.
 - The console command `state` lists the bags. `state <bag>` prints the keys of
   one bag, with their values.
 

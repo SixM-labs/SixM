@@ -202,8 +202,8 @@ end)
   string or a Lua table/array serialized to JSON, up to 64 KiB (`MAX_CARD_BYTES`).
   When the client responds or cancels, the optional callback `cb(data, rawData)`
   runs with the decoded JSON response table/value and the raw JSON string, or
-  `(nil, nil)` if the client canceled or dismissed the card. Receiving a card
-  response resets the `sixm_deferralTimeout` timer.
+  `(nil, nil)` if the client canceled or dismissed the card. Both sending a
+  card and receiving a card response reset the `sixm_deferralTimeout` timer.
 - `deferrals.done([reason])` finishes the handler. Each `defer` is matched by
   one `done` without a reason. A `done` with a non-empty reason refuses the
   player at once with that reason.
