@@ -22,6 +22,7 @@ jobs:
           - latent_event
           - file_stream_header
           - manifest
+          - set_state_bag
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly

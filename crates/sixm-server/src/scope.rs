@@ -463,16 +463,17 @@ impl ResourceManager {
     }
 
     /// Sends a pre-encoded replicated write for `entity`'s state bag to the
-    /// players that hold the entity.
+    /// players that hold the entity, excluding `except` when set.
     pub(crate) fn send_entity_state(
         &self,
         server: &NetServer,
         entity: u32,
         frame: &Arc<[u8]>,
+        except: Option<u32>,
     ) -> Result<(), ScriptError> {
         let scopes = self.scopes.borrow();
         for (&player, scope) in &scopes.players {
-            if scope.entities.binary_search(&entity).is_ok() {
+            if except != Some(player) && scope.entities.binary_search(&entity).is_ok() {
                 server
                     .send_encoded(player, Arc::clone(frame))
                     .map_err(|err| ScriptError::Runtime(err.to_string()))?;
@@ -482,16 +483,18 @@ impl ResourceManager {
     }
 
     /// Sends a pre-encoded replicated write for an entity bag to the players
-    /// of `bucket`, for scoping off while buckets are in use.
+    /// of `bucket`, for scoping off while buckets are in use, excluding
+    /// `except` when set.
     pub(crate) fn send_state_in_bucket(
         &self,
         server: &NetServer,
         bucket: u32,
         frame: &Arc<[u8]>,
+        except: Option<u32>,
     ) -> Result<(), ScriptError> {
         let scopes = self.scopes.borrow();
         for &player in scopes.players.keys() {
-            if bucket_in(&scopes.buckets, player) == bucket {
+            if except != Some(player) && bucket_in(&scopes.buckets, player) == bucket {
                 server
                     .send_encoded(player, Arc::clone(frame))
                     .map_err(|err| ScriptError::Runtime(err.to_string()))?;

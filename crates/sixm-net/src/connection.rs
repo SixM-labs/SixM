@@ -262,7 +262,8 @@ async fn read_hello(
         | ClientMessage::Command { .. }
         | ClientMessage::EntityTransforms { .. }
         | ClientMessage::CreateEntity { .. }
-        | ClientMessage::RequestEntityControl { .. } => Err(NetError::Protocol(
+        | ClientMessage::RequestEntityControl { .. }
+        | ClientMessage::SetStateBag { .. } => Err(NetError::Protocol(
             "the first message must be Hello".to_owned(),
         )),
     }
@@ -492,6 +493,11 @@ async fn read_loop(
                 rotation,
             },
             Ok(ClientMessage::RequestEntityControl { id }) => Inbound::RequestEntityControl { id },
+            Ok(ClientMessage::SetStateBag { bag, key, value }) => Inbound::SetStateBag {
+                bag,
+                key,
+                value: value.0,
+            },
             Ok(ClientMessage::RequestFile { hash }) => {
                 if let Err(reason) = requests.request(hash) {
                     return Stop::Kick(reason.to_owned());
@@ -532,6 +538,12 @@ async fn read_loop(
                 Inbound::RequestEntityControl { id } => {
                     NetEvent::RequestEntityControl { player, id }
                 }
+                Inbound::SetStateBag { bag, key, value } => NetEvent::SetStateBag {
+                    player,
+                    bag,
+                    key,
+                    value,
+                },
             }),
             Verdict::Drop => {
                 if let Some(dropped) = limiter
@@ -655,6 +667,11 @@ enum Inbound {
     },
     RequestEntityControl {
         id: u32,
+    },
+    SetStateBag {
+        bag: String,
+        key: String,
+        value: Value,
     },
 }
 

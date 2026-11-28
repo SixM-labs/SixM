@@ -102,8 +102,12 @@ an explicit repeatable attempt.
   with `reserved == 0`.
 - `GetPlayerFromStateBagName` and `GetEntityFromStateBagName` resolve
   `player:<id>` and `entity:<id>` bag names.
-- Clients cannot write replicated state (`bag:set(k, v, false)` keeps local
-  client state only).
+- Clients can write replicated state on `LocalPlayer.state` and on
+  `Entity(id).state` for entities owned by the local client (subject to
+  server-side `sv_stateBagStrictMode`, which rejects client writes when
+  enabled). `GlobalState`, other players' bags, and unowned entities cannot be
+  replicated from clients; `bag:set(k, v, false)` keeps local client state
+  only.
 
 ### Stock resource: mapmanager
 
@@ -149,8 +153,10 @@ map/gametype resources; `chat` can start alongside them.
   the bag or key is missing. `GetStateBagKeys` returns `nil` or `undefined` for
   an unknown bag. `SetStateBagValue` follows `bag:set` validation and also
   supports the FiveM msgpack-byte signature. Its `replicated` flag defaults to
-  `false`. On clients, `replicated = false` writes local-only state and
-  replicated writes fail. `EnsureEntityStateBag` is a compatibility no-op.
+  `false`. On clients, `replicated = false` writes local-only state, while
+  `replicated = true` replicates for `player:<localId>` and owned `entity:<id>`
+  bags (when `sv_stateBagStrictMode` is disabled) and raises an error on other
+  bags. `EnsureEntityStateBag` is a compatibility no-op.
 - **ACE and server information:** `IsAceAllowed(object)` checks the calling
   resource's `resource.<name>` principal. Use `IsPlayerAceAllowed` to check a
   player's permissions. `GetGameName()` returns `sixm` on the server and

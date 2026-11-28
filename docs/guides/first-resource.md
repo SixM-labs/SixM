@@ -243,9 +243,11 @@ Things to watch on the client:
   already contain their replicated join snapshot before your client scripts
   load, so `AddStateBagChangeHandler` only fires for changes that arrive
   afterwards.
-- **Read-only replicated state:** Clients can read `GlobalState` and
-  `LocalPlayer.state`, or write local-only keys with `bag:set(k, v, false)`,
-  but calling a replicated write from a client raises an error.
+- **Client state writes:** Clients can read `GlobalState` and
+  `LocalPlayer.state`, write local-only keys with `bag:set(k, v, false)`, and
+  write replicated keys on `LocalPlayer.state` and owned `Entity(id).state`
+  (unless `sv_stateBagStrictMode` is enabled on the server); replicated writes to
+  `GlobalState` or unowned bags raise an error.
 
 ## 6. Create `server.cfg` and start the server
 

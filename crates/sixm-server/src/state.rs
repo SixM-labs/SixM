@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use sixm_core::{
     GLOBAL_BAG, MAX_STATE_NAME_LEN, ScriptError, Value, entity_of_bag, player_bag, player_of_bag,
 };
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::manager::ResourceManager;
 
@@ -147,13 +147,66 @@ impl ResourceManager {
             ));
         }
         if replicated {
-            self.broadcast_state(bag, key, value)?;
+            self.broadcast_state(bag, key, value, None)?;
         }
+        self.apply_and_deliver(bag, key, value, replicated);
+        Ok(())
+    }
+
+    /// Validates and applies a replicated write sent by `player`.
+    ///
+    /// Rejects without kicking when `sv_stateBagStrictMode` is enabled, the
+    /// shared `sv_playerEventRateLimit` bucket drops the write, the key/value
+    /// is invalid, the player does not own the bag, or encoding fails. Relays
+    /// to every other eligible client before updating the store and running
+    /// server change handlers.
+    pub(crate) fn client_state_set(&self, player: u32, bag: &str, key: &str, value: &Value) {
+        if self.convars.borrow().state_bag_strict_mode() {
+            debug!(
+                player,
+                bag, key, "rejecting client state bag write in strict mode"
+            );
+            return;
+        }
+        if !self.admit_player_event(player, "state bag writes") {
+            return;
+        }
+        if let Err(err) = validate_key(key) {
+            debug!(player, bag, key, %err, "rejecting invalid client state key");
+            return;
+        }
+        if value.contains_func_ref() {
+            debug!(
+                player,
+                bag, key, "rejecting client state value with function"
+            );
+            return;
+        }
+        let owned = (player_of_bag(bag) == Some(player)
+            && self.network.players.borrow().contains(player))
+            || entity_of_bag(bag).is_some_and(|entity| {
+                self.entities
+                    .borrow()
+                    .get(entity)
+                    .is_some_and(|info| info.owner == Some(player))
+            });
+        if !owned {
+            debug!(player, bag, key, "rejecting unowned client state bag write");
+            return;
+        }
+        if let Err(err) = self.broadcast_state(bag, key, value, Some(player)) {
+            warn!(player, bag, key, %err, "rejecting invalid client state bag write");
+            return;
+        }
+        self.apply_and_deliver(bag, key, value, true);
+    }
+
+    /// Applies one state change to the store and runs server change handlers.
+    fn apply_and_deliver(&self, bag: &str, key: &str, value: &Value, replicated: bool) {
         self.state.borrow_mut().apply(bag, key, value, replicated);
         for runtime in self.snapshot().iter() {
             runtime.deliver_state_change(bag, key, value, replicated);
         }
-        Ok(())
     }
 
     /// Fails unless `bag` is `global`, the bag of a connected player or the bag
@@ -172,11 +225,18 @@ impl ResourceManager {
         }
     }
 
-    /// Sends a replicated write to every accepted player, or for an entity bag
-    /// to the players that hold the entity (with scoping on) or that share its
-    /// routing bucket (with buckets in use). The message is encoded once. Does
-    /// nothing while the network is not running.
-    fn broadcast_state(&self, bag: &str, key: &str, value: &Value) -> Result<(), ScriptError> {
+    /// Sends a replicated write to every accepted player (excluding `except`
+    /// when set), or for an entity bag to the players that hold the entity
+    /// (with scoping on) or that share its routing bucket (with buckets in
+    /// use). The message is encoded once. Does nothing while the network is not
+    /// running.
+    fn broadcast_state(
+        &self,
+        bag: &str,
+        key: &str,
+        value: &Value,
+        except: Option<u32>,
+    ) -> Result<(), ScriptError> {
         let server = self.network.server.borrow();
         let Some(server) = server.as_ref() else {
             return Ok(());
@@ -185,14 +245,18 @@ impl ResourceManager {
             .encode_state(bag, key, value)
             .map_err(|err| ScriptError::Runtime(err.to_string()))?;
         match entity_of_bag(bag) {
-            Some(entity) if self.scoping() => self.send_entity_state(server, entity, &frame),
+            Some(entity) if self.scoping() => {
+                self.send_entity_state(server, entity, &frame, except)
+            }
             Some(entity) if self.buckets_in_use() => {
                 let bucket = self.entities.borrow().bucket(entity);
-                self.send_state_in_bucket(server, bucket, &frame)
+                self.send_state_in_bucket(server, bucket, &frame, except)
             }
-            _ => server
-                .broadcast_encoded(frame)
-                .map_err(|err| ScriptError::Runtime(err.to_string())),
+            _ => match except {
+                Some(except) => server.broadcast_encoded_except(frame, except),
+                None => server.broadcast_encoded(frame),
+            }
+            .map_err(|err| ScriptError::Runtime(err.to_string())),
         }
     }
 

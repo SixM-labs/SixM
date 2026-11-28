@@ -99,11 +99,14 @@ a ped owned by the local player, and `delete_entity` clears it.
 
 State is addressed by bag name. `entity_bag(id)` names an entity's bag
 (`entity:<id>`), `player_bag` names a player's, and `GLOBAL_BAG` is the global
-one. `Host::state_get` and `Host::state_set` read and write. A client may
-write only with `replicated` set to `false`; the server's replicated state
-reaches the client through `ClientNotice::StateBag...` notices and
-`deliver_state` runs the script handlers. An adapter can use entity bags for
-per-entity game data (for example a vehicle's colour) without any new message.
+one. `Host::state_get` and `Host::state_set` read and write. A client may write
+replicated state (`replicated = true`) to its own player bag and to entities it
+owns (unless `sv_stateBagStrictMode` rejects client writes on the server);
+non-replicated writes (`replicated = false`) stay local to that client. The
+server's replicated state reaches the client through `ClientNotice::StateBag...`
+notices and `deliver_state` runs the script handlers. An adapter can use entity
+bags for per-entity game data (for example a vehicle's colour) without any new
+message.
 
 ### Events
 

@@ -199,6 +199,11 @@ impl Client {
         self.net.send_command(line)
     }
 
+    /// Sends a replicated state bag write to the server.
+    pub fn send_state(&self, bag: &str, key: &str, value: &Value) -> Result<(), NetError> {
+        self.net.send_state(bag, key, value)
+    }
+
     /// Sends the transforms of entities this client owns, as `(id, position,
     /// rotation, epoch)` where a part is present only when it changed, in as
     /// few messages as possible.

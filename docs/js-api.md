@@ -209,7 +209,11 @@ directive schema.
   The FiveM form `SetStateBagValue(bag, key, valueData, valueLength, replicated)` takes msgpack bytes (a `Uint8Array` or string from `msgpack.pack`), decodes only the first `valueLength` bytes and stores the result.
 - `EnsureEntityStateBag(entity)` does nothing; an entity's bag exists for the whole life of the entity.
 
-On the client, writes with `replicated = true` throw an error.
+On the client, writes with `replicated = true` are allowed on `LocalPlayer.state`
+and on `Entity(id).state` for entities owned by the local client (subject to
+server-side `sv_stateBagStrictMode`); replicated writes to `GlobalState`, other
+players' bags, or unowned entities throw an error. Writes with `replicated = false`
+stay local to the client.
 
 ## Vectors
 

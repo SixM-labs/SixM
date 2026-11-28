@@ -298,9 +298,9 @@ equivalent / no effect / absent".
 | B2 | done | ChatGPT (Luna impl, Terra review), Gemini (Flash fixes, Pro review) | `git log --grep "^B2:"` |
 | B3 | done | ChatGPT (Luna impl, Terra review), Gemini (Flash fixes, Pro review) | `git log --grep "^B3:"` |
 | B4 | done | ChatGPT (Luna draft), Gemini (wrap-up) | `git log --grep "^B4:"` |
-| C1 | todo | | |
-| C2 | todo | | |
-| C3 | todo | | |
+| C1 | done | Gemini (Flash impl, Pro review) | `git log --grep "^C1:"` |
+| C2 | done | Gemini (Flash impl, Pro review) | `git log --grep "^C2:"` |
+| C3 | done | Gemini | `git log --grep "^C3:"` |
 | D1 | todo | | |
 | D2 | todo | | |
 | D3 | todo | | |
@@ -398,3 +398,21 @@ what is next, anything surprising.
   `cargo test --workspace`), pushed `feat/fivem-parity-b`, and opened the Phase
   B PR to `main`. Windows CI is verified via GitHub Actions on the PR before
   merging. Next: Phase C (`feat/fivem-parity-c`) after PR merge.
+- 2026-11-28, Gemini, `feat/fivem-parity-c`: Phase B merged as 49369b4
+  ([PR #26](https://github.com/SixM-labs/SixM/pull/26)) after green Linux and
+  Windows CI. `C1: client state bag protocol and server relay` adds protocol v15
+  (`ClientMessage::SetStateBag`), `fuzz/fuzz_targets/set_state_bag.rs`,
+  `sv_stateBagStrictMode`, shared `sv_playerEventRateLimit` enforcement,
+  ownership checks, and non-echoing relay. Next: C2 (script side).
+- 2026-11-28, Gemini, `feat/fivem-parity-c`: `C2: client script replicated state
+  bags` follows 24d96e2. Enabled client replicated writes on `LocalPlayer.state`,
+  owned `Entity(id).state`, and `SetStateBagValue` in `ClientRuntime::state_set`,
+  added Lua/JS loopback tests (including scoping and mid-life ownership
+  transfer), and updated docs/types. Next: C3 wrap-up and PR.
+- 2026-11-28, Gemini, `feat/fivem-parity-c`: `C3: wrap up Phase C` follows
+  0369b2f. Audited `docs/`, `types/`, and `CHANGELOG.md` (zero stale
+  client-replication restrictions remain), ran full Linux checks
+  (`check_types.py`, `cargo fmt`, `cargo clippy`, `cargo test --workspace`,
+  `fuzz` locked check), pushed `feat/fivem-parity-c`, and opened the Phase C
+  PR to `main`. Windows CI is verified via GitHub Actions on the PR before
+  merging. Next: Phase D (`feat/fivem-parity-d`) after PR merge.

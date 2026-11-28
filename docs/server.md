@@ -274,7 +274,8 @@ Convar names are case-insensitive. Scripts read them with `GetConvar` and
 | `sixm_cullRadius` | `424` | Distance in metres within which a player is sent entities, measured from its ped. Entities the player owns are always sent. Clamped to 0 to 100000. `0` turns scoping off, so every player is sent every entity. A value that is not a number gives 424. A change takes effect on the next frame. See [Scoping](lua-api.md#scoping). |
 | `sixm_maxClientEntities` | `64` | Replicated. Most networked entities one client may create at once, clamped to 0 to 4096. |
 | `sv_entityLockdown` | `inactive` | Global client entity creation lockdown mode (`inactive`, `relaxed` to block peds, or `strict` to block all client creations), overridable per routing bucket via `SetRoutingBucketEntityLockdownMode`. |
-| `sv_playerEventRateLimit` | `60` | Console-only. Per-player `TriggerServerEvent` token-bucket rate limit in events/sec (burst `2×` rate, clamped to 0 to 10000; `0` disables). Excess events are dropped with a rate-limited warning. |
+| `sv_playerEventRateLimit` | `60` | Console-only. Per-player `TriggerServerEvent` and client state bag write token-bucket rate limit in events/sec (burst `2×` rate, clamped to 0 to 10000; `0` disables). Excess messages are dropped with a rate-limited warning. |
+| `sv_stateBagStrictMode` | `false` | Console-only. When `true` or `1`, rejects all client-initiated state bag writes without kicking. |
 | `sv_metricsEnabled` | `false` | Console-only. Whether `GET /metrics` exposes Prometheus metrics (`true` or `1` turns it on). |
 | `sv_adminUiEnabled` | `false` | Console-only. Whether `GET /admin` serves the built-in admin UI (`true` or `1` turns it on; also requires `rcon_password`). |
 | `sv_masterUrl` | empty | Console-only. Optional HTTP(S) URL to which the server periodically `POST`s JSON discovery heartbeats (`{"info": ..., "dynamic": ...}`). Honors `sv_httpAllowPrivate` and `sixm_httpTimeout`. |
@@ -286,10 +287,10 @@ setters, and read by scripts. Script convar writes (`SetConvar*`) are bounded to
 (`rcon_password`, `sv_httpAllowPrivate`, `sv_httpEnabled`,
 `sv_exposePlayerIdentifiers`, `sixm_identityFile`, `sixm_resourcesPath`,
 `sixm_kvpPath`, `endpoint_add_udp`, `sv_playerEventRateLimit`,
-`sv_metricsEnabled`, `sv_adminUiEnabled`, `sv_masterUrl`, and
-`sv_heartbeatInterval`) cannot be modified by scripts or remote
-players. The server checks a value only when the convar is replicated (see
-below).
+`sv_metricsEnabled`, `sv_adminUiEnabled`, `sv_masterUrl`,
+`sv_heartbeatInterval`, and `sv_stateBagStrictMode`) cannot be modified by
+scripts or remote players. The server checks a value only when the convar is
+replicated (see below).
 
 ### Kinds of convar
 

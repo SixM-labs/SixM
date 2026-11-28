@@ -9,7 +9,7 @@ use crate::files::{FileHash, ResourceEntry};
 use crate::wire::{Args, StateValue};
 
 /// Version of the wire protocol. A client must send it in its `Hello`.
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// Application protocol identifier negotiated during the TLS handshake.
 pub(crate) const ALPN: &[u8] = b"sixm/1";
@@ -169,6 +169,12 @@ pub(crate) enum ClientMessage {
     RequestEntityControl {
         id: u32,
     },
+    /// Asks the server to set a replicated key in a state bag the client owns.
+    SetStateBag {
+        bag: String,
+        key: String,
+        value: StateValue,
+    },
 }
 
 impl ClientMessage {
@@ -186,6 +192,8 @@ impl ClientMessage {
     pub(crate) const CREATE_ENTITY_TAG: u32 = 5;
     /// Variant index of [`ClientMessage::RequestEntityControl`] on the wire.
     pub(crate) const REQUEST_ENTITY_CONTROL_TAG: u32 = 6;
+    /// Variant index of [`ClientMessage::SetStateBag`] on the wire.
+    pub(crate) const SET_STATE_BAG_TAG: u32 = 7;
 }
 
 /// Messages the server sends on the stream. Decoding is done by the wire

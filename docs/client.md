@@ -186,7 +186,10 @@ A script can use the client side of the Lua API. The client can:
   `RegisterNetEvent` handlers for events from the server
 - Use `CreateThread`, `Wait` and timers
 - Call exports of running resources and register its own
-- Read the replicated `GlobalState` and `LocalPlayer.state`
+- Read `GlobalState`, `LocalPlayer.state`, and `Entity(id).state`, write
+  replicated state to `LocalPlayer.state` and owned `Entity(id).state` (unless
+  `sv_stateBagStrictMode` is enabled on the server), and write local-only state
+  with `replicated` set to `false`
 - Read files with `LoadResourceFile`, and write its own data folder with
   `SaveResourceFile`
 - Register console commands and read convars
@@ -196,8 +199,9 @@ The client cannot:
 
 - Call `TriggerClientEvent`, `GetPlayers` or `Player(id)`. These are server
   functions.
-- Write replicated state. It can write state with `replicated` set to `false`,
-  and that state stays on the client.
+- Write replicated state to `GlobalState`, another player's bag, or an unowned
+  entity. Writes to those bags must use `replicated` set to `false`, and that
+  state stays on the client.
 - Read a folder path for another resource. `GetResourcePath` returns the
   resource's own data folder, and `nil` for any other name.
 
