@@ -295,6 +295,12 @@ Convar names are case-insensitive. Scripts read them with `GetConvar` and
 | `sv_proxyIPRanges` | empty | Console-only. Comma- or whitespace-separated trusted reverse-proxy CIDRs (`127.0.0.1/32`, `10.0.0.0/8`, `fd00::/8`). When set, HTTP rate limits, RCON lockouts, `SetHttpHandler` `req.address`, and HTTP client IP attribution honor the rightmost untrusted hop in `X-Forwarded-For` (falling back to `X-Real-IP`) only when the TCP peer is inside a listed range. |
 | `sv_prometheusBasicAuthUser` | empty | Console-only. Optional HTTP Basic Auth username protecting `GET /metrics`. When either user or password is set, both must be configured and match (`401` otherwise). |
 | `sv_prometheusBasicAuthPassword` | empty | Console-only credential protecting `GET /metrics` alongside `sv_prometheusBasicAuthUser`. Excluded from script convar APIs. |
+| `mysql_connection_string` | empty | Console-only database connection string. An empty value disables SQL. The value is hidden from scripts, command output, server info, and clients. |
+| `sixm_dbPoolSize` | `10` | Console-only. Worker connections, clamped to 1 to 64. SQLite `:memory:` uses one connection. |
+| `sixm_dbTimeoutMs` | `10000` | Console-only. Query or transaction timeout in milliseconds, clamped to 100 to 300000. |
+| `sixm_dbMaxRows` | `10000` | Console-only. Maximum rows materialized per result set, clamped to 1 to 100000. |
+| `sixm_dbMaxResultBytes` | `16777216` | Console-only. Maximum materialized result payload in bytes, clamped to 65536 to 67108864. |
+| `sixm_dbSlowQueryWarnMs` | `200` | Console-only. Slow-query warning threshold in milliseconds, clamped to 0 to 300000. `0` disables warnings. |
 
 Any other convar can be set with `set`, `sets` or `setr`, or with the Lua
 setters, and read by scripts. Script convar writes (`SetConvar*`) are bounded to
@@ -304,9 +310,9 @@ setters, and read by scripts. Script convar writes (`SetConvar*`) are bounded to
 `sixm_kvpPath`, `endpoint_add_udp`, `sv_playerEventRateLimit`,
 `sv_metricsEnabled`, `sv_adminUiEnabled`, `sv_masterUrl`,
 `sv_heartbeatInterval`, `sv_stateBagStrictMode`, `sv_proxyIPRanges`,
-`sv_prometheusBasicAuthUser`, and `sv_prometheusBasicAuthPassword`) cannot be modified by
-scripts or remote players. The server checks a value only when the convar is
-replicated (see below).
+`sv_prometheusBasicAuthUser`, `sv_prometheusBasicAuthPassword`, and the SQL
+settings above) cannot be modified by scripts or remote players. Use `set`
+for the SQL settings.
 
 ### Kinds of convar
 
@@ -358,6 +364,39 @@ policy applies to plain convars, and a restricted name cannot be stored with
 `add_convar_permission`. Remove an entry with
 `remove_convar_permission <resource> read <name>`, and inspect current entries
 with `list_convar_permissions`.
+
+## Database
+
+SixM includes the `[system]/oxmysql` server resource for MySQL, MariaDB, and
+embedded SQLite. Set `mysql_connection_string` before starting resources that
+depend on `oxmysql`, `mysql-async`, or `ghmattimysql`. For SQLite, the following
+lines enable the sample in `examples/server-data/server.cfg`:
+
+```cfg
+set mysql_connection_string "sqlite://data/sixm-demo.db"
+ensure db_demo
+```
+
+The sample starts `oxmysql` through its manifest dependency and increments a
+startup counter in the specified file. SQLite paths are relative to the
+server working directory unless absolute. Use `sqlite::memory:` for an
+in-memory database. For MySQL or MariaDB, use a URL such as
+`mysql://user:password@127.0.0.1:3306/game` or a semicolon-separated string such
+as `host=127.0.0.1;user=user;password=password;database=game`. For TLS with
+server identity validation, set `sslmode=verify_identity`.
+
+The connection opens in the background on first use. A blank connection string
+keeps SQL inactive. Changes to the connection string or SQL limits replace the
+pool and cancel outstanding work where possible. A new in-memory SQLite pool
+starts empty. Resources can use `ready` or `ready_async` to wait for the pool.
+Each resource can have up to 256 jobs in flight. The server can hold up to
+1024 outstanding jobs across resources. Database work and results are tied to
+the calling resource and runtime instance. A stopped resource's callbacks are
+discarded, and a database statement that already committed retains its effects.
+
+See [Lua SQL](lua-api.md#sql-server-only),
+[JavaScript SQL](js-api.md#sql-server-only), and
+[database design](design/database.md).
 
 ## Resource discovery
 

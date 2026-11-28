@@ -14,7 +14,7 @@ use sixm_core::{
     ClientHost, ClientTarget, ConvarKind, EntityAttachment, EntityInfo, EntityKind, EntityState,
     EventContext, EventSource, FuncRef, Host, HttpRequest, MAX_RESOURCE_FILE_WRITE_BYTES,
     PlayerInfo, ResourceDirectory, ResourceName, ResourceState, ScriptError, ScriptLanguage,
-    ScriptRuntime, ServerHost, Value, WebReply, is_protected_resource_file,
+    ScriptRuntime, ServerHost, SqlQueryKind, Value, WebReply, is_protected_resource_file,
 };
 use sixm_js::JsRuntime;
 use sixm_kvp::KvpStore;
@@ -30,7 +30,8 @@ use crate::access::AccessStore;
 use crate::buckets::BucketSettings;
 use crate::commands::CommandSource;
 use crate::convars::{
-    Convars, KVP_PATH, PROMETHEUS_BASIC_AUTH_PASSWORD, PROXY_IP_RANGES, RCON_PASSWORD,
+    Convars, KVP_PATH, MYSQL_CONNECTION_STRING, PROMETHEUS_BASIC_AUTH_PASSWORD, PROXY_IP_RANGES,
+    RCON_PASSWORD,
 };
 use crate::entities::{EntityStore, EntityUpdate};
 use crate::filters::ChannelFilters;
@@ -41,6 +42,7 @@ use crate::perf::{FrameHistory, ResourceMonitor, ResourceResmonStats};
 use crate::profiler::Profiler;
 use crate::resource_files::{FileHashes, listing};
 use crate::scope::Scopes;
+use crate::sql::{Request as SqlRequest, SqlService};
 use crate::state::StateStore;
 use crate::watch::ResourceWatcher;
 use crate::web::WebState;
@@ -170,6 +172,8 @@ pub struct ResourceManager {
     transitions: RefCell<Vec<(ResourceName, ResourceState)>>,
     /// Outgoing HTTP requests started by the scripts.
     http: HttpClient,
+    /// Background database pool and pending script calls.
+    pub(crate) sql: SqlService,
     /// HTTP handlers of the resources and the requests they are answering.
     pub(crate) web: WebState,
     /// The key-value store of the resources, opened on first use in `sixm_kvpPath`.
@@ -222,6 +226,7 @@ impl ResourceManager {
             hashes: RefCell::default(),
             transitions: RefCell::default(),
             http: HttpClient::default(),
+            sql: SqlService::default(),
             web: WebState::default(),
             kvp: RefCell::default(),
             watch_enabled: Cell::new(false),
@@ -538,6 +543,19 @@ impl ResourceManager {
             self.convars.borrow_mut().set_prometheus_password(value);
             return Ok(());
         }
+        if name.eq_ignore_ascii_case(MYSQL_CONNECTION_STRING) {
+            if kind != ConvarKind::Plain {
+                return Err(ScriptError::Runtime(
+                    "use set for mysql_connection_string".to_owned(),
+                ));
+            }
+            self.sql.set_connection(value);
+            return Ok(());
+        }
+        let sql_tuning = Convars::is_sql_tuning(name);
+        if sql_tuning && kind != ConvarKind::Plain {
+            return Err(ScriptError::Runtime(format!("use set for {name}")));
+        }
         let key = name.to_ascii_lowercase();
         if kind != ConvarKind::Plain && self.convars.borrow().is_restricted(&key) {
             return Err(ScriptError::Runtime(
@@ -549,6 +567,9 @@ impl ResourceManager {
         }
         let previous_value = self.convars.borrow().get(name).map(str::to_owned);
         let previous = self.convars.borrow_mut().set(name, value, kind);
+        if sql_tuning {
+            self.sql.set_limits(self.convars.borrow().sql_limits());
+        }
         if name.eq_ignore_ascii_case(PROXY_IP_RANGES) {
             let invalid = self.network.trusted_proxies.parse_and_set(value);
             for bad in invalid {
@@ -657,6 +678,33 @@ impl ResourceManager {
             }
             runtime.release_ref(callback.id);
         }
+    }
+
+    /// Deliver database results to the instances that accepted them.
+    pub(crate) fn deliver_sql(&self) {
+        for completion in self.sql.take_finished() {
+            let Some((callback, args)) = self.sql.complete(completion) else {
+                continue;
+            };
+            if let Some(runtime) = self.runtime_of(&callback) {
+                if let Err(error) = runtime.call_ref(callback.id, &args) {
+                    warn!(target: "sixm::sql", "SQL callback of `{}` failed: {error}", callback.owner);
+                }
+                runtime.release_ref(callback.id);
+            }
+        }
+    }
+
+    fn submit_sql(
+        &self,
+        origin: &ResourceName,
+        callback: FuncRef,
+        request: SqlRequest,
+    ) -> Result<(), ScriptError> {
+        if !self.is_running_canonical(origin) {
+            return Err(ScriptError::ResourceNotRunning(origin.to_string()));
+        }
+        self.sql.start(origin, callback, request)
     }
 
     /// Runs one frame of every running resource, collecting per-resource CPU time
@@ -1134,6 +1182,9 @@ impl ResourceManager {
         self.dispatch_local("onServerResourceStop", name);
         self.release_commands_of(name);
         self.forget_web(name);
+        for callback in self.sql.cancel_resource(name) {
+            self.release_ref(&callback);
+        }
         let removed = {
             let mut running = self.running.borrow_mut();
             running
@@ -1557,6 +1608,41 @@ fn check_replicated(name: &str, value: &str) -> Result<(), ScriptError> {
 }
 
 impl ServerHost for ResourceManager {
+    fn sql_is_ready(&self) -> bool {
+        self.sql.is_ready()
+    }
+
+    fn sql_execute(
+        &self,
+        origin: &ResourceName,
+        kind: SqlQueryKind,
+        sql: String,
+        params: Value,
+        callback: FuncRef,
+    ) -> Result<(), ScriptError> {
+        self.submit_sql(origin, callback, SqlRequest::Execute(kind, sql, params))
+    }
+
+    fn sql_prepare(
+        &self,
+        origin: &ResourceName,
+        sql: String,
+        params: Value,
+        callback: FuncRef,
+    ) -> Result<(), ScriptError> {
+        self.submit_sql(origin, callback, SqlRequest::Prepare(sql, params))
+    }
+
+    fn sql_transaction(
+        &self,
+        origin: &ResourceName,
+        queries: Value,
+        params: Value,
+        callback: FuncRef,
+    ) -> Result<(), ScriptError> {
+        self.submit_sql(origin, callback, SqlRequest::Transaction(queries, params))
+    }
+
     fn set_convar(&self, name: &str, value: &str, kind: ConvarKind) -> Result<(), ScriptError> {
         if Convars::is_console_only(name) {
             return Err(ScriptError::Runtime(format!(

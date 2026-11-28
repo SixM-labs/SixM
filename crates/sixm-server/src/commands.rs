@@ -20,7 +20,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::access::Permission;
 use crate::config::tokenize;
-use crate::convars::{Convars, ENDPOINT};
+use crate::convars::{Convars, ENDPOINT, MYSQL_CONNECTION_STRING};
 use crate::filters::ChannelAction;
 use crate::manager::{ManagerError, ResourceManager};
 use crate::network::{DROP_SCRIPT, DROP_SERVER, DropOrigin};
@@ -112,7 +112,7 @@ pub(crate) fn run_line(manager: &ResourceManager, line: &str, context: &CommandC
     match tokenize(line) {
         Ok(words) => run_words(manager, &words, line.trim(), context),
         Err(err) => match &context.source {
-            CommandSource::Console => error!("{}: {err}", line.trim()),
+            CommandSource::Console => error!("cannot parse console command: {err}"),
             CommandSource::Player(player) => {
                 info!("player {player} sent a line that does not tokenize: {err}");
             }
@@ -261,6 +261,10 @@ fn run_script_or_convar(
     raw: &str,
     source: &CommandSource,
 ) {
+    if lower == MYSQL_CONNECTION_STRING {
+        warn!("use set for mysql_connection_string");
+        return;
+    }
     if let Some(command) = manager.script_command(lower) {
         if command.restricted && !permitted(manager, source, lower) {
             return;

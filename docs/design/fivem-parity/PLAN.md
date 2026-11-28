@@ -308,16 +308,16 @@ equivalent / no effect / absent".
 | D5 | done | Gemini | `git log --grep "^D5:"` |
 | D6 | done | Gemini | `git log --grep "^D6:"` |
 | D7 | done | Gemini | `git log --grep "^D7:"` |
-| E1 | todo | | |
-| E2 | todo | | |
-| E3 | todo | | |
-| E4 | todo | | |
+| E1 | done | Gemini | `git log --grep "^E1:"` |
+| E2 | done | Gemini | `git log --grep "^E2:"` |
+| E3 | done | Codex | `git log --grep "^E3:"` |
+| E4 | done | Codex | `git log --grep "^E4:"` |
 | F1 | todo | | |
 | F2 | todo | | |
 | F3 | todo | | |
 | F4 | todo | | |
-| G1 | todo | | |
-| G2 | todo | | |
+| G1 | done | Gemini | `git log --grep "^G1:"` |
+| G2 | done | Gemini | `git log --grep "^G2:"` |
 
 Status values: `todo`, `in progress`, `wip (see log)`, `done`, `blocked (see log)`.
 
@@ -461,3 +461,50 @@ what is next, anything surprising.
   and opened the Phase D PR to `main`. Windows CI is verified via GitHub
   Actions on the PR before merging. Next: Phase E (`E1` ADR decision with
   maintainer).
+- 2026-11-28, Gemini, `feat/fivem-parity-e`: Phase D merged as 4422651
+  ([PR #28](https://github.com/SixM-labs/SixM/pull/28)) after fixing the
+  cancel-safe handshake reader (`FrameReader` gating on pending cards) and
+  passing both Linux and Windows CI. With maintainer sign-off on E1 (`mysql_async`
+  pure-Rust + `rusqlite` `bundled`, SQLite compiled in by default and opt-in
+  via `sqlite://` in `mysql_connection_string`), wrote `docs/design/database.md`
+  (`E1: database ADR`). Next: `E2` (`crates/sixm-sql`) and `G1`/`G2` migration
+  docs in parallel.
+- 2026-11-28, Gemini, `feat/fivem-parity-e`: `G1: document deliberate FiveM
+  differences and migration table` follows 6570dc4. Completed all 12 items
+  from `gap-report.md` section 5 in `docs/guides/from-fivem.md` and added the
+  FiveM convar/command migration reference table verified against `convars.rs`
+  and `commands.rs`.
+- 2026-11-28, Gemini, `feat/fivem-parity-e`: `G2: list accepted manifest keys
+  and dependency constraints with no effect` follows G1. Documented the
+  metadata-only manifest directives (`convar_category`, `escrow_ignore`,
+  `resource_manifest_version`, `use_experimental_fxv2_oal`,
+  `clr_disable_task_scheduler`, `node_version`, etc.) and ignored
+  `/`-prefixed dependency constraints (`/server:`, `/onesync`, `/gameBuild`,
+  `/native:`) in `docs/manifest.md`. Next: `E2` (`crates/sixm-sql`).
+- 2026-11-28, Gemini, `feat/fivem-parity-e`: `E2: add sixm-sql crate` follows
+  a14d57a. Added `crates/sixm-sql` (`mysql_async` `minimal-rust` + `rustls-tls`
+  + `ring`, and `rusqlite` `bundled` + `hooks`) with URI / quoted `key=value;`
+  parsing and credential redaction, dialect-aware `?` and `@name`/`:name`
+  parameter binding (no string interpolation), dedicated SQLite worker pool,
+  internal-tokio MySQL pool, row/byte/timeout/queue caps, CI `mysql:8.4`
+  integration job on Ubuntu, and review fixes (SQLite backslash literals,
+  transaction rollback progress-handler disarm, `dateStrings`, and `ResultTooLarge`
+  disconnect). Next: `E3` (`resources/[system]/oxmysql` and host bridge).
+- 2026-11-28, Codex, `feat/fivem-parity-e`: `E3` adds the server SQL bridge,
+  background pool configuration, per-resource cancellation, and protected
+  database credentials. The stock oxmysql resource and legacy aliases work
+  from Lua and JS, including awaitable exports. Integration tests exercise
+  both runtimes, the Lua import, rollback, credentials, queue limits, and
+  resource restart while a SQLite operation is pending. The review also
+  tightened transactional statement validation and cancellation. Verified
+  type definitions, formatting, Clippy, and the Linux workspace suites.
+  Next: `E4` (operator docs, example, and Phase E PR).
+- 2026-11-28, Codex, `feat/fivem-parity-e`: `E4` documents the database setup
+  and migration API and adds the opt-in SQLite `db_demo` to the example
+  server. The demo's counter persists across server restarts. Local checks
+  include types, format, Clippy, workspace tests, the locked fuzz build check,
+  and a live MariaDB integration run. Initial Windows CI exposed a race in
+  the existing state bag test. The test now waits for the participating
+  client mirrors to receive entity ownership before writing state.
+  [PR #29](https://github.com/SixM-labs/SixM/pull/29) is gated on Linux, Windows, and
+  MySQL 8.4 CI. Next: `F1` on `feat/fivem-parity-f` from merged `main`.

@@ -22,6 +22,7 @@ use crate::resources;
 use crate::runtime::{LuaRuntime, Side, bind_fn, lua_err};
 use crate::sandbox::Helpers;
 use crate::scheduler::delay_from_value;
+use crate::sql;
 use crate::state;
 use crate::vector;
 use crate::web;
@@ -55,6 +56,7 @@ pub(crate) fn install(runtime: &Rc<LuaRuntime>, helpers: &Helpers) -> mlua::Resu
             entities::install_server(lua, weak, &globals)?;
             resources::install_server(lua, weak, &globals)?;
             http::install(lua, weak, &globals)?;
+            sql::install(lua, weak, &globals)?;
             web::install(lua, weak, &globals)?;
             install_server_convars(lua, weak, &globals)?;
         }

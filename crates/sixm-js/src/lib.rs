@@ -21,6 +21,7 @@ mod resources;
 mod runtime;
 mod sandbox;
 mod scheduler;
+mod sql;
 mod state;
 mod vector;
 mod web;

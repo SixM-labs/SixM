@@ -33,13 +33,28 @@ end
 ";
 
 /// `Await`. It yields the task until the promise settles, then returns the value
-/// or raises the reason. The chunk receives the Rust `register` function as `...`.
+/// or raises the reason. A table with `then(resolve, reject)` can be adopted
+/// across resource boundaries, where promise userdata cannot travel.
 const AWAIT_SOURCE: &str = r"
-local register = ...
+local register, new = ...
 local yield, isyieldable, error = coroutine.yield, coroutine.isyieldable, error
+local type, pcall = type, pcall
 return function(promise)
 	if not isyieldable() then
 		error('Await can only be called from a thread (Citizen.CreateThread)', 2)
+	end
+	if type(promise) == 'table' then
+		local thenable, adopted = promise, new()
+		local ok, reason = pcall(function()
+			local subscribe = thenable['then']
+			if subscribe == nil then
+				error('Await expects a promise or thenable', 0)
+			end
+			subscribe(function(value) adopted:resolve(value) end,
+				function(reason) adopted:reject(reason) end)
+		end)
+		if not ok then adopted:reject(reason) end
+		promise = adopted
 	end
 	local settled, ok, value = register(promise)
 	if not settled then
@@ -191,18 +206,16 @@ pub(crate) fn install(
     let register = bind_fn(lua, weak, |rt, (promise,): (AnyUserData,)| {
         rt.await_promise(&promise)
     })?;
+    let new = bind_fn(lua, weak, |rt, (): ()| rt.promise_value(new_core()))?;
     let await_fn: Function = lua
         .load(AWAIT_SOURCE)
         .set_name("=sixm await")
-        .call(register)?;
+        .call((register, new.clone()))?;
     citizen.raw_set("Await", await_fn.clone())?;
     globals.raw_set("Await", await_fn)?;
 
     let module = lua.create_table()?;
-    module.raw_set(
-        "new",
-        bind_fn(lua, weak, |rt, (): ()| rt.promise_value(new_core()))?,
-    )?;
+    module.raw_set("new", new)?;
     module.raw_set(
         "all",
         bind_fn(lua, weak, |rt, (list,): (Table,)| {

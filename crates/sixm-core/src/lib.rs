@@ -36,8 +36,8 @@ pub use files::{
 pub use hash::joaat;
 pub use runtime::{
     ClientHost, ClientTarget, ConvarKind, EventContext, EventSource, Host, HttpRequest, PlayerInfo,
-    ResourceState, ScriptError, ScriptRuntime, ServerHost, WebReply, WebRequest, WebResponse,
-    convar_filter_matches,
+    ResourceState, ScriptError, ScriptRuntime, ServerHost, SqlQueryKind, WebReply, WebRequest,
+    WebResponse, convar_filter_matches,
 };
 pub use state::{GLOBAL_BAG, MAX_STATE_NAME_LEN, player_bag, player_of_bag};
 pub use value::{FuncRef, ResourceName, Value};

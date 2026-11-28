@@ -977,6 +977,39 @@ declare function SetHttpHandler(
     handler: (req: SixMHttpRequest, res: SixMHttpResponse) => void
 ): void;
 
+type SixMSqlKind = 'query' | 'single' | 'scalar' | 'insert' | 'update' | 'rawExecute';
+type SixMSqlValue = boolean | number | string | null;
+type SixMSqlParams = readonly SixMSqlValue[] | Record<string, SixMSqlValue>;
+type SixMSqlCallback = (error: string | null, result: unknown) => void;
+type SixMSqlTransactionItem = string
+    | { query: string; values?: SixMSqlParams; parameters?: SixMSqlParams }
+    | readonly [sql: string, params: SixMSqlParams];
+
+/** Reports whether the configured database accepts queries. (Server only) */
+declare function SixmSqlIsReady(): boolean;
+
+/** Queues a bound SQL statement. (Server only) */
+declare function SixmSqlExecute(
+    kind: SixMSqlKind,
+    sql: string,
+    params: SixMSqlParams | readonly (readonly SixMSqlValue[])[] | null | undefined,
+    callback: SixMSqlCallback
+): void;
+
+/** Queues a prepared statement with one or several sets of parameters. (Server only) */
+declare function SixmSqlPrepare(
+    sql: string,
+    params: readonly SixMSqlValue[] | readonly (readonly SixMSqlValue[])[] | null | undefined,
+    callback: SixMSqlCallback
+): void;
+
+/** Queues an atomic transaction. (Server only) */
+declare function SixmSqlTransaction(
+    queries: readonly SixMSqlTransactionItem[],
+    params: SixMSqlParams | null | undefined,
+    callback: SixMSqlCallback
+): void;
+
 // =============================================================================
 // General utilities and logging
 // =============================================================================

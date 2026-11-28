@@ -89,6 +89,25 @@ stored as `this_i`. A plain string with an unknown name keeps its spelling.
 
 The first group and `server_only` change behaviour directly. `resource_type`, `name`, `gameTypes` and `map` remain ordinary metadata and are interpreted by the stock `mapmanager` when it is running. `fx_version`, `game`, `lua54` and all other metadata are parsed and kept, but nothing else in SixM uses them yet.
 
+### Accepted directives with no host effect
+
+The directives below are valid in `fxmanifest.lua` / `__resource.lua` (they are parsed and stored in the manifest or `metadata`), so ported FiveM manifests load without errors, but the SixM host ignores them:
+
+| Directive | How SixM stores it | Notes |
+|---|---|---|
+| `fx_version` | `fx_version` | Stored as the last declared string; does not change runtime behaviour. |
+| `game` / `games` | `games` | Stored as a list; does not gate loading or change runtime behaviour. |
+| `lua54` | `lua54` | Sets `lua54 = true` only when `'yes'`; Lua scripts always run on Lua 5.4 regardless. |
+| `resource_type` | `metadata` | Values other than stock `mapmanager`'s `'map'` and `'gametype'` have no host effect. |
+| `convar_category` | `metadata` | Stored as metadata only; no host effect. |
+| `escrow_ignore` | `metadata` | Stored as metadata only; SixM has no Cfx.re asset escrow encryption. |
+| `resource_manifest_version` | `metadata` | Legacy `__resource.lua` version directive; stored as metadata with no host effect. |
+| `use_experimental_fxv2_oal` | `metadata` | Stored as metadata only; SixM does not implement OAL. |
+| `clr_disable_task_scheduler` | `metadata` | Stored as metadata only; SixM has no C# (`Mono`) runtime. |
+| `node_version` | `metadata` | Stored as metadata only; JS runs in embedded QuickJS (ES2023), not Node.js. |
+
+UI and game-adapter directives such as `ui_page`, `loadscreen`, `loadscreen_cursor`, `loadscreen_manual_shutdown`, `this_is_a_map`, `data_file`, and `replace_level_meta` are likewise accepted as metadata without host effect until a game or UI adapter exists.
+
 The server does not directly sync a `server_only` resource to clients. A
 different, client-synced resource may explicitly reference one of its files
 with a path such as `@server_only_res/data/config.json` in `files`,
@@ -213,8 +232,7 @@ dependencies { 'a', 'b' }
 - A dependency cycle is an error. The error lists the cycle.
 - Dependencies resolve `provide` aliases to the provider resource, and cycles
   through aliases are detected as well.
-- Entries that start with `/` are kept but ignored. The code leaves them out
-  of the start order, so they have no effect yet.
+- Constraint entries that start with `/` — `/server:`, `/onesync`, `/gameBuild`, and `/native:` — are kept in `dependencies` as raw strings, but omitted from dependency resolution and start/stop ordering (they are not treated as missing resources and have no runtime effect).
 
 ## Providing aliases (`provide` / `provides`)
 

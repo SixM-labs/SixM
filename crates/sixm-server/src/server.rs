@@ -97,6 +97,7 @@ impl Server {
     pub fn tick(&self, now: Instant) {
         let started = Instant::now();
         self.manager.deliver_http();
+        self.manager.deliver_sql();
         self.manager.expire_web(now);
         self.manager.tick_all(now);
         self.drain_commands();
@@ -219,6 +220,7 @@ impl Server {
     /// stop first, and the network closes every connection on the way out.
     pub fn shutdown(&self) {
         self.manager.stop_all();
+        self.manager.sql.shutdown();
         self.manager.shutdown_kvp();
         self.manager.stop_network();
         info!("Server stopped");

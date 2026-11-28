@@ -22,6 +22,7 @@ mod profiler;
 mod resource_files;
 mod scope;
 mod server;
+mod sql;
 mod state;
 mod watch;
 mod web;

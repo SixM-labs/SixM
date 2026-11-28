@@ -33,6 +33,49 @@ fn await_returns_the_value_of_a_fulfilled_promise() {
 }
 
 #[test]
+fn await_adopts_thenables_and_uses_the_first_outcome() {
+    let host = new_host();
+    let rt = start(
+        &host,
+        "thenables",
+        &["log"],
+        &[(
+            "main.lua",
+            &format!(
+                r"{LOG_PRELUDE}
+                CreateThreadNow(function()
+                    log[1] = Await({{ ['then'] = function(resolve, reject)
+                        resolve('first')
+                        reject('late')
+                        error('also late')
+                    end }})
+                    local ok, reason = pcall(Citizen.Await, {{ ['then'] = function()
+                        error('subscription failed', 0)
+                    end }})
+                    assert(not ok)
+                    log[2] = reason
+                    local pending = {{ ['then'] = function(_, reject)
+                        SetTimeout(0, function() reject('async rejection') end)
+                    end }}
+                    ok, reason = pcall(Await, pending)
+                    assert(not ok)
+                    log[3] = reason
+                end)
+                "
+            ),
+        )],
+    );
+    assert_eq!(text(&rt, "log"), "first,subscription failed");
+    let now = Instant::now();
+    tick(&host, now);
+    tick(&host, now);
+    assert_eq!(
+        text(&rt, "log"),
+        "first,subscription failed,async rejection"
+    );
+}
+
+#[test]
 fn await_parks_until_another_task_resolves_the_promise() {
     let host = new_host();
     let base = Instant::now();

@@ -102,6 +102,11 @@ SHARED_API_SYMBOLS = [
     "ExecuteCommand",
     "RegisterCommand",
     "GetRegisteredCommands",
+    # SQL bridge
+    "SixmSqlIsReady",
+    "SixmSqlExecute",
+    "SixmSqlPrepare",
+    "SixmSqlTransaction",
     # Players
     "GetPlayers",
     "GetNumPlayerIndices",
