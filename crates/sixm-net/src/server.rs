@@ -33,8 +33,9 @@ use crate::transfer::Advertised;
 use crate::transport;
 use crate::wire::{
     encode_convars, encode_deferral, encode_entity_snapshot, encode_entity_states,
-    encode_entity_transforms, encode_event, encode_frame, encode_resources_snapshot, encode_state,
-    encode_state_removed, encode_state_snapshot, validate_length,
+    encode_entity_transforms, encode_event, encode_frame, encode_present_card,
+    encode_resources_snapshot, encode_state, encode_state_removed, encode_state_snapshot,
+    validate_length,
 };
 
 /// Default UDP port, the one FiveM clients expect.
@@ -128,6 +129,12 @@ pub enum NetEvent {
         bag: String,
         key: String,
         value: Value,
+    },
+    /// A deferred connection answered or dismissed an Adaptive Card.
+    CardResponse {
+        connection: ConnectionId,
+        id: u64,
+        data_json: Option<String>,
     },
     /// An accepted player disconnected, was kicked, or broke the protocol.
     Disconnected { player: u32, reason: String },
@@ -300,6 +307,18 @@ impl NetServer {
     /// decided.
     pub fn update_deferral(&self, connection: ConnectionId, message: &str) -> Result<(), NetError> {
         let frame = encode_deferral(message, self.max_frame)?;
+        self.post(Command::Update { connection, frame })
+    }
+
+    /// Sends an Adaptive Card JSON payload to a pending deferred connection.
+    /// Does nothing once the connection is decided.
+    pub fn present_card(
+        &self,
+        connection: ConnectionId,
+        id: u64,
+        card_json: &str,
+    ) -> Result<(), NetError> {
+        let frame = encode_present_card(id, card_json, self.max_frame)?;
         self.post(Command::Update { connection, frame })
     }
 

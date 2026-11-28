@@ -10,7 +10,7 @@ use common::net::{Loopback, Resource, TIMEOUT};
 use sixm_net::NetError;
 
 /// The `defer` resource. Each connecting player name selects a behaviour.
-const DEFER_SCRIPT: &str = r"
+const DEFER_SCRIPT: &str = r#"
 LOG = {}
 HELD = nil
 HELD_ID = nil
@@ -49,6 +49,32 @@ AddEventHandler('playerConnecting', function(name, setKickReason, deferrals)
         deferrals.defer()
         HELD = deferrals
         HELD_ID = source
+    elseif name == 'CardLua' then
+        deferrals.defer()
+        deferrals.presentCard({
+            type = 'AdaptiveCard',
+            version = '1.5',
+            body = {
+                { type = 'TextBlock', text = 'Enter access code' },
+            },
+        }, function(data, raw)
+            note('card_lua:' .. tostring(data and data.code) .. ':' .. tostring(data and data.agree) .. ':' .. tostring(raw))
+            deferrals.done()
+        end)
+    elseif name == 'CardCancel' then
+        deferrals.defer()
+        deferrals.presentCard('{"type":"AdaptiveCard","title":"Cancel Test"}', function(data, raw)
+            note('card_cancel:' .. tostring(data == nil) .. ':' .. tostring(raw == nil))
+            deferrals.done('Canceled')
+        end)
+    elseif name == 'CardHeld' then
+        deferrals.defer()
+        HELD = deferrals
+        HELD_ID = source
+        deferrals.presentCard('{"type":"AdaptiveCard","title":"Held Card"}', function(data, raw)
+            note('card_held:' .. tostring(data) .. ':' .. tostring(raw))
+            deferrals.done()
+        end)
     end
 end)
 
@@ -80,7 +106,7 @@ function release()
     local ok, err = pcall(HELD.done)
     return tostring(ok) .. ' ' .. tostring(err)
 end
-";
+"#;
 
 /// The first of two resources that both defer the player `Both`.
 const FIRST_SCRIPT: &str = r"
@@ -282,4 +308,171 @@ fn update_after_done_is_a_stale_reference_that_pcall_catches() {
     h.wait_for_log("late:false");
     assert!(h.log().contains("no longer valid"), "log: {}", h.log());
     assert!(h.log().contains("joined:1:Stale"), "log: {}", h.log());
+}
+
+#[test]
+fn present_card_delivers_lua_table_and_admits_on_response() {
+    let h = harness();
+    let (card_tx, cards) = mpsc::channel();
+    let player = h
+        .connect_with_cards(
+            "CardLua",
+            |_| {},
+            move |card_json| {
+                let _ = card_tx.send(card_json.to_owned());
+                Some(r#"{"code":"open","agree":true}"#.to_owned())
+            },
+        )
+        .expect("CardLua is admitted");
+
+    let received: Vec<String> = cards.try_iter().collect();
+    assert_eq!(received.len(), 1);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&received[0]).expect("card payload is valid JSON");
+    assert_eq!(parsed["type"], "AdaptiveCard");
+    assert_eq!(parsed["body"][0]["text"], "Enter access code");
+
+    assert_eq!(player.player(), 1);
+    h.wait_for_log("joined:1:CardLua");
+    assert!(
+        h.log()
+            .contains(r#"card_lua:open:true:{"code":"open","agree":true}"#),
+        "log: {}",
+        h.log()
+    );
+    assert_eq!(h.fx.text("defer", "names"), "1=CardLua");
+}
+
+#[test]
+fn present_card_in_js_supports_json_string_and_chained_cards() {
+    let h = harness();
+    let js_script = r"
+        const LOG = [];
+        on('playerConnecting', (name, _setKickReason, deferrals) => {
+            if (name !== 'CardJs') return;
+            deferrals.defer();
+            deferrals.presentCard(
+                JSON.stringify({ type: 'AdaptiveCard', step: 1 }),
+                (data, rawData) => {
+                    LOG.push(`step1:${data?.choice}:${rawData}`);
+                    deferrals.presentCard(
+                        { type: 'AdaptiveCard', step: 2 },
+                        (data2, rawData2) => {
+                            LOG.push(`step2:${data2?.confirm}:${rawData2}`);
+                            deferrals.done();
+                        },
+                    );
+                },
+            );
+        });
+        on('playerJoining', () => {
+            if (GetPlayerName(source) === 'CardJs') {
+                LOG.push(`joined:${source}`);
+            }
+        });
+        exports('log', () => LOG.join(' '));
+    ";
+    h.fx.add_resource(
+        "js_cards",
+        &common::manifest(&["server.js"], &["log"], &[]),
+        &[("server.js", js_script)],
+    );
+    h.fx.server.execute("refresh");
+    h.fx.server.execute("ensure js_cards");
+
+    let (card_tx, cards) = mpsc::channel();
+    let mut step = 0usize;
+    let player = h
+        .connect_with_cards(
+            "CardJs",
+            |_| {},
+            move |card_json| {
+                let _ = card_tx.send(card_json.to_owned());
+                step += 1;
+                if step == 1 {
+                    Some(r#"{"choice":"alpha"}"#.to_owned())
+                } else {
+                    Some(r#"{"confirm":true}"#.to_owned())
+                }
+            },
+        )
+        .expect("CardJs is admitted after two cards");
+
+    let received: Vec<String> = cards.try_iter().collect();
+    assert_eq!(received.len(), 2);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&received[0]).unwrap()["step"],
+        1
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&received[1]).unwrap()["step"],
+        2
+    );
+
+    assert_eq!(player.player(), 1);
+    h.wait_for("JS card log", || {
+        let log = h.fx.text("js_cards", "log");
+        log.contains("joined:1").then_some(log)
+    });
+    let js_log = h.fx.text("js_cards", "log");
+    assert!(
+        js_log.contains(r#"step1:alpha:{"choice":"alpha"}"#),
+        "js_log: {js_log}"
+    );
+    assert!(
+        js_log.contains(r#"step2:true:{"confirm":true}"#),
+        "js_log: {js_log}"
+    );
+}
+
+#[test]
+fn present_card_cancel_passes_nil_to_callback_and_refuses() {
+    let h = harness();
+    match h.connect_with_cards("CardCancel", |_| {}, |_| None) {
+        Err(NetError::Rejected(reason)) => assert_eq!(reason, "Canceled"),
+        Err(other) => panic!("expected refusal, got {other}"),
+        Ok(_) => panic!("canceled card should be refused"),
+    }
+    h.wait_for_log("card_cancel:true:true");
+    assert!(!h.log().contains("joined"), "log: {}", h.log());
+}
+
+#[test]
+fn expired_card_waiter_cleans_up_pending_player_and_callbacks() {
+    let h = harness();
+    h.fx.server.execute("set sixm_deferralTimeout 1");
+
+    let (shown_tx, shown_rx) = mpsc::channel();
+    let (unblock_tx, unblock_rx) = mpsc::channel::<()>();
+    let handshake = h.spawn_connect_with_cards(
+        "CardHeld",
+        |_| {},
+        move |_| {
+            let _ = shown_tx.send(());
+            let _ = unblock_rx.recv_timeout(Duration::from_secs(5));
+            None
+        },
+        TIMEOUT,
+    );
+
+    h.wait_for("card to be delivered to client", || {
+        shown_rx.try_recv().ok()
+    });
+    assert_eq!(h.fx.text("defer", "held_name"), "CardHeld");
+
+    h.wait_for("pending card deferral to expire", || {
+        (h.fx.text("defer", "held_name") == "none").then_some(())
+    });
+    let outcome = h.fx.text("defer", "release");
+    assert!(outcome.starts_with("false "), "outcome: {outcome}");
+    assert!(outcome.contains("no longer valid"), "outcome: {outcome}");
+    assert!(!h.log().contains("card_held:"), "log: {}", h.log());
+    assert!(!h.log().contains("joined"), "log: {}", h.log());
+
+    let _ = unblock_tx.send(());
+    match h.finish_connect(handshake) {
+        Err(NetError::Rejected(reason)) => assert_eq!(reason, "connection timed out"),
+        Err(other) => panic!("expected deferral timeout refusal, got {other}"),
+        Ok(_) => panic!("timed out card should be refused"),
+    }
 }

@@ -66,6 +66,7 @@ const CLIENT_VARIANTS: &[&str] = &[
     "CreateEntity",
     "RequestEntityControl",
     "SetStateBag",
+    "CardResponse",
 ];
 const SERVER_VARIANTS: &[&str] = &[
     "Welcome",
@@ -89,6 +90,7 @@ const SERVER_VARIANTS: &[&str] = &[
     "EntityCreateRefused",
     "EntityOwner",
     "EntityStates",
+    "PresentCard",
 ];
 /// Most files one snapshot entry carries. Larger resources are split into
 /// several entries of the same name, so one entry always fits a frame.
@@ -835,6 +837,41 @@ impl Serialize for DeferralFrame<'_> {
     }
 }
 
+/// Encodes an Adaptive Card sent during deferral, checking [`MAX_CARD_BYTES`].
+pub(crate) fn encode_present_card(
+    id: u64,
+    card_json: &str,
+    max_frame: usize,
+) -> Result<Arc<[u8]>, NetError> {
+    if card_json.len() > crate::protocol::MAX_CARD_BYTES {
+        return Err(NetError::InvalidInput(format!(
+            "deferral card exceeds {} bytes",
+            crate::protocol::MAX_CARD_BYTES
+        )));
+    }
+    encode_frame(&PresentCardFrame { id, card_json }, max_frame)
+}
+
+/// Borrowed encoding of [`ServerMessage::PresentCard`], written with its wire tag.
+struct PresentCardFrame<'a> {
+    id: u64,
+    card_json: &'a str,
+}
+
+impl Serialize for PresentCardFrame<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut variant = serializer.serialize_struct_variant(
+            MESSAGE_NAME,
+            ServerMessage::PRESENT_CARD_TAG,
+            "PresentCard",
+            2,
+        )?;
+        variant.serialize_field("id", &self.id)?;
+        variant.serialize_field("card_json", self.card_json)?;
+        variant.end()
+    }
+}
+
 /// Encodes a console line a client sends to the server. The line must be 1 to
 /// [`MAX_COMMAND_LEN`] bytes long.
 pub(crate) fn encode_command(line: &str, max_frame: usize) -> Result<Arc<[u8]>, NetError> {
@@ -1148,6 +1185,19 @@ impl<'de> Visitor<'de> for ClientMessageVisitor<'_> {
                     key,
                     value: StateValue(value),
                 }),
+            ClientMessage::CARD_RESPONSE_TAG => variant
+                .newtype_variant::<(u64, Option<String>)>()
+                .and_then(|(id, data_json)| {
+                    if let Some(ref json) = data_json
+                        && json.len() > crate::protocol::MAX_CARD_RESPONSE_BYTES
+                    {
+                        return Err(de::Error::custom(format!(
+                            "card response is over {} bytes",
+                            crate::protocol::MAX_CARD_RESPONSE_BYTES
+                        )));
+                    }
+                    Ok(ClientMessage::CardResponse { id, data_json })
+                }),
             other => Err(de::Error::unknown_variant(
                 &other.to_string(),
                 CLIENT_VARIANTS,
@@ -1195,7 +1245,8 @@ impl<'de> Visitor<'de> for ServerMessageVisitor<'_> {
             | ServerMessage::EVENT_TAG
             | ServerMessage::KICKED_TAG
             | ServerMessage::CONVARS_TAG
-            | ServerMessage::DEFERRAL_TAG => self.visit_session_variant(tag, variant),
+            | ServerMessage::DEFERRAL_TAG
+            | ServerMessage::PRESENT_CARD_TAG => self.visit_session_variant(tag, variant),
             ServerMessage::STATE_BAG_TAG
             | ServerMessage::STATE_BAG_REMOVED_TAG
             | ServerMessage::STATE_SNAPSHOT_TAG
@@ -1254,6 +1305,19 @@ impl<'de> ServerMessageVisitor<'_> {
                 .newtype_variant::<String>()
                 .and_then(checked_deferral::<V::Error>)
                 .map(|message| ServerMessage::Deferral { message }),
+            ServerMessage::PRESENT_CARD_TAG => {
+                variant
+                    .newtype_variant::<(u64, String)>()
+                    .and_then(|(id, card_json)| {
+                        if card_json.len() > crate::protocol::MAX_CARD_BYTES {
+                            return Err(de::Error::custom(format!(
+                                "card json is over {} bytes",
+                                crate::protocol::MAX_CARD_BYTES
+                            )));
+                        }
+                        Ok(ServerMessage::PresentCard { id, card_json })
+                    })
+            }
             _ => unreachable!(),
         }
     }
@@ -3794,6 +3858,51 @@ mod tests {
             }
             other => panic!("expected a deferral, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn present_card_and_card_response_round_trip_and_enforce_caps() {
+        let card = encode_present_card(42, r#"{"type":"AdaptiveCard"}"#, MAX_FRAME)
+            .expect("present card encodes");
+        assert!(matches!(
+            decode_server_message(&card[FRAME_HEADER_LEN..]),
+            Ok(ServerMessage::PresentCard { id: 42, card_json }) if card_json == r#"{"type":"AdaptiveCard"}"#
+        ));
+
+        assert!(
+            encode_present_card(
+                1,
+                &"x".repeat(crate::protocol::MAX_CARD_BYTES + 1),
+                MAX_FRAME
+            )
+            .is_err()
+        );
+
+        let resp = encode_frame(
+            &ClientMessage::CardResponse {
+                id: 42,
+                data_json: Some(r#"{"ok":true}"#.to_owned()),
+            },
+            MAX_FRAME,
+        )
+        .expect("card response encodes");
+        assert!(matches!(
+            decode_client_message(&resp[FRAME_HEADER_LEN..]),
+            Ok(ClientMessage::CardResponse { id: 42, data_json: Some(json) }) if json == r#"{"ok":true}"#
+        ));
+
+        let oversize_resp = encode_frame(
+            &ClientMessage::CardResponse {
+                id: 42,
+                data_json: Some("y".repeat(crate::protocol::MAX_CARD_RESPONSE_BYTES + 1)),
+            },
+            MAX_FRAME,
+        )
+        .expect("raw frame encodes");
+        assert!(matches!(
+            decode_client_message(&oversize_resp[FRAME_HEADER_LEN..]),
+            Err(NetError::Protocol(_))
+        ));
     }
 
     fn convars_of(message: ServerMessage) -> Option<Vec<(String, Option<String>)>> {

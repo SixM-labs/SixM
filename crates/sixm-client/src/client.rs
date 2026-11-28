@@ -147,12 +147,39 @@ impl Client {
         cache_dir: impl Into<PathBuf>,
         timeout: Duration,
     ) -> Result<Self, ClientError> {
-        let net = match fingerprint {
-            Some(fingerprint) => {
-                NetClient::connect_pinned(addr, name, &fingerprint, identity, timeout)?
-            }
-            None => NetClient::connect(addr, name, identity, timeout)?,
-        };
+        Self::connect_with_card_handler(
+            addr,
+            name,
+            fingerprint,
+            identity,
+            cache_dir,
+            timeout,
+            |_| {},
+            |_| None,
+        )
+    }
+
+    /// Connects with deferral and Adaptive Card callbacks during handshake.
+    #[allow(clippy::too_many_arguments)]
+    pub fn connect_with_card_handler(
+        addr: SocketAddr,
+        name: &str,
+        fingerprint: Option<Fingerprint>,
+        identity: &Identity,
+        cache_dir: impl Into<PathBuf>,
+        timeout: Duration,
+        on_deferral: impl FnMut(&str) + Send + 'static,
+        on_card: impl FnMut(&str) -> Option<String> + Send + 'static,
+    ) -> Result<Self, ClientError> {
+        let net = NetClient::connect_with_card_handler(
+            addr,
+            name,
+            fingerprint.as_ref(),
+            identity,
+            timeout,
+            on_deferral,
+            on_card,
+        )?;
         let mut client = Self {
             net,
             cache: Cache::new(cache_dir),

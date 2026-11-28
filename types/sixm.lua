@@ -236,6 +236,7 @@ function Citizen.InvokeNative(hash, ...) end
 ---@class Deferrals
 ---@field defer fun() Holds the connection open during `playerConnecting`.
 ---@field update fun(message: string) Sends a progress message (cut to 4096 bytes) to the connecting client.
+---@field presentCard fun(card: string | table, cb?: fun(data: any, rawData: string | nil)) Presents an Adaptive Card JSON string or table (up to 64 KiB) during deferral.
 ---@field done fun(reason?: string) Completes the deferral; a non-empty `reason` refuses the connection.
 
 --- Sender of the active event (`""` for local events, player server id as integer for player events, `65535` on client for server events).

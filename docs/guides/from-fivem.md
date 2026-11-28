@@ -52,7 +52,8 @@ See [manifest.md](../manifest.md) for all manifest rules.
   - Server: `onResourceStarting` (cancellable), `onResourceStart`,
     `onServerResourceStart`, `onResourceStop`, `onServerResourceStop`,
     `playerConnecting(name, setKickReason, deferrals)` (including
-    `deferrals.defer`, `deferrals.update`, `deferrals.done`),
+    `deferrals.defer`, `deferrals.update`, `deferrals.presentCard`,
+    `deferrals.done`),
     `playerJoining(oldID)`, `playerDropped(reason, resourceName,
     clientDropReason)`, `entityCreating` (cancellable), `entityCreated`,
     `entityRemoved`, `onEntityBucketChange`, `onPlayerBucketChange` and

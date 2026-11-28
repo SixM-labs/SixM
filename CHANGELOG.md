@@ -9,6 +9,10 @@ may change the protocol and the API.
 
 ### Added
 
+- Adaptive Card deferrals via `deferrals.presentCard(card, cb?)` in Lua and
+  JavaScript (wire protocol 16, `ServerMessage::PresentCard`,
+  `ClientMessage::CardResponse`, `NetClient::connect_with_card_handler`,
+  `NetServer::present_card`, and interactive JSON prompting in `sixm-client`).
 - Built-in operator console commands `status`, `clientkick <id> [reason]`,
   `say <text>` (integrating with `[system]/chat` when started and logging
   directly otherwise), `cmdlist`, and resource-relative `exec @resource/file.cfg`

@@ -305,7 +305,7 @@ equivalent / no effect / absent".
 | D2 | done | Gemini (Flash impl, Pro review) | `git log --grep "^D2:"` |
 | D3 | done | Gemini | `git log --grep "^D3:"` |
 | D4 | done | Gemini | `git log --grep "^D4:"` |
-| D5 | todo | | |
+| D5 | done | Gemini | `git log --grep "^D5:"` |
 | D6 | todo | | |
 | D7 | todo | | |
 | E1 | todo | | |
@@ -440,3 +440,9 @@ what is next, anything surprising.
   / `X-Real-IP` hops across HTTP rate limiting and RCON lockout, plus console-only
   `sv_prometheusBasicAuthUser` / `sv_prometheusBasicAuthPassword` protecting
   `/metrics`, with full checks green. Next: D5 (`deferrals.presentCard`).
+- 2026-11-28, Gemini, `feat/fivem-parity-d`: `D5: deferrals.presentCard`
+  follows 00194a6. Bumped `PROTOCOL_VERSION` to `16`, added `PresentCard` and
+  `CardResponse` frames with fuzz/cap coverage, implemented
+  `deferrals.presentCard(card, cb?)` in Lua/JS with callback retention and
+  cleanup, wired headless client interactive prompt, updated protocol/API/type
+  docs, and ran full checks green. Next: D6 (`req.address` & `req.setCancelHandler`).

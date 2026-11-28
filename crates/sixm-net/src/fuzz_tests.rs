@@ -11,8 +11,8 @@ use sixm_core::{MAX_STATE_NAME_LEN, Value};
 use crate::entities::{EntityAttachmentEntry, EntityEntry, EntityStateEntry, EntityStateUpdate};
 use crate::files::{FILE_KIND_FILE, FileEntry, ResourceEntry};
 use crate::protocol::{
-    ClientMessage, MAX_COMMAND_LEN, MAX_DECODED_VALUES, MAX_FRAME, MAX_TRANSFORMS_PER_MESSAGE,
-    PROTOCOL_VERSION, ServerMessage,
+    ClientMessage, MAX_CARD_BYTES, MAX_CARD_RESPONSE_BYTES, MAX_COMMAND_LEN, MAX_DECODED_VALUES,
+    MAX_FRAME, MAX_TRANSFORMS_PER_MESSAGE, PROTOCOL_VERSION, ServerMessage,
 };
 use crate::wire::{
     Args, FRAME_HEADER_LEN, StateValue, decode_client_message, decode_latent_body,
@@ -129,7 +129,7 @@ fn client_seeds() -> Vec<Vec<u8>> {
         (3, Some([1.0, 2.0, 3.0]), Some([0.0, 90.0, 0.0]), 2),
         (4, None, Some([0.0; 3]), 0),
     ];
-    let seeds: [Vec<u8>; 8] = [
+    let seeds: [Vec<u8>; 9] = [
         payload_of(&ClientMessage::Hello {
             protocol: PROTOCOL_VERSION,
             name: "player".to_owned(),
@@ -155,6 +155,10 @@ fn client_seeds() -> Vec<Vec<u8>> {
             encode_client_state("player:1", "ready", &Value::Bool(true), MAX_FRAME)
                 .expect("seed encodes"),
         ]),
+        payload_of(&ClientMessage::CardResponse {
+            id: 1,
+            data_json: Some(r#"{"ok":true}"#.to_owned()),
+        }),
     ];
     Vec::from(seeds)
 }
@@ -274,6 +278,10 @@ fn server_seeds() -> Vec<Vec<u8>> {
         payload_of(&ServerMessage::Deferral {
             message: "waiting".to_owned(),
         }),
+        payload_of(&ServerMessage::PresentCard {
+            id: 1,
+            card_json: r#"{"type":"AdaptiveCard"}"#.to_owned(),
+        }),
     ];
     seeds.extend(entity_server_seeds());
     seeds
@@ -370,6 +378,11 @@ fn check_input(data: &[u8]) -> usize {
                 assert!(!key.is_empty() && key.len() <= MAX_STATE_NAME_LEN);
                 assert!(value_count(std::slice::from_ref(&value.0)) <= MAX_DECODED_VALUES);
             }
+            ClientMessage::CardResponse { data_json, .. } => {
+                if let Some(json) = data_json {
+                    assert!(json.len() <= MAX_CARD_RESPONSE_BYTES);
+                }
+            }
             ClientMessage::Hello { .. }
             | ClientMessage::RequestFile { .. }
             | ClientMessage::CreateEntity { .. }
@@ -393,6 +406,9 @@ fn check_input(data: &[u8]) -> usize {
             }
             ServerMessage::EntityStates { updates } => {
                 assert!(updates.len() <= MAX_DECODED_VALUES);
+            }
+            ServerMessage::PresentCard { card_json, .. } => {
+                assert!(card_json.len() <= MAX_CARD_BYTES);
             }
             _ => {}
         }

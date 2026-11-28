@@ -104,6 +104,18 @@ impl Loopback {
         self.finish_connect(handshake)
     }
 
+    /// Like [`connect_observed`](Self::connect_observed), and handles Adaptive Cards
+    /// presented during deferral.
+    pub fn connect_with_cards(
+        &self,
+        name: &str,
+        on_deferral: impl FnMut(&str) + Send + 'static,
+        on_card: impl FnMut(&str) -> Option<String> + Send + 'static,
+    ) -> Result<NetClient, NetError> {
+        let handshake = self.spawn_connect_with_cards(name, on_deferral, on_card, TIMEOUT);
+        self.finish_connect(handshake)
+    }
+
     /// Pumps the server until the handshake started by
     /// [`spawn_connect`](Self::spawn_connect) finishes, and returns its result.
     pub fn finish_connect(
@@ -127,10 +139,30 @@ impl Loopback {
         on_deferral: impl FnMut(&str) + Send + 'static,
         timeout: Duration,
     ) -> JoinHandle<Result<NetClient, NetError>> {
+        self.spawn_connect_with_cards(name, on_deferral, |_| None, timeout)
+    }
+
+    /// Starts a client handshake with deferral and Adaptive Card callbacks on
+    /// its own thread, without pumping the server.
+    pub fn spawn_connect_with_cards(
+        &self,
+        name: &str,
+        on_deferral: impl FnMut(&str) + Send + 'static,
+        on_card: impl FnMut(&str) -> Option<String> + Send + 'static,
+        timeout: Duration,
+    ) -> JoinHandle<Result<NetClient, NetError>> {
         let addr = self.addr;
         let name = name.to_owned();
         thread::spawn(move || {
-            NetClient::connect_observed(addr, &name, &Identity::Ephemeral, timeout, on_deferral)
+            NetClient::connect_with_card_handler(
+                addr,
+                &name,
+                None,
+                &Identity::Ephemeral,
+                timeout,
+                on_deferral,
+                on_card,
+            )
         })
     }
 

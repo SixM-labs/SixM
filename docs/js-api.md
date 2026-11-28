@@ -85,9 +85,14 @@ Inside an event handler, `globalThis.source` holds the sender (`""` for local
 server events, player id as string/number for client-to-server events, `65535`
 for server-to-client events).
 
-The host events (`playerJoining`, `playerDropped`, `onPlayerBucketChange`,
-`onEntityBucketChange`, `onResourceListRefresh` and the others) take the same
-names and arguments as in the lifecycle table of [`lua-api.md`](lua-api.md#lifecycle-events-fired-by-the-host).
+The host events (`playerConnecting`, `playerJoining`, `playerDropped`,
+`onPlayerBucketChange`, `onEntityBucketChange`, `onResourceListRefresh` and the
+others) take the same names and arguments as in the lifecycle table of
+[`lua-api.md`](lua-api.md#lifecycle-events-fired-by-the-host). In
+`playerConnecting(name, setKickReason, deferrals)`, `deferrals` exposes
+`defer()`, `update(message)`, `presentCard(card, cb?)` (accepting a JSON string
+or plain JS object/array up to 64 KiB and invoking `cb(data, rawData)` or
+`(null, null)` on cancel), and `done(reason?)`.
 
 ### Events provided by the `chat` resource
 

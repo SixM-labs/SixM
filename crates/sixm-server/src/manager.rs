@@ -115,7 +115,7 @@ struct ResourceTickGroup {
 #[derive(Debug)]
 pub struct ResourceManager {
     /// Handed to every runtime as its host.
-    me: Weak<Self>,
+    pub(crate) me: Weak<Self>,
     catalog: RefCell<Catalog>,
     scanned: Cell<bool>,
     pub(crate) convars: RefCell<Convars>,

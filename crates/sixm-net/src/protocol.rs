@@ -9,7 +9,7 @@ use crate::files::{FileHash, ResourceEntry};
 use crate::wire::{Args, StateValue};
 
 /// Version of the wire protocol. A client must send it in its `Hello`.
-pub const PROTOCOL_VERSION: u32 = 15;
+pub const PROTOCOL_VERSION: u32 = 16;
 
 /// Application protocol identifier negotiated during the TLS handshake.
 pub(crate) const ALPN: &[u8] = b"sixm/1";
@@ -43,6 +43,10 @@ pub const MAX_CONVAR_VALUE_LEN: usize = 4096;
 /// Longest progress message of a deferral, in bytes. Longer messages are cut
 /// on a character boundary when they are sent.
 pub(crate) const MAX_DEFERRAL_MESSAGE_LEN: usize = 4096;
+/// Maximum JSON byte length for an Adaptive Card sent via `deferrals.presentCard`.
+pub const MAX_CARD_BYTES: usize = 64 * 1024;
+/// Maximum JSON byte length for a client response to a deferral card.
+pub const MAX_CARD_RESPONSE_BYTES: usize = 64 * 1024;
 
 /// Most bytes of the reason in an [`ServerMessage::EntityCreateRefused`].
 pub(crate) const MAX_REFUSAL_REASON_LEN: usize = 256;
@@ -175,6 +179,11 @@ pub(crate) enum ClientMessage {
         key: String,
         value: StateValue,
     },
+    /// Submits or cancels an Adaptive Card presented during deferral (`None` = canceled).
+    CardResponse {
+        id: u64,
+        data_json: Option<String>,
+    },
 }
 
 impl ClientMessage {
@@ -194,6 +203,8 @@ impl ClientMessage {
     pub(crate) const REQUEST_ENTITY_CONTROL_TAG: u32 = 6;
     /// Variant index of [`ClientMessage::SetStateBag`] on the wire.
     pub(crate) const SET_STATE_BAG_TAG: u32 = 7;
+    /// Variant index of [`ClientMessage::CardResponse`] on the wire.
+    pub(crate) const CARD_RESPONSE_TAG: u32 = 8;
 }
 
 /// Messages the server sends on the stream. Decoding is done by the wire
@@ -312,6 +323,11 @@ pub(crate) enum ServerMessage {
     EntityStates {
         updates: Vec<EntityStateUpdate>,
     },
+    /// Adaptive Card JSON sent during connection deferral, awaiting [`ClientMessage::CardResponse`].
+    PresentCard {
+        id: u64,
+        card_json: String,
+    },
 }
 
 impl ServerMessage {
@@ -357,4 +373,6 @@ impl ServerMessage {
     pub(crate) const ENTITY_OWNER_TAG: u32 = 19;
     /// Variant index of [`ServerMessage::EntityStates`] on the wire.
     pub(crate) const ENTITY_STATES_TAG: u32 = 20;
+    /// Variant index of [`ServerMessage::PresentCard`] on the wire.
+    pub(crate) const PRESENT_CARD_TAG: u32 = 21;
 }
