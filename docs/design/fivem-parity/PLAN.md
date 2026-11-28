@@ -300,7 +300,7 @@ equivalent / no effect / absent".
 | B4 | done | ChatGPT (Luna draft), Gemini (wrap-up) | `git log --grep "^B4:"` |
 | C1 | done | Gemini (Flash impl, Pro review) | `git log --grep "^C1:"` |
 | C2 | done | Gemini (Flash impl, Pro review) | `git log --grep "^C2:"` |
-| C3 | todo | | |
+| C3 | done | Gemini | `git log --grep "^C3:"` |
 | D1 | todo | | |
 | D2 | todo | | |
 | D3 | todo | | |
@@ -409,3 +409,10 @@ what is next, anything surprising.
   owned `Entity(id).state`, and `SetStateBagValue` in `ClientRuntime::state_set`,
   added Lua/JS loopback tests (including scoping and mid-life ownership
   transfer), and updated docs/types. Next: C3 wrap-up and PR.
+- 2026-11-28, Gemini, `feat/fivem-parity-c`: `C3: wrap up Phase C` follows
+  0369b2f. Audited `docs/`, `types/`, and `CHANGELOG.md` (zero stale
+  client-replication restrictions remain), ran full Linux checks
+  (`check_types.py`, `cargo fmt`, `cargo clippy`, `cargo test --workspace`,
+  `fuzz` locked check), pushed `feat/fivem-parity-c`, and opened the Phase C
+  PR to `main`. Windows CI is verified via GitHub Actions on the PR before
+  merging. Next: Phase D (`feat/fivem-parity-d`) after PR merge.
