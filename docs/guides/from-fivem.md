@@ -348,7 +348,7 @@ following FiveM areas are missing:
   The headless client sends `say` through `_chat:messageEntered`, and the server
   derives the author from the connection and checks `command.say`. Messages are
   printed to the client log; templates render as plain text and there is no
-  NUI. `spawnmanager` and `mapmanager` are not bundled.
+  NUI. `mapmanager` is not bundled.
 - **No public server browser UI:** `sets` / `SetConvarServerInfo` marks convars
   as server info (exposed on `/info.json`), and `sv_masterUrl` /
   `sv_heartbeatInterval` optionally send periodic JSON heartbeats to a

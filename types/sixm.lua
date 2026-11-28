@@ -368,7 +368,7 @@ function TriggerLatentClientEvent(name, target, bytesPerSecond, ...) end
 ---@field addSpawnPoint fun(spawn: SpawnPoint): integer
 ---@field removeSpawnPoint fun(id: integer): boolean
 ---@field loadSpawns fun(json: string): boolean
----@field spawnPlayer fun(spawnIdOrObject: integer|SpawnPoint|nil, callback: fun(info: SpawnInfo)|nil): boolean
+---@field spawnPlayer fun(spawnIdOrObject?: integer|SpawnPoint, callback?: fun(info: SpawnInfo)): boolean
 ---@field setAutoSpawn fun(enabled: boolean)
 ---@field setAutoSpawnCallback fun(callback: fun())
 ---@field forceRespawn fun()

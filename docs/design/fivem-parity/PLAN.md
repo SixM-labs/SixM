@@ -295,7 +295,7 @@ equivalent / no effect / absent".
 | A7 | done | ChatGPT (Luna impl, Terra review) | `git log --grep "^A7:"` |
 | A8 | done | ChatGPT (Luna docs, Terra review) | `git log --grep "^A8:"` |
 | B1 | done | ChatGPT (Luna impl, Terra review) | `git log --grep "^B1:"` |
-| B2 | wip (see log) | ChatGPT (Luna impl, Terra review) | `git log --grep "^WIP B2"` |
+| B2 | done | ChatGPT (Luna impl, Terra review), Gemini (Flash fixes, Pro review) | `git log --grep "^B2:"` |
 | B3 | todo | | |
 | B4 | todo | | |
 | C1 | todo | | |
@@ -376,3 +376,9 @@ what is next, anything surprising.
   JSON validation and changes to initial and forced spawn scheduling. The
   isolated SimAdapter test passes. Remaining B2 verification covers a
   missing or frozen ped and cancellation of a pending retry on disable.
+- 2026-11-28, Gemini, `feat/fivem-parity-b`: `B2: ship stock spawnmanager`
+  follows dc7f6ed. Fixed `forceRespawn` superseding/epoch cancellation and Lua
+  integer normalization, updated `types/sixm.lua` and `from-fivem.md`, and
+  added `sim_adapter` tests for missing/frozen/attached peds, retry
+  cancellation, deferred ped/config, non-spawning callback latch, direct spawns,
+  and numeric 32-bit model hashes. Next: B3 (`mapmanager`).

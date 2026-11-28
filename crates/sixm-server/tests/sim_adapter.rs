@@ -90,6 +90,7 @@ const MANIFEST: &str =
 const REPORT_SERVER: &str = r"
 local report = ''
 local peds = {}
+local anchor
 AddEventHandler('playerJoining', function()
 local player = tonumber(source)
 peds[player] = GetPlayerPed(player)
@@ -97,6 +98,40 @@ end)
 RegisterNetEvent('spawn:report', function(value) report = value end)
 exports('report', function() return report end)
 exports('ped', function(player) return peds[player] or 0 end)
+exports('freezePed', function(player, toggle)
+    if peds[player] then FreezeEntityPosition(peds[player], toggle) end
+end)
+exports('attachPed', function(player, attach)
+    if not peds[player] then return end
+    if attach then
+        anchor = anchor or CreateObject('prop_test', 0, 0, 0)
+        AttachEntityToEntity(peds[player], anchor, 0, 0, 0, 0, 0, 0, 0)
+    else
+        DetachEntity(peds[player])
+    end
+end)
+";
+const MOCK_PED_LUA: &str = r"
+local realPlayerPedId = PlayerPedId
+local pedReady = false
+function PlayerPedId()
+    if pedReady then return realPlayerPedId() end
+    return 0
+end
+RegisterNetEvent('mock:enablePed', function()
+    pedReady = true
+end)
+";
+const MOCK_MANIFEST: &str = r"fx_version 'cerulean'
+game 'common'
+client_scripts { 'mock_ped.lua', 'client.lua', 'json.js' }
+export 'spawnPlayer'
+export 'addSpawnPoint'
+export 'removeSpawnPoint'
+export 'loadSpawns'
+export 'setAutoSpawn'
+export 'setAutoSpawnCallback'
+export 'forceRespawn'
 ";
 const CALLER: &str = r#"
 if (GetPlayerServerId(PlayerId()) === 1) {
@@ -513,4 +548,569 @@ fn verify_freeze_and_teleport(lb: &Loopback, rt_a: &ClientRuntime, ped_id: u32, 
         lb.pump_clients(rt_a, None, *now);
         thread::sleep(STEP);
     }
+}
+
+struct SpawnHarness {
+    lb: Loopback,
+    rt: Rc<ClientRuntime>,
+    _cache: TempDir,
+    _data: TempDir,
+    ped: u32,
+}
+
+impl SpawnHarness {
+    fn new(use_mock_ped: bool, caller_script: &str) -> Self {
+        let fx = Fixture::new();
+        fx.add_resource(
+            "simtest",
+            "fx_version 'cerulean'\ngame 'common'\n\
+             server_script 'srv.lua'\n\
+             server_export 'report'\nserver_export 'ped'\nserver_export 'freezePed'\nserver_export 'attachPed'\n",
+            &[("srv.lua", REPORT_SERVER)],
+        );
+        if use_mock_ped {
+            fx.add_resource(
+                "spawnmanager",
+                MOCK_MANIFEST,
+                &[
+                    ("mock_ped.lua", MOCK_PED_LUA),
+                    ("client.lua", SPAWNMGR),
+                    ("json.js", SPAWNJSON),
+                ],
+            );
+        } else {
+            fx.add_resource(
+                "spawnmanager",
+                MANIFEST,
+                &[("client.lua", SPAWNMGR), ("json.js", SPAWNJSON)],
+            );
+        }
+        fx.add_resource(
+            "spawncaller",
+            "fx_version 'cerulean'\ngame 'common'\nclient_script 'client.lua'\ndependency 'spawnmanager'\n",
+            &[("client.lua", caller_script)],
+        );
+        fx.server.execute("endpoint_add_udp 127.0.0.1:0");
+        let (tx, input) = mpsc::channel();
+        let addr = fx.server.start_network(tx).expect("loopback server");
+        fx.server.execute("ensure simtest");
+        fx.server.execute("ensure spawncaller");
+        let lb = Loopback { fx, input, addr };
+
+        let (cache, data) = (
+            TempDir::new().expect("cache"),
+            TempDir::new().expect("data"),
+        );
+        let rt = ClientRuntime::new(lb.connect("Spawner", cache.path()), data.path());
+        rt.set_adapter(Box::new(SimAdapter::new()));
+        rt.try_start_synced().expect("adapter attaches");
+        let ped = match &lb
+            .fx
+            .manager()
+            .call_export("simtest", "ped", &[Value::Int(1)], None)
+            .expect("ped export")[0]
+        {
+            Value::Int(id) => u32::try_from(*id).expect("ped id"),
+            other => panic!("unexpected ped handle {other:?}"),
+        };
+        Self {
+            lb,
+            rt,
+            _cache: cache,
+            _data: data,
+            ped,
+        }
+    }
+
+    fn pump_for(&self, duration: Duration) {
+        let end = Instant::now() + duration;
+        while Instant::now() < end {
+            self.lb.pump_clients(&self.rt, None, Instant::now());
+            thread::sleep(STEP);
+        }
+        self.lb.pump_clients(&self.rt, None, Instant::now());
+    }
+
+    fn wait_report_prefix(&self, prefix: &str) -> String {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            self.lb.pump_clients(&self.rt, None, Instant::now());
+            let report = self.lb.fx.text("simtest", "report");
+            if !report.is_empty() && (prefix.is_empty() || report.starts_with(prefix)) {
+                return report;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "spawnmanager report timed out (prefix={prefix:?}, last={report:?})"
+            );
+            thread::sleep(STEP);
+        }
+    }
+
+    fn shutdown(self) {
+        self.rt.shutdown();
+    }
+}
+
+#[test]
+fn spawnmanager_frozen_ped_blocks_spawn_until_unfrozen() {
+    let caller = r"
+local events, cbs = 0, 0
+local lastInfo
+AddEventHandler('playerSpawned', function(info)
+    events = events + 1
+    lastInfo = info
+end)
+RegisterNetEvent('test:spawnWhenFrozen', function()
+    local sm = exports.spawnmanager
+    local frozen = IsEntityPositionFrozen(PlayerPedId())
+    local res = sm:spawnPlayer({ x = 55, y = 66, z = 77, heading = 90 }, function()
+        cbs = cbs + 1
+    end)
+    SetTimeout(30, function()
+        TriggerServerEvent('spawn:report', ('phase1:%s|%s|%d|%d'):format(
+            tostring(frozen), tostring(res), events, cbs))
+    end)
+end)
+RegisterNetEvent('test:spawnWhenUnfrozen', function()
+    local sm = exports.spawnmanager
+    local frozen = IsEntityPositionFrozen(PlayerPedId())
+    local res = sm:spawnPlayer({ x = 55, y = 66, z = 77, heading = 90 }, function(info)
+        cbs = cbs + 1
+        lastInfo = info
+    end)
+    SetTimeout(30, function()
+        local info = lastInfo or {}
+        TriggerServerEvent('spawn:report', ('phase2:%s|%s|%d|%d|%.0f|%.0f|%.0f|%.0f'):format(
+            tostring(frozen), tostring(res), events, cbs,
+            info.x or -1, info.y or -1, info.z or -1, info.heading or -1))
+    end)
+end)
+";
+    let h = SpawnHarness::new(false, caller);
+    h.pump_for(Duration::from_millis(30));
+    let before = h.rt.entity(h.ped).expect("ped mirrored").position;
+
+    h.lb.fx
+        .manager()
+        .call_export(
+            "simtest",
+            "freezePed",
+            &[Value::Int(1), Value::Bool(true)],
+            None,
+        )
+        .expect("freeze ped");
+    h.pump_for(Duration::from_millis(40));
+    h.lb.fx
+        .manager()
+        .trigger_client_event("test:spawnWhenFrozen", ClientTarget::Player(1), &[])
+        .expect("trigger frozen spawn");
+    let phase1 = h.wait_report_prefix("phase1:");
+    assert_eq!(phase1, "phase1:true|false|0|0");
+    assert_eq!(h.rt.entity(h.ped).expect("ped mirrored").position, before);
+
+    h.lb.fx
+        .manager()
+        .call_export(
+            "simtest",
+            "freezePed",
+            &[Value::Int(1), Value::Bool(false)],
+            None,
+        )
+        .expect("unfreeze ped");
+    h.pump_for(Duration::from_millis(40));
+    h.lb.fx
+        .manager()
+        .trigger_client_event("test:spawnWhenUnfrozen", ClientTarget::Player(1), &[])
+        .expect("trigger unfrozen spawn");
+    let phase2 = h.wait_report_prefix("phase2:");
+    assert_eq!(phase2, "phase2:false|true|1|1|55|66|77|90");
+    let info = h.rt.entity(h.ped).expect("ped mirrored");
+    assert_eq!(info.position, [55.0, 66.0, 77.0]);
+    assert_eq!(info.rotation[2], 90.0);
+    h.shutdown();
+}
+
+#[test]
+fn spawnmanager_missing_ped_blocks_spawn_and_cancels_retry_on_disable() {
+    let caller = r"
+local events, cbs = 0, 0
+AddEventHandler('playerSpawned', function() events = events + 1 end)
+local sm = exports.spawnmanager
+local id = sm:addSpawnPoint({ x = 15, y = 25, z = 35, heading = 45 })
+local r1 = sm:spawnPlayer(nil, function() cbs = cbs + 1 end)
+local r2 = sm:spawnPlayer(id, function() cbs = cbs + 1 end)
+local r3 = sm:spawnPlayer({ x = 15, y = 25, z = 35, heading = 45 }, function() cbs = cbs + 1 end)
+sm:setAutoSpawn(true)
+SetTimeout(30, function()
+    sm:setAutoSpawn(false)
+    TriggerEvent('mock:enablePed')
+    SetTimeout(50, function()
+        TriggerServerEvent('spawn:report', ('%s|%s|%s|%d|%d|%d'):format(
+            tostring(r1), tostring(r2), tostring(r3), events, cbs, PlayerPedId()))
+    end)
+end)
+";
+    let h = SpawnHarness::new(true, caller);
+    let before = h.rt.entity(h.ped).expect("ped mirrored").position;
+    let report = h.wait_report_prefix("");
+    assert_eq!(report, format!("false|false|false|0|0|{}", h.ped));
+    assert_eq!(h.rt.entity(h.ped).expect("ped mirrored").position, before);
+    h.shutdown();
+}
+
+#[test]
+fn spawnmanager_deferred_ped_retries_until_valid_then_spawns_once() {
+    let caller = r"
+local events = {}
+AddEventHandler('playerSpawned', function(info) events[#events + 1] = info end)
+local sm = exports.spawnmanager
+sm:addSpawnPoint({ x = 22, y = 33, z = 44, heading = 60 })
+sm:setAutoSpawn(true)
+SetTimeout(30, function()
+    local beforeEnable = #events
+    TriggerEvent('mock:enablePed')
+    SetTimeout(50, function()
+        local e = events[1] or {}
+        TriggerServerEvent('spawn:report', ('%d|%d|%s|%.0f|%.0f|%.0f|%.0f|%d'):format(
+            beforeEnable, #events, tostring(e.idx),
+            e.x or -1, e.y or -1, e.z or -1, e.heading or -1, PlayerPedId()))
+    end)
+end)
+";
+    let h = SpawnHarness::new(true, caller);
+    let report = h.wait_report_prefix("");
+    assert_eq!(report, format!("0|1|1|22|33|44|60|{}", h.ped));
+    let info = h.rt.entity(h.ped).expect("ped mirrored");
+    assert_eq!(info.position, [22.0, 33.0, 44.0]);
+    assert_eq!(info.rotation[2], 60.0);
+    h.shutdown();
+}
+
+#[test]
+fn spawnmanager_deferred_config_and_lua_consumers() {
+    let caller = r"
+local events = {}
+AddEventHandler('playerSpawned', function(info) events[#events + 1] = info end)
+local sm = exports.spawnmanager
+sm:setAutoSpawn(true)
+SetTimeout(30, function()
+    local beforePoint = #events
+    sm:addSpawnPoint({ x = 12, y = 24, z = 36, heading = 90, skipFade = true })
+    SetTimeout(40, function()
+        local afterPoint = #events
+        local id2 = sm:addSpawnPoint({ x = 42, y = 48, z = 54, heading = 135, model = 'mp_m_freemode_01' })
+        local cbCount = 0
+        local cbInfo
+        local spawned = sm:spawnPlayer(id2, function(info)
+            cbCount = cbCount + 1
+            cbInfo = info
+        end)
+        SetTimeout(30, function()
+            local e1 = events[1] or {}
+            local e2 = events[2] or {}
+            local cb = cbInfo or {}
+            local same = e2.idx == cb.idx and e2.x == cb.x and e2.y == cb.y
+                and e2.z == cb.z and e2.heading == cb.heading
+                and e2.model == cb.model and e2.skipFade == cb.skipFade
+            TriggerServerEvent('spawn:report', ('%d|%d|%d|%d|%s|%s|%s|%d|%s|%s|%s'):format(
+                beforePoint, afterPoint, #events, cbCount,
+                tostring(e1.idx), tostring(e1.skipFade), tostring(spawned),
+                id2, tostring(cb.idx), tostring(cb.model == GetHashKey('mp_m_freemode_01')), tostring(same)))
+        end)
+    end)
+end)
+";
+    let h = SpawnHarness::new(false, caller);
+    let report = h.wait_report_prefix("");
+    assert_eq!(report, "0|1|2|1|1|true|true|2|2|true|true");
+    let info = h.rt.entity(h.ped).expect("ped mirrored");
+    assert_eq!(info.position, [42.0, 48.0, 54.0]);
+    assert_eq!(info.rotation[2], 135.0);
+    h.shutdown();
+}
+
+#[test]
+fn spawnmanager_non_spawning_callback_latches_without_event() {
+    let caller = r"
+local events, cbs = 0, 0
+AddEventHandler('playerSpawned', function() events = events + 1 end)
+local sm = exports.spawnmanager
+sm:setAutoSpawnCallback(function()
+    cbs = cbs + 1
+end)
+sm:setAutoSpawn(true)
+SetTimeout(30, function()
+    sm:addSpawnPoint({ x = 70, y = 80, z = 90, heading = 45 })
+    sm:setAutoSpawn(true)
+    SetTimeout(30, function()
+        TriggerServerEvent('spawn:report', ('%d|%d'):format(cbs, events))
+    end)
+end)
+";
+    let h = SpawnHarness::new(false, caller);
+    let before = h.rt.entity(h.ped).expect("ped mirrored").position;
+    let report = h.wait_report_prefix("");
+    assert_eq!(report, "1|0");
+    assert_eq!(h.rt.entity(h.ped).expect("ped mirrored").position, before);
+    h.shutdown();
+}
+
+#[test]
+fn spawnmanager_rejects_invalid_inputs_and_preserves_ped_coords() {
+    let caller = r#"
+local events = 0
+AddEventHandler('playerSpawned', function() events = events + 1 end)
+local sm = exports.spawnmanager
+
+local function mustFail(label, needle, fn)
+    local ok, err = pcall(fn)
+    if ok then error(label .. ' unexpectedly succeeded') end
+    if needle and not tostring(err):find(needle, 1, true) then
+        error(label .. ' unexpected error: ' .. tostring(err))
+    end
+end
+
+local ok, err = pcall(function()
+    mustFail('nil point bad cb', 'callback must be a function', function() sm:spawnPlayer(nil, 123) end)
+    mustFail('unknown id bad cb', 'callback must be a function', function() sm:spawnPlayer(99999, 'bad') end)
+    mustFail('object bad cb', 'callback must be a function', function()
+        sm:spawnPlayer({ x = 10, y = 20, z = 30, heading = 40 }, 'bad')
+    end)
+    mustFail('nan x', 'finite', function() sm:spawnPlayer({ x = 0/0, y = 0, z = 0, heading = 0 }) end)
+    mustFail('inf x', 'finite', function() sm:spawnPlayer({ x = math.huge, y = 0, z = 0, heading = 0 }) end)
+    mustFail('-inf x', 'finite', function() sm:spawnPlayer({ x = -math.huge, y = 0, z = 0, heading = 0 }) end)
+    mustFail('overflow x', 'finite', function() sm:spawnPlayer({ x = 4e38, y = 0, z = 0, heading = 0 }) end)
+    mustFail('neg id', 'positive integer', function() sm:spawnPlayer(-1) end)
+    mustFail('float id', 'positive integer', function() sm:spawnPlayer(1.5) end)
+    mustFail('huge id', 'positive integer', function() sm:spawnPlayer(1e20) end)
+    mustFail('string arg', 'spawn must be an object', function() sm:spawnPlayer('bad') end)
+    mustFail('add non-table', 'spawn must be an object', function() sm:addSpawnPoint('bad') end)
+    mustFail('add string coord', 'finite', function() sm:addSpawnPoint({ x = '1', y = 2, z = 3, heading = 0 }) end)
+    mustFail('add empty model', 'model', function() sm:addSpawnPoint({ x = 1, y = 2, z = 3, heading = 0, model = '' }) end)
+    mustFail('add float model', 'model', function() sm:addSpawnPoint({ x = 1, y = 2, z = 3, heading = 0, model = 1.5 }) end)
+    mustFail('add huge model', 'model', function() sm:addSpawnPoint({ x = 1, y = 2, z = 3, heading = 0, model = 1e20 }) end)
+    mustFail('add bad skipFade', 'skipFade', function() sm:addSpawnPoint({ x = 1, y = 2, z = 3, heading = 0, skipFade = 'yes' }) end)
+    mustFail('remove 0', 'positive integer', function() sm:removeSpawnPoint(0) end)
+    mustFail('remove -1', 'positive integer', function() sm:removeSpawnPoint(-1) end)
+    mustFail('remove 1.5', 'positive integer', function() sm:removeSpawnPoint(1.5) end)
+    mustFail('remove huge', 'positive integer', function() sm:removeSpawnPoint(1e20) end)
+    mustFail('remove str', 'positive integer', function() sm:removeSpawnPoint('1') end)
+    mustFail('private parseSpawnArray', 'private to spawnmanager', function()
+        sm.parseSpawnArray('{"spawns":[]}')
+    end)
+    mustFail('load non-str', 'JSON string', function() sm:loadSpawns(123) end)
+    mustFail('load bad json', 'invalid JSON', function() sm:loadSpawns('{bad') end)
+    mustFail('load partial bad', 'finite', function()
+        sm:loadSpawns('{"spawns":[{"x":1,"y":2,"z":3,"heading":0},{"x":1,"y":2,"z":3,"heading":"bad"}]}')
+    end)
+    mustFail('load overflow', 'finite', function()
+        sm:loadSpawns('{"spawns":[{"x":1e39,"y":2,"z":3,"heading":0}]}')
+    end)
+    if sm:spawnPlayer() ~= false then error('failed loadSpawns mutated points') end
+    mustFail('autoSpawn str', 'boolean', function() sm:setAutoSpawn('true') end)
+    mustFail('autoSpawnCb str', 'function', function() sm:setAutoSpawnCallback('bad') end)
+    mustFail('autoSpawnCb nil', 'function', function() sm:setAutoSpawnCallback(nil) end)
+end)
+
+SetTimeout(20, function()
+    if ok then
+        TriggerServerEvent('spawn:report', ('ok|%d'):format(events))
+    else
+        TriggerServerEvent('spawn:report', 'ERR:' .. tostring(err))
+    end
+end)
+"#;
+    let h = SpawnHarness::new(false, caller);
+    let before = h.rt.entity(h.ped).expect("ped mirrored");
+    let report = h.wait_report_prefix("");
+    assert_eq!(report, "ok|0");
+    let after = h.rt.entity(h.ped).expect("ped mirrored");
+    assert_eq!(after.position, before.position);
+    assert_eq!(after.rotation, before.rotation);
+    h.shutdown();
+}
+
+#[test]
+fn spawnmanager_direct_spawn_numeric_models_load_batch_and_event_ordering() {
+    let caller = r#"
+local trace = {}
+local infos = {}
+AddEventHandler('playerSpawned', function(info)
+    trace[#trace + 1] = 'event'
+    infos[#infos + 1] = info
+end)
+local sm = exports.spawnmanager
+local pedModel = GetEntityModel(PlayerPedId())
+
+local directOk = sm:spawnPlayer({ x = 11, y = 22, z = 33, heading = 44, skipFade = true }, function(info)
+    trace[#trace + 1] = 'cb1'
+    infos[#infos + 1] = info
+end)
+local signedId = sm:addSpawnPoint({ x = 12, y = 23, z = 34, heading = 45, model = -123456 })
+local unsignedId = sm:addSpawnPoint({ x = 13, y = 24, z = 35, heading = 46, model = 4294967295 })
+local loaded = sm:loadSpawns('{"spawns":[{"x":101,"y":102,"z":103,"heading":10},{"x":201,"y":202,"z":203,"heading":20}]}')
+
+SetTimeout(30, function()
+    local directInfo = infos[1] or {}
+    local signedOk = sm:spawnPlayer(signedId, function(info)
+        trace[#trace + 1] = 'cb2'
+        infos[#infos + 1] = info
+    end)
+    local unsignedOk = sm:spawnPlayer(unsignedId)
+    local batch1Ok = sm:spawnPlayer(3.0)
+    local batch2Ok = sm:spawnPlayer(4)
+    SetTimeout(30, function()
+        local signedInfo = infos[3] or {}
+        local unsignedInfo = infos[5] or {}
+        local batch1Info = infos[6] or {}
+        local batch2Info = infos[7] or {}
+        TriggerServerEvent('spawn:report', ('%s|%s|%s|%s|%s|%s|%d|%s|%s|%s|%d|%s|%s|%d|%.0f|%.0f|%s|%s'):format(
+            tostring(directOk),
+            tostring(directInfo.idx == nil),
+            tostring(directInfo.skipFade),
+            tostring(directInfo.model == pedModel),
+            table.concat(trace, ','),
+            tostring(loaded),
+            signedId,
+            tostring(signedOk),
+            tostring(math.type(signedInfo.model) == 'integer' and signedInfo.model == -123456),
+            tostring(unsignedOk),
+            unsignedInfo.model or 0,
+            tostring(math.type(unsignedInfo.model) == 'integer'),
+            tostring(batch1Ok and batch2Ok),
+            batch1Info.idx or -1,
+            batch1Info.x or -1,
+            batch2Info.x or -1,
+            tostring(math.type(batch1Info.idx) == 'integer'),
+            tostring(sm:removeSpawnPoint(3.0) and not sm:removeSpawnPoint(3))))
+    end)
+end)
+"#;
+    let h = SpawnHarness::new(false, caller);
+    let report = h.wait_report_prefix("");
+    assert_eq!(
+        report,
+        "true|true|true|true|event,cb1,event,cb2,event,event,event|true|1|true|true|true|-1|true|true|3|101|201|true|true"
+    );
+    let info = h.rt.entity(h.ped).expect("ped mirrored");
+    assert_eq!(info.position, [201.0, 202.0, 203.0]);
+    assert_eq!(info.rotation[2], 20.0);
+    h.shutdown();
+}
+
+#[test]
+fn spawnmanager_force_respawn_without_callback_and_epoch_cancellation() {
+    let caller = r"
+local events = {}
+AddEventHandler('playerSpawned', function(info)
+    events[#events + 1] = info
+end)
+local sm = exports.spawnmanager
+sm:addSpawnPoint({ x = 77, y = 88, z = 99, heading = 180 })
+sm:setAutoSpawn(true)
+sm:forceRespawn()
+SetTimeout(30, function()
+    local afterFirst = #events
+    sm:forceRespawn()
+    sm:setAutoSpawn(false)
+    sm:setAutoSpawn(true)
+    SetTimeout(30, function()
+        local afterCancelled = #events
+        sm:forceRespawn()
+        SetTimeout(30, function()
+            local e = events[1] or {}
+            TriggerServerEvent('spawn:report', ('%d|%d|%d|%.0f|%.0f|%.0f|%.0f'):format(
+                afterFirst, afterCancelled, #events,
+                e.x or -1, e.y or -1, e.z or -1, e.heading or -1))
+        end)
+    end)
+end)
+";
+    let h = SpawnHarness::new(false, caller);
+    let report = h.wait_report_prefix("");
+    assert_eq!(report, "1|1|2|77|88|99|180");
+    let info = h.rt.entity(h.ped).expect("ped mirrored");
+    assert_eq!(info.position, [77.0, 88.0, 99.0]);
+    assert_eq!(info.rotation[2], 180.0);
+    h.shutdown();
+}
+
+#[test]
+fn spawnmanager_attached_ped_blocks_spawn_until_detached() {
+    let caller = r"
+local events, cbs = 0, 0
+local lastInfo
+AddEventHandler('playerSpawned', function(info)
+    events = events + 1
+    lastInfo = info
+end)
+RegisterNetEvent('test:spawnWhenAttached', function()
+    local sm = exports.spawnmanager
+    local attached = IsEntityAttached(PlayerPedId())
+    local res = sm:spawnPlayer({ x = 61, y = 72, z = 83, heading = 95 }, function()
+        cbs = cbs + 1
+    end)
+    SetTimeout(30, function()
+        TriggerServerEvent('spawn:report', ('phase1:%s|%s|%d|%d'):format(
+            tostring(attached), tostring(res), events, cbs))
+    end)
+end)
+RegisterNetEvent('test:spawnWhenDetached', function()
+    local sm = exports.spawnmanager
+    local attached = IsEntityAttached(PlayerPedId())
+    local res = sm:spawnPlayer({ x = 61, y = 72, z = 83, heading = 95 }, function(info)
+        cbs = cbs + 1
+        lastInfo = info
+    end)
+    SetTimeout(30, function()
+        local info = lastInfo or {}
+        TriggerServerEvent('spawn:report', ('phase2:%s|%s|%d|%d|%.0f|%.0f|%.0f|%.0f'):format(
+            tostring(attached), tostring(res), events, cbs,
+            info.x or -1, info.y or -1, info.z or -1, info.heading or -1))
+    end)
+end)
+";
+    let h = SpawnHarness::new(false, caller);
+    h.pump_for(Duration::from_millis(30));
+    let before = h.rt.entity(h.ped).expect("ped mirrored").position;
+
+    h.lb.fx
+        .manager()
+        .call_export(
+            "simtest",
+            "attachPed",
+            &[Value::Int(1), Value::Bool(true)],
+            None,
+        )
+        .expect("attach ped");
+    h.pump_for(Duration::from_millis(40));
+    h.lb.fx
+        .manager()
+        .trigger_client_event("test:spawnWhenAttached", ClientTarget::Player(1), &[])
+        .expect("trigger attached spawn");
+    let phase1 = h.wait_report_prefix("phase1:");
+    assert_eq!(phase1, "phase1:true|false|0|0");
+    assert_eq!(h.rt.entity(h.ped).expect("ped mirrored").position, before);
+
+    h.lb.fx
+        .manager()
+        .call_export(
+            "simtest",
+            "attachPed",
+            &[Value::Int(1), Value::Bool(false)],
+            None,
+        )
+        .expect("detach ped");
+    h.pump_for(Duration::from_millis(40));
+    h.lb.fx
+        .manager()
+        .trigger_client_event("test:spawnWhenDetached", ClientTarget::Player(1), &[])
+        .expect("trigger detached spawn");
+    let phase2 = h.wait_report_prefix("phase2:");
+    assert_eq!(phase2, "phase2:false|true|1|1|61|72|83|95");
+    let info = h.rt.entity(h.ped).expect("ped mirrored");
+    assert_eq!(info.position, [61.0, 72.0, 83.0]);
+    assert_eq!(info.rotation[2], 95.0);
+    h.shutdown();
 }

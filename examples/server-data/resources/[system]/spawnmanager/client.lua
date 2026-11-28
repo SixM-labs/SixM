@@ -3,6 +3,7 @@
 local spawnPoints = {}
 local nextSpawnId = 1
 local autoSpawnEnabled = false
+local autoSpawnEpoch = 0
 local initialAttempted = false
 local autoSpawnCallback
 local retryTimer
@@ -35,8 +36,13 @@ local function normalizeSpawn(value, name)
             spawn.model = GetHashKey(value.model)
         elseif type(value.model) == 'number' and value.model % 1 == 0
             and value.model >= -2147483648 and value.model <= 4294967295 then
-            spawn.model = value.model
-            if spawn.model > 2147483647 then spawn.model = spawn.model - 4294967296 end
+            local hash = value.model
+            if hash > 2147483647 then hash = hash - 4294967296 end
+            local intHash = math.tointeger(hash)
+            if intHash == nil then
+                fail(name, 'model must be a nonempty name or 32-bit hash')
+            end
+            spawn.model = intHash
         else
             fail(name, 'model must be a nonempty name or 32-bit hash')
         end
@@ -139,11 +145,12 @@ local function addSpawnPoint(input)
 end
 
 local function removeSpawnPoint(id)
-    if type(id) ~= 'number' or id % 1 ~= 0 or id <= 0 then
+    local intId = type(id) == 'number' and math.tointeger(id) or nil
+    if intId == nil or intId <= 0 then
         fail('removeSpawnPoint', 'id must be a positive integer')
     end
-    if spawnPoints[id] == nil then return false end
-    spawnPoints[id] = nil
+    if spawnPoints[intId] == nil then return false end
+    spawnPoints[intId] = nil
     return true
 end
 
@@ -180,6 +187,9 @@ local function loadSpawns(text)
 end
 
 spawnPlayer = function(spawnIdOrObject, callback)
+    if callback ~= nil and not isCallable(callback) then
+        fail('spawnPlayer', 'callback must be a function')
+    end
     local point, id
     if spawnIdOrObject == nil then
         local ids = {}
@@ -188,17 +198,15 @@ spawnPlayer = function(spawnIdOrObject, callback)
         id = ids[math.random(#ids)]
         point = spawnPoints[id]
     elseif type(spawnIdOrObject) == 'number' then
-        if spawnIdOrObject % 1 ~= 0 or spawnIdOrObject <= 0 then
+        local intId = math.tointeger(spawnIdOrObject)
+        if intId == nil or intId <= 0 then
             fail('spawnPlayer', 'spawn id must be a positive integer')
         end
-        id = spawnIdOrObject
+        id = intId
         point = spawnPoints[id]
         if point == nil then return false end
     else
         point = normalizeSpawn(spawnIdOrObject, 'spawnPlayer')
-    end
-    if callback ~= nil and not isCallable(callback) then
-        fail('spawnPlayer', 'callback must be a function')
     end
     local ped = PlayerPedId()
     if ped == 0 or not DoesEntityExist(ped)
@@ -228,6 +236,7 @@ local function setAutoSpawn(enabled)
     if type(enabled) ~= 'boolean' then fail('setAutoSpawn', 'enabled must be a boolean') end
     autoSpawnEnabled = enabled
     if not enabled then
+        autoSpawnEpoch = autoSpawnEpoch + 1
         cancelRetry()
         if initialTimer ~= nil then
             cancelTimer(initialTimer)
@@ -246,9 +255,15 @@ end
 
 local function forceRespawn()
     if not autoSpawnEnabled then return end
-    if initialTimer ~= nil or retryTimer ~= nil then return end
+    cancelRetry()
+    if initialTimer ~= nil then
+        cancelTimer(initialTimer)
+        initialTimer = nil
+    end
+    initialAttempted = true
+    local epoch = autoSpawnEpoch
     scheduleTimer(0, function()
-        if not autoSpawnEnabled then return end
+        if not autoSpawnEnabled or epoch ~= autoSpawnEpoch then return end
         if autoSpawnCallback ~= nil then autoSpawnCallback()
         else spawnPlayer() end
     end)
