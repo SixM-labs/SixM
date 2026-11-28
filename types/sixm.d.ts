@@ -131,14 +131,70 @@ interface Deferrals {
  */
 declare var source: string | number;
 
+interface SixMChatMessage {
+    args: (string | number | boolean)[];
+    color?: [red: number, green: number, blue: number];
+    multiline?: boolean;
+    template?: string;
+    templateId?: string;
+}
+
+interface SixMChatParameter {
+    name: string;
+    help?: string;
+}
+
+interface SixMChatSuggestion {
+    name: `/${string}`;
+    help?: string;
+    params?: SixMChatParameter[];
+}
+
+interface SixMChatClientEvents {
+    "chat:addMessage": [message: SixMChatMessage];
+    "chat:addTemplate": [templateId: string, html: string];
+    "chat:addSuggestion": [name: `/${string}`, help?: string, params?: SixMChatParameter[]];
+    "chat:addSuggestions": [suggestions: SixMChatSuggestion[]];
+    "chat:removeSuggestion": [name: `/${string}`];
+    "chat:clear": [];
+}
+
+interface SixMChatServerNetworkEvents {
+    "_chat:messageEntered": [text: string];
+    "chat:init": [];
+}
+
+interface SixMChatNetworkEvents extends SixMChatClientEvents, SixMChatServerNetworkEvents {}
+
+/** Events exposed by the stock resources while they are running. */
+interface SixMStockEvents extends SixMChatNetworkEvents {
+    chatMessage: [playerId: number, author: string, text: string];
+    playerSpawned: [spawnInfo: SpawnInfo];
+    onMapStart: [resourceName: string];
+    onGameTypeStart: [resourceName: string];
+    onClientMapStart: [resourceName: string];
+    onClientMapStop: [resourceName: string];
+    onClientGameTypeStart: [resourceName: string];
+    onClientGameTypeStop: [resourceName: string];
+    getMapDirectives: [add: (name: string, handler: (data: any, mapResourceName: string) => void) => void];
+}
+
 /**
  * Registers a local event handler for `name` and returns its handle.
  */
+declare function on<Name extends keyof SixMStockEvents>(
+    name: Name,
+    fn: (...args: SixMStockEvents[Name]) => void | Promise<void>
+): EventHandlerHandle;
 declare function on(name: string, fn: (...args: any[]) => void | Promise<void>): EventHandlerHandle;
 
 /**
  * Alias for `on`. Registers a local event handler for `name`.
  */
+declare function AddEventHandler<Name extends keyof SixMStockEvents>(
+    name: Name,
+    fn: (...args: SixMStockEvents[Name]) => void | Promise<void>
+): EventHandlerHandle;
 declare function AddEventHandler(
     name: string,
     fn: (...args: any[]) => void | Promise<void>
@@ -191,6 +247,10 @@ declare function addRawEventHandler(
 /**
  * Marks `name` as a network-safe event and attaches `fn`.
  */
+declare function onNet<Name extends keyof SixMChatNetworkEvents>(
+    name: Name,
+    fn: (...args: SixMChatNetworkEvents[Name]) => void | Promise<void>
+): EventHandlerHandle;
 declare function onNet(
     name: string,
     fn: (...args: any[]) => void | Promise<void>
@@ -199,6 +259,10 @@ declare function onNet(
 /**
  * Allows `name` to arrive over the network, optionally registering `fn`.
  */
+declare function RegisterNetEvent<Name extends keyof SixMChatNetworkEvents>(
+    name: Name,
+    fn?: (...args: SixMChatNetworkEvents[Name]) => void | Promise<void>
+): EventHandlerHandle | undefined;
 declare function RegisterNetEvent(
     name: string,
     fn?: (...args: any[]) => void | Promise<void>
@@ -215,11 +279,13 @@ declare function RegisterServerEvent(
 /**
  * Synchronously triggers all local handlers of `name` on this host.
  */
+declare function emit<Name extends keyof SixMStockEvents>(name: Name, ...args: SixMStockEvents[Name]): void;
 declare function emit(name: string, ...args: any[]): void;
 
 /**
  * Alias for `emit`. Synchronously triggers all local handlers of `name`.
  */
+declare function TriggerEvent<Name extends keyof SixMStockEvents>(name: Name, ...args: SixMStockEvents[Name]): void;
 declare function TriggerEvent(name: string, ...args: any[]): void;
 
 /**
@@ -233,11 +299,20 @@ declare function emitNet(name: string, ...args: any[]): void;
 /**
  * Sends a network event to `target` player id or `-1` for all players. (Server only)
  */
+declare function TriggerClientEvent<Name extends keyof SixMChatClientEvents>(
+    name: Name,
+    target: number | string,
+    ...args: SixMChatClientEvents[Name]
+): void;
 declare function TriggerClientEvent(name: string, target: number | string, ...args: any[]): void;
 
 /**
  * Sends a network event to the server. (Client only)
  */
+declare function TriggerServerEvent<Name extends keyof SixMChatServerNetworkEvents>(
+    name: Name,
+    ...args: SixMChatServerNetworkEvents[Name]
+): void;
 declare function TriggerServerEvent(name: string, ...args: any[]): void;
 
 /**
@@ -278,9 +353,53 @@ interface ExportsProxy {
     (name: string, fn: (...args: any[]) => any): void;
     /** Accesses synchronous exports exposed by `resource`. */
     [resource: string]: Record<string, (...args: any[]) => any>;
+    /** Client exports provided by the stock [system]/spawnmanager resource. */
+    spawnmanager: SpawnManagerExports;
+    /** Server exports provided by the stock [system]/mapmanager resource. */
+    mapmanager: MapManagerExports;
 }
 
 declare var exports: ExportsProxy;
+
+interface MapManagerMapInfo {
+    name: string;
+    gameTypes?: string[];
+}
+
+type MapManagerExports = {
+    getCurrentGameType(): string | null;
+    getCurrentMap(): string | null;
+    changeGameType(gameType: string): boolean;
+    changeMap(map: string): boolean;
+    doesMapSupportGameType(gameType: string, map: string): boolean;
+    getMaps(): Record<string, MapManagerMapInfo>;
+    roundEnded(): boolean;
+};
+
+interface SpawnPoint {
+    x: number;
+    y: number;
+    z: number;
+    heading: number;
+    model?: string | number;
+    skipFade?: boolean;
+}
+
+interface SpawnInfo extends SpawnPoint {
+    model: number;
+    skipFade: boolean;
+    idx?: number;
+}
+
+type SpawnManagerExports = {
+    addSpawnPoint(spawn: SpawnPoint): number;
+    removeSpawnPoint(id: number): boolean;
+    loadSpawns(json: string): boolean;
+    spawnPlayer(spawn?: number | SpawnPoint, callback?: (info: SpawnInfo) => void): boolean;
+    setAutoSpawn(enabled: boolean): void;
+    setAutoSpawnCallback(callback: () => void): void;
+    forceRespawn(): void;
+};
 
 // =============================================================================
 // State bags

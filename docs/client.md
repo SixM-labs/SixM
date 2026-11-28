@@ -80,8 +80,12 @@ not know, so the client does not report an unknown name itself.
 The client keeps `help`, `quit`, `set`, `sets` and `setr` for itself, so the
 server never sees those lines.
 
-On the example server, type `say Hello` to send a message to the connected
-clients. The `chat` resource displays the sender and message in the client log.
+When the `[system]/chat` resource is running, type `say Hello` to send a
+message. The headless client sends only the text as `_chat:messageEntered`;
+the server derives the sender from the authenticated connection, checks
+`command.say`, and broadcasts `chat:addMessage`. The client prints the sender
+and message to its log. Without the chat resource, `say` is not claimed locally
+and follows the normal unknown-command path to the server.
 
 ### Convars
 

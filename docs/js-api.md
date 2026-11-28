@@ -89,6 +89,28 @@ The host events (`playerJoining`, `playerDropped`, `onPlayerBucketChange`,
 `onEntityBucketChange`, `onResourceListRefresh` and the others) take the same
 names and arguments as in the lifecycle table of [`lua-api.md`](lua-api.md#lifecycle-events-fired-by-the-host).
 
+### Events provided by the `chat` resource
+
+The example `[system]/chat` resource provides the same event contract to Lua
+and JavaScript resources while it is running. Use `emit` for local
+`chatMessage`/chat display events, `emitNet` (`TriggerClientEvent`) to send a
+client chat event, and `emitNet` (`TriggerServerEvent`) for `_chat:messageEntered`
+or `chat:init`. The server-local `chatMessage(playerId, author, text)` hook is
+cancelable; synchronous `CancelEvent()` prevents the default broadcast. Its
+`source` is empty and the sender ID is the first explicit argument. The server
+derives player identity from the connection and checks `command.say` for client
+message submissions.
+
+Client events are `chat:addMessage(message)`, `chat:addTemplate(templateID,
+htmlString)`, `chat:addSuggestion(commandName, commandDescription,
+commandParameters)`, `chat:addSuggestions(suggestions)`,
+`chat:removeSuggestion(commandName)`, and `chat:clear()`. The default message
+is `{ args: [author, text] }`; headless output prints scalar args as `author:
+text`, strips tags from plain-text template rendering, ignores visual color and
+multiline styling, and never executes HTML. Suggestions are stored and can be
+listed with the client `chat_suggestions` command. See the complete payload
+table in [`lua-api.md`](lua-api.md#events-provided-by-the-chat-resource).
+
 ## Exports
 
 ```js
@@ -107,6 +129,64 @@ const sum = exports.myresource.add(2, 3);
 - Multiple return values from Lua arrive in JS as the first value (or spreadable
   through JS callback arguments); functions passed as callbacks become
   cross-runtime references released when GC collects them.
+
+## Stock resources
+
+### `spawnmanager`
+
+The example `[system]/spawnmanager` resource exposes these client exports to
+Lua and JavaScript resources:
+
+| Export | Arguments | Result |
+|---|---|---|
+| `addSpawnPoint` | `{ x, y, z, heading, model?, skipFade? }` | Positive integer id. Coordinates and heading must be finite. `model` is a nonempty name or 32-bit hash; `skipFade` defaults to `false`. |
+| `removeSpawnPoint` | `id` | `true` when removed, otherwise `false` for an unknown id. |
+| `loadSpawns` | JSON string containing `{ "spawns": [ ... ] }` | `true`; malformed input raises an error and adds no points. New ids are assigned in array order. |
+| `spawnPlayer` | `[idOrSpawnObject [, callback]]` | `true` on success; `false` for an unknown id, no registered point, or unavailable ped. With no argument it chooses a registered point randomly. The callback receives the normalized `spawnInfo`. |
+| `setAutoSpawn` | `enabled` boolean | No return. Enables or disables the single initial spawn attempt. |
+| `setAutoSpawnCallback` | `callback` function | No return. Sets the callback used for the initial attempt and `forceRespawn`. |
+| `forceRespawn` | none | No specified return. When auto-spawn is enabled, invokes the configured callback or attempts `spawnPlayer()`. |
+
+Successful spawns emit local `playerSpawned(spawnInfo)` once before invoking
+the optional callback, both on the next client tick after movement. The object
+contains `x`, `y`, `z`, `heading`,
+`skipFade`, and `model` (the requested model hash, or the ped's current model
+hash); it also contains `idx` for a registered spawn point. A direct spawn
+object has no `idx`. Enabling auto-spawn provides one initial attempt after a
+ped and a point or callback are available. `forceRespawn` is the repeatable
+entry point. There is no death-triggered respawn; model loading, fade, and
+death integration require a game adapter.
+
+`loadSpawns` validates JSON shape with a private parser before converting the
+spawn array to Lua. It rejects object-shaped `spawns`, null entries (including
+a trailing null), and non-object spawn entries before the registry is changed.
+
+### `mapmanager`
+
+The server-side exports are available through `exports.mapmanager`:
+`getCurrentGameType()` and `getCurrentMap()` return canonical resource names or
+`null`; `changeGameType(gameType)` and `changeMap(map)` switch the active
+gametype or map and return booleans; `doesMapSupportGameType(gameType, map)`
+returns a boolean; `getMaps()` returns an object keyed by canonical map name
+with `{ name, gameTypes? }` values; and `roundEnded()` restarts the current
+gametype in place (leaving an independent map active, while dependent maps
+follow resource lifecycle) and returns a boolean. Resource lifecycle operations
+require the mapmanager resource's `command.start`, `command.stop`, and
+`command.restart` ACE grants. Server scripts can listen for local
+`onMapStart(resourceName)` and `onGameTypeStart(resourceName)` events. See
+[Lua API: mapmanager](lua-api.md#stock-resource-mapmanager) for selection,
+rollback, and compatibility rules.
+
+Client scripts can listen for `onClientMapStart(resourceName)`,
+`onClientMapStop(resourceName)`, `onClientGameTypeStart(resourceName)`, and
+`onClientGameTypeStop(resourceName)`. Both Lua and JavaScript client resources
+can register directive handlers through `getMapDirectives(add)`; handlers run
+after the registration event completes and receive `(data, mapResourceName)`
+from the map's JSON directive files (`{ "directives": [{ "name", "data" }] }`,
+declared via `map` and `files` in `fxmanifest.lua`; `null` or missing `data`
+arrives as `null` in JS / `nil` in Lua). See
+[manifest.md](manifest.md#mapmanager-metadata-and-json-directives) for the
+directive schema.
 
 ## State bags
 

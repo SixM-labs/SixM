@@ -132,6 +132,8 @@ Server (`EventSource::Local` unless noted):
 | `playerDropped` | `reason`, `resourceName`, `clientDropReason` | `source` is the player's id. The player is still listed while the handlers run. `reason` is the text shown to the player. `resourceName` is the resource that called `DropPlayer`, or `""` when none did. `clientDropReason` is `0` when the client closed or lost the connection, `1` for a `DropPlayer` call from a script, and `2` for a kick the server decides itself (for example an entity id that was not leased). These numbers are SixM's own; FiveM's values are not documented here. |
 | `onPlayerBucketChange` | `player`, `bucket`, `oldBucket` | `player` is the player id as a string, like `GetPlayers`. Fired only when `SetPlayerRoutingBucket` really changes the bucket (a call with the same bucket, or for an unknown player, fires nothing), after the move is complete. |
 | `onEntityBucketChange` | `entity`, `bucket`, `oldBucket` | Fired only when `SetEntityRoutingBucket` really changes the bucket, after the move is complete. It fires for every entity kind. A player's ped moves with the player, so a change of the player fires this event for the ped too, after `onPlayerBucketChange`, when the ped's own bucket was different. A player without a ped fires no entity event. |
+| `onMapStart` | `resourceName` | Server local event fired by the stock `mapmanager` after a map resource starts. |
+| `onGameTypeStart` | `resourceName` | Server local event fired by the stock `mapmanager` after a gametype resource starts. |
 
 Client (`EventSource::Local`):
 
@@ -141,8 +143,34 @@ Client (`EventSource::Local`):
 | `onResourceStart` | `name` | Same time as `onClientResourceStart`. |
 | `onClientResourceStop` | `name` | Before the resource stops. |
 | `onResourceStop` | `name` | Same time as `onClientResourceStop`. |
+| `onClientMapStart` | `resourceName` | Stock `mapmanager`: a map resource has started on this client; its JSON directives are processed immediately afterward. |
+| `onClientMapStop` | `resourceName` | Stock `mapmanager`: a map resource is stopping on this client. |
+| `onClientGameTypeStart` | `resourceName` | Stock `mapmanager`: a gametype resource has started on this client. |
+| `onClientGameTypeStop` | `resourceName` | Stock `mapmanager`: a gametype resource is stopping on this client. |
 
 The client has no `onResourceStarting`. Clients do not cancel starts.
+
+### Events provided by the `chat` resource
+
+These resource events are available only while the example `[system]/chat`
+resource is running. The event names follow the stock chat contract; SixM's
+headless client renders them as console text and has no chat UI.
+
+| Event | Side and arguments | Behavior |
+|---|---|---|
+| `_chat:messageEntered` | Client to server: `text` | The headless `say` command sends only the text. The server takes the player ID from the connection's `source`, checks `command.say`, and derives the author with `GetPlayerName`; client-supplied identity fields are ignored. |
+| `chat:init` | Client to server: none | Requests command suggestions for this client. The server responds with `chat:addSuggestions` built from `GetRegisteredCommands()`. |
+| `chatMessage` | Server local: `playerId`, `author`, `text` | Cancelable legacy message hook. Here `source` is `""`; the first explicit argument is the sender ID (`0` for console). If any synchronous handler calls `CancelEvent()`, the chat resource does not broadcast the message. |
+| `chat:addMessage` | Client: `message` object | The default broadcast is `{ args = { author, text } }`. `args` is required; optional `color`, `multiline`, `template` and `templateId` are accepted. The headless client prints scalar args as `author: text`; it strips HTML tags and substitutes `{0}`, `{1}`, … when a template is used. Color and multiline formatting are ignored, and template HTML is never executed. |
+| `chat:addTemplate` | Client: `templateID`, `htmlString` | Stores a template for later plain-text rendering. Markup is stripped; no HTML runs. |
+| `chat:addSuggestion` | Client: `commandName`, `commandDescription`, `commandParameters` | Stores or replaces one slash-prefixed command suggestion. |
+| `chat:addSuggestions` | Client: `suggestions` array | Stores or replaces the listed suggestions. The automatic response contains `{ name = '/command', help = '', params = {} }` for each server command. Use the headless `chat_suggestions` command to list them. |
+| `chat:removeSuggestion` | Client: `commandName` | Removes that suggestion. |
+| `chat:clear` | Client: no arguments | Prints a marker; the append-only console log cannot erase prior output. |
+
+Client chat events are network-safe so the server can send them with
+`TriggerClientEvent`; they can also be triggered locally. Malformed display,
+template or suggestion payloads are warned about and ignored.
 
 ### Deferrals
 
@@ -217,6 +245,37 @@ The rules that follow from these:
   exists.
 - Client exports are sent to clients as declared in the manifest. A client can
   call the exports of another client resource in the same way.
+
+## Stock client resources
+
+### `spawnmanager`
+
+The example `[system]/spawnmanager` resource provides these client exports to
+Lua and JavaScript resources:
+
+| Export | Arguments | Result |
+|---|---|---|
+| `addSpawnPoint` | `{ x, y, z, heading, model?, skipFade? }` | Positive integer id. Coordinates and heading must be finite. `model` is a nonempty name or 32-bit hash; `skipFade` defaults to `false`. |
+| `removeSpawnPoint` | `id` | `true` when removed, otherwise `false` for an unknown id. |
+| `loadSpawns` | JSON string containing `{ "spawns": [ ... ] }` | `true`; malformed input raises an error and adds no points. New ids are assigned in array order. |
+| `spawnPlayer` | `[idOrSpawnObject [, callback]]` | `true` on success; `false` for an unknown id, no registered point, or unavailable ped. With no argument it chooses a registered point randomly. The callback receives the normalized `spawnInfo`. |
+| `setAutoSpawn` | `enabled` boolean | No return. Enables or disables the single initial spawn attempt. |
+| `setAutoSpawnCallback` | `callback` function | No return. Sets the callback used for the initial attempt and `forceRespawn`. |
+| `forceRespawn` | none | No specified return. When auto-spawn is enabled, invokes the configured callback or attempts `spawnPlayer()`. |
+
+Successful spawns emit local `playerSpawned(spawnInfo)` once before invoking
+the optional callback, both on the next client tick after movement. The object
+contains `x`, `y`, `z`, `heading`,
+`skipFade`, and `model` (the requested model hash, or the ped's current model
+hash); it also contains `idx` for a registered spawn point. A direct spawn
+object has no `idx`. Enabling auto-spawn provides one initial attempt after a
+ped and a point or callback are available. `forceRespawn` is the repeatable
+entry point. There is no death-triggered respawn; model loading, fade, and
+death integration require a game adapter.
+
+`loadSpawns` validates JSON shape with a private parser before converting the
+spawn array to Lua. It rejects object-shaped `spawns`, null entries (including
+a trailing null), and non-object spawn entries before the registry is changed.
 
 ## Resources and files
 
@@ -303,6 +362,39 @@ library can tell who called it. It is `nil` when no resource caused it.
   Values come in declaration order. On the server, any installed resource can
   be read. On the client, only running resources are known, and the metadata
   is what the server sent with them.
+
+## Stock resource: `mapmanager`
+
+`mapmanager` is a server and client resource shipped under `[system]`. Its server exports are
+called as `exports.mapmanager:exportName(...)` in Lua:
+
+| Export | Side | Signature and result |
+|---|---|---|
+| `getCurrentGameType` | server | `getCurrentGameType()`. Canonical resource name, or `nil`. |
+| `getCurrentMap` | server | `getCurrentMap()`. Canonical resource name, or `nil`. |
+| `changeGameType` | server | `changeGameType(gameType)`. Starts a known gametype; returns a boolean. Stops the previous gametype and any current map that explicitly excludes the new gametype after starting it; repeated calls for the already-active gametype are idempotent and return `true`. |
+| `changeMap` | server | `changeMap(map)`. Starts a known map; returns false without side effects if the current gametype explicitly excludes it. Stops the previous map after starting the new one; repeated calls for the already-active map are idempotent and return `true`. |
+| `doesMapSupportGameType` | server | `doesMapSupportGameType(gameType, map)`. Boolean; a map with no `gameTypes` metadata supports any known gametype. |
+| `getMaps` | server | `getMaps()`. Map keyed by canonical resource name; values contain `name` and optional `gameTypes`. |
+| `roundEnded` | server | `roundEnded()`. Restarts the current gametype and returns whether the restart succeeded. A dependent map follows normal resource lifecycle; an independent map stays running. |
+
+`changeGameType`, `changeMap` and `roundEnded` use the synchronous resource
+lifecycle natives. Grant the mapmanager resource `command.start`,
+`command.stop`, and `command.restart` in `server.cfg`; denied operations return
+false. Changes are rolled back and current state is reconciled if a lifecycle
+step fails. `SetGameType` and `SetMapName` publish the display names to server
+info after a committed change.
+
+Client map directives are JSON data named by the map resource's `map` metadata
+and listed in `files`. At each map start `mapmanager` fires
+`getMapDirectives(add)` before reading those files. Both Lua and JavaScript
+client resources can call `add(name, handler)` (JavaScript handlers are passed
+as SixM function references and invoked after `TriggerEvent('getMapDirectives',
+add)` returns); each directive calls matching handlers with
+`(data, mapResourceName)` (`null` or absent `data` arrives as `nil`).
+Registrations are temporary for that map start, so a provider started later
+takes effect on the next map start. Invalid files and handler errors are logged
+and skipped; this path never loads game assets or executes code.
 
 ## Key-value storage
 

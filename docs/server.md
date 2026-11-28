@@ -72,9 +72,21 @@ Example from `examples/server-data/server.cfg`:
 set sv_hostname "SixM Example Server"
 sixm_tickRate 20
 
+ensure sessionmanager
+ensure baseevents
+ensure spawnmanager
+ensure mapmanager
+ensure chat
+
 ensure greeter
 ensure hello
 ```
+
+Start map and gametype resources after `spawnmanager` and `mapmanager`.
+The example grants `command.start`, `command.stop`, and `command.restart`
+to `resource.mapmanager` for switching maps and gametypes and restarting a
+round. `command.say` allows players to submit chat messages to the `chat`
+resource.
 
 ## Console commands
 

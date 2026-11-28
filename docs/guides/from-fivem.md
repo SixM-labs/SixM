@@ -72,6 +72,25 @@ See [manifest.md](../manifest.md) for all manifest rules.
 - Callbacks can be passed across exports, and `GetInvokingResource()` tracks
   the caller across both `TriggerEvent` and `exports` calls.
 
+### Stock resource: `chat`
+
+SixM ships `[system]/chat` with the FiveM event contract (`chatMessage`,
+`chat:addMessage`, `chat:addTemplate`, `chat:addSuggestion`,
+`chat:addSuggestions`, `chat:removeSuggestion`, `chat:clear`, `chat:init`, and
+`_chat:messageEntered`). The server derives the author from the connection and
+enforces `command.say`, and registers automatic command suggestions from
+`GetRegisteredCommands`. On the headless client, `say` sends
+`_chat:messageEntered` and incoming messages are printed as plain text to the
+client log (there is no NUI browser).
+
+### `spawnmanager`
+
+SixM's stock `[system]/spawnmanager` resource moves the local player ped through
+the client entity transform API and emits `playerSpawned(spawnInfo)`. This
+transform is simulated by the headless client. Model loading, fade effects,
+and death-triggered respawning require a game adapter; use `forceRespawn` for
+an explicit repeatable attempt.
+
 ### State bags
 
 - `GlobalState`, `Player(id).state`, `LocalPlayer.state`, and `Entity(id).state`
@@ -85,6 +104,28 @@ See [manifest.md](../manifest.md) for all manifest rules.
   `player:<id>` and `entity:<id>` bag names.
 - Clients cannot write replicated state (`bag:set(k, v, false)` keeps local
   client state only).
+
+### Stock resource: mapmanager
+
+SixM ships a clean-room `mapmanager` for resources marked with scalar
+`resource_type 'map'` or `resource_type 'gametype'`. `name` supplies the
+server-info display name; repeated `gameTypes` values on a map restrict which
+gametypes it supports. The resource exposes the familiar map/gametype exports
+and publishes `SetMapName` / `SetGameType` after a successful change. Resource
+start/stop calls are ACE-gated: grant `command.start`, `command.stop`, and
+`command.restart` to `resource.mapmanager` in `server.cfg`.
+
+Map resources may list JSON files with `map 'directives.json'` and
+`files { 'directives.json' }`. Client resources register directive
+handlers through `getMapDirectives(add)`; registration is temporary for that
+map start. This headless implementation does not load game map assets or
+execute Lua from JSON. Both Lua and JavaScript client resources can register
+directive handlers through `getMapDirectives(add)` using SixM function
+references; handlers receive parsed JSON data (or `nil` for `null`/missing
+data) and the map resource name. `roundEnded()` restarts the current
+gametype; maps that depend on it follow normal resource lifecycle, while an
+independent map remains active. Start `spawnmanager`, then `mapmanager`, then
+map/gametype resources; `chat` can start alongside them.
 
 ### Script API compatibility additions
 
@@ -332,12 +373,17 @@ following FiveM areas are missing:
 - **Default resources:** The example server includes clean-room
   `[system]` resources `sessionmanager` (session ready handshake via
   `sixm_session:ready`, `Player(src).state.sessionActive`, `isPlayerActive`,
-  `getPlayerSession`, `isSessionReady`) and `baseevents` (registers the FiveM
+  `getPlayerSession`, `isSessionReady`), `baseevents` (registers the FiveM
   channels `baseevents:onPlayerDied`, `onPlayerKilled`, `onPlayerWasted`,
   `enteringVehicle`, `enteringAborted`, `enteredVehicle` and `leftVehicle` for
-  scripts and a future GameAdapter; nothing emits them yet), plus a console-only
-  `chat` resource with a `say` command. `spawnmanager` and
-  `mapmanager` are not bundled.
+  scripts and a future GameAdapter; nothing emits them yet), `spawnmanager`
+  (headless ped-transform spawning and `playerSpawned`), `mapmanager`
+  (canonical map/gametype lifecycle and JSON directive dispatch), and `chat`
+  with the `chatMessage`, `chat:addMessage`, suggestion and clear event
+  contract. The headless client sends `say` through `_chat:messageEntered`, and
+  the server derives the author from the connection and checks `command.say`.
+  Messages are printed to the client log; templates render as plain text and
+  there is no NUI.
 - **No public server browser UI:** `sets` / `SetConvarServerInfo` marks convars
   as server info (exposed on `/info.json`), and `sv_masterUrl` /
   `sv_heartbeatInterval` optionally send periodic JSON heartbeats to a

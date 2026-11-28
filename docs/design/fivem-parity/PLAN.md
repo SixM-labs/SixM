@@ -293,11 +293,11 @@ equivalent / no effect / absent".
 | A5 | done | Claude (Haiku impl, Sonnet review) | `git log --grep "^A5:"` |
 | A6 | done | Claude (Haiku impl), ChatGPT (Luna fixes, Terra review) | `git log --grep "^A6:"` |
 | A7 | done | ChatGPT (Luna impl, Terra review) | `git log --grep "^A7:"` |
-| A8 | done on merge | ChatGPT (Luna docs, Terra review) | `git log --grep "^A8:"` |
-| B1 | todo | | |
-| B2 | todo | | |
-| B3 | todo | | |
-| B4 | todo | | |
+| A8 | done | ChatGPT (Luna docs, Terra review) | `git log --grep "^A8:"` |
+| B1 | done | ChatGPT (Luna impl, Terra review) | `git log --grep "^B1:"` |
+| B2 | done | ChatGPT (Luna impl, Terra review), Gemini (Flash fixes, Pro review) | `git log --grep "^B2:"` |
+| B3 | done | ChatGPT (Luna impl, Terra review), Gemini (Flash fixes, Pro review) | `git log --grep "^B3:"` |
+| B4 | done | ChatGPT (Luna draft), Gemini (wrap-up) | `git log --grep "^B4:"` |
 | C1 | todo | | |
 | C2 | todo | | |
 | C3 | todo | | |
@@ -320,8 +320,6 @@ equivalent / no effect / absent".
 | G2 | todo | | |
 
 Status values: `todo`, `in progress`, `wip (see log)`, `done`, `blocked (see log)`.
-A8 stays `in progress` until the Phase A pull request merges after both CI
-jobs pass. The merge makes the status `done`.
 
 ## 5. Handoff log
 
@@ -360,3 +358,43 @@ what is next, anything surprising.
   notes` follows 50df184. Changelog and migration guide cover all Phase A
   checkpoints. Both CI matrix jobs are required for the Phase A merge.
   Next after merge: draft B1–B4 on `feat/fivem-parity-b` from updated `main`.
+- 2026-11-28, ChatGPT, `feat/fivem-parity-b`: Phase A merged as 2b337d2
+  ([PR #25](https://github.com/SixM-labs/SixM/pull/25)) after the Ubuntu and
+  Windows CI jobs passed. The Phase B branch starts at that merge commit.
+  Specs B1–B4 were drafted before implementation. The independent resource
+  implementations use separate worktrees. Next: verify and land B1–B3 in
+  checkpoint order, then complete B4.
+- 2026-11-28, ChatGPT, `feat/fivem-parity-b`: `B1: ship stock chat`
+  follows 2b337d2 and records the B1–B4 specs. The stock chat uses the
+  native event bridge, the existing chat ACE and the headless console. The
+  server resolves the author from the connection. The loopback tests cover
+  broadcast, cancellation, command suggestions and headless `say`.
+  B2 is next.
+- 2026-11-28, ChatGPT, `feat/fivem-parity-b`: B2 implementation follows
+  5921775. Lua and JavaScript exports, strict JSON spawn loading, and the
+  SimAdapter integration test are in place. Terra's review led to stricter
+  JSON validation and changes to initial and forced spawn scheduling. The
+  isolated SimAdapter test passes. Remaining B2 verification covers a
+  missing or frozen ped and cancellation of a pending retry on disable.
+- 2026-11-28, Gemini, `feat/fivem-parity-b`: `B2: ship stock spawnmanager`
+  follows dc7f6ed. Fixed `forceRespawn` superseding/epoch cancellation and Lua
+  integer normalization, updated `types/sixm.lua` and `from-fivem.md`, and
+  added `sim_adapter` tests for missing/frozen/attached peds, retry
+  cancellation, deferred ped/config, non-spawning callback latch, direct spawns,
+  and numeric 32-bit model hashes. Next: B3 (`mapmanager`).
+- 2026-11-28, Gemini, `feat/fivem-parity-b`: `B3: ship stock mapmanager`
+  follows 6d56dab. Imported the B3 worktree, added canonical-name checks
+  (rejecting `provide` aliases), fixed `onResourceStop` transaction handling,
+  hardened `isSafeRelativePath` and temporary `getMapDirectives` registry
+  cleanup, added `mapmanager` type stubs in `types/sixm.lua` and
+  `types/sixm.d.ts`, aligned docs/spec for Lua+JS directive handlers, and
+  expanded `mapmanager` tests to 16 passing cases. Next: B4 wrap-up.
+- 2026-11-28, Gemini, `feat/fivem-parity-b`: `B4: wrap up Phase B` follows
+  55e497c. Updated `examples/server-data/server.cfg` (dependency-safe start
+  order `spawnmanager`, `mapmanager`, `chat` plus scoped `resource.mapmanager`
+  ACE grants), audited `docs/server.md`, `docs/guides/from-fivem.md`,
+  `docs/lua-api.md`, `docs/js-api.md`, `docs/manifest.md`, and `CHANGELOG.md`,
+  ran full Linux checks (`check_types.py`, `cargo fmt`, `cargo clippy`,
+  `cargo test --workspace`), pushed `feat/fivem-parity-b`, and opened the Phase
+  B PR to `main`. Windows CI is verified via GitHub Actions on the PR before
+  merging. Next: Phase C (`feat/fivem-parity-c`) after PR merge.
