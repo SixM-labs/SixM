@@ -37,7 +37,8 @@ const HTTP_PORT_RETRIES: usize = 4;
 /// Minimum interval between anti-flood drop warnings per player.
 const FLOOD_WARN_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Per-player token bucket for rate-limiting incoming `NetEvent::Event` messages.
+/// Per-player token bucket for rate-limiting incoming `NetEvent::Event` and
+/// `NetEvent::SetStateBag` messages.
 #[derive(Debug)]
 struct EventBucket {
     tokens: f64,
@@ -134,7 +135,7 @@ pub(crate) struct Player {
     last_msg: Instant,
     /// Deterministic client tokens derived from the player's TLS certificate fingerprint.
     tokens: Vec<String>,
-    /// Token-bucket rate limiter for `NetEvent::Event`.
+    /// Token-bucket rate limiter shared by `NetEvent::Event` and `NetEvent::SetStateBag`.
     event_bucket: Option<EventBucket>,
 }
 
@@ -457,6 +458,15 @@ impl ResourceManager {
             NetEvent::RequestEntityControl { player, id } => {
                 self.touch_player(player);
                 self.client_request_control(player, id);
+            }
+            NetEvent::SetStateBag {
+                player,
+                bag,
+                key,
+                value,
+            } => {
+                self.touch_player(player);
+                self.client_state_set(player, &bag, &key, &value);
             }
             NetEvent::Disconnected { player, reason } => self.player_dropped(player, &reason),
             NetEvent::Abandoned { connection } => self.abandoned(connection),
@@ -801,14 +811,16 @@ impl ResourceManager {
         info!("{name} from {endpoint} refused: {reason}");
     }
 
-    /// Delivers a player's event to the handlers registered with `RegisterNetEvent`.
-    fn player_event(&self, player: u32, name: &str, args: &[Value]) {
+    /// Checks whether admitted `player` may send another event or client state
+    /// write under `sv_playerEventRateLimit`. Returns `false` if the player is
+    /// unknown/unadmitted or the per-player token bucket dropped the message.
+    pub(crate) fn admit_player_event(&self, player: u32, kind: &str) -> bool {
         let rate = self.convars.borrow().player_event_rate_limit();
         let (allowed, warn_dropped) = {
             let mut players = self.network.players.borrow_mut();
             let Some(found) = players.get_mut(player).filter(|found| found.admitted) else {
-                debug!(player, "event `{name}` from an unknown player ignored");
-                return;
+                debug!(player, "ignoring {kind} from an unknown player");
+                return false;
             };
             if rate == 0 {
                 found.event_bucket = None;
@@ -822,12 +834,14 @@ impl ResourceManager {
             }
         };
         if let Some(dropped) = warn_dropped {
-            warn!(
-                player,
-                dropped, "dropping flooded server events (limit {rate}/s)"
-            );
+            warn!(player, dropped, "dropping flooded {kind} (limit {rate}/s)");
         }
-        if !allowed {
+        allowed
+    }
+
+    /// Delivers a player's event to the handlers registered with `RegisterNetEvent`.
+    fn player_event(&self, player: u32, name: &str, args: &[Value]) {
+        if !self.admit_player_event(player, "server events") {
             return;
         }
         self.dispatch(name, EventSource::Net(player), args);

@@ -13,8 +13,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::{Fixture, manifest};
-use sixm_core::{Host, Value};
-use sixm_net::{ClientEvent, Identity, NetClient};
+use sixm_core::{EntityInfo, EntityKind, Host, ServerHost, Value};
+use sixm_net::{ClientEvent, Identity, NetClient, NetError};
 use sixm_server::Input;
 
 /// Longest a test waits for something the server should do.
@@ -26,9 +26,19 @@ const STEP: Duration = Duration::from_millis(5);
 /// handler sees.
 const STATE_SCRIPT: &str = r"
 LOG = {}
+REP_LOG = {}
+EVENT_HITS = 0
 
 AddStateBagChangeHandler('score', nil, function(bag, key, value)
     LOG[#LOG + 1] = bag .. '.' .. key .. '=' .. tostring(value)
+end)
+
+AddStateBagChangeHandler('replicated_probe', nil, function(bag, key, value, _, replicated)
+    REP_LOG[#REP_LOG + 1] = bag .. '.' .. key .. '=' .. tostring(value) .. ':' .. tostring(replicated)
+end)
+
+RegisterNetEvent('ping:hit', function()
+    EVENT_HITS = EVENT_HITS + 1
 end)
 
 function global_set(key, value, replicated)
@@ -57,6 +67,14 @@ end
 function log()
     return table.concat(LOG, ';')
 end
+
+function rep_log()
+    return table.concat(REP_LOG, ';')
+end
+
+function event_hits()
+    return EVENT_HITS
+end
 ";
 
 /// A server on loopback with the `state` resource running.
@@ -80,6 +98,8 @@ impl Harness {
                     "try_player",
                     "read_global",
                     "log",
+                    "rep_log",
+                    "event_hits",
                 ],
                 &[],
             ),
@@ -412,4 +432,223 @@ fn state_keys_lists_sorted_keys_and_none_for_unknown_bags() {
     );
     assert_eq!(manager.state_keys("player:99"), None);
     assert_eq!(manager.state_keys("entity:99"), None);
+}
+
+#[test]
+fn client_state_write_updates_own_player_and_owned_entity_without_echo() {
+    let h = Harness::new();
+    let alice = h.connect("Alice");
+    let bob = h.connect("Bob");
+
+    let owned_entity =
+        h.fx.manager()
+            .create_entity(EntityInfo {
+                kind: EntityKind::Vehicle,
+                model: 0x1234,
+                position: [0.0; 3],
+                rotation: [0.0; 3],
+                owner: Some(1),
+            })
+            .expect("entity created");
+    let entity_bag = format!("entity:{owned_entity}");
+
+    alice
+        .send_state("player:1", "score", &Value::Int(42))
+        .expect("own player state encodes");
+    alice
+        .send_state("player:1", "replicated_probe", &Value::from("ok"))
+        .expect("probe state encodes");
+    alice
+        .send_state(&entity_bag, "fuel", &Value::Float(0.75))
+        .expect("owned entity state encodes");
+
+    assert_eq!(
+        h.expect_states(
+            &bob,
+            &[
+                ("player:1", "score"),
+                ("player:1", "replicated_probe"),
+                (&entity_bag, "fuel"),
+            ]
+        ),
+        vec![Value::Int(42), Value::from("ok"), Value::Float(0.75)]
+    );
+    assert_eq!(
+        h.fx.manager().state_get("player:1", "score"),
+        Some(Value::Int(42))
+    );
+    assert_eq!(
+        h.fx.manager().state_get(&entity_bag, "fuel"),
+        Some(Value::Float(0.75))
+    );
+    assert_eq!(h.log(), "player:1.score=42");
+    assert_eq!(
+        h.value_of("rep_log", &[]),
+        Value::from("player:1.replicated_probe=ok:true")
+    );
+
+    // A marker written by the server arrives on Alice without any echo of her own writes.
+    h.call(
+        "global_set",
+        &[Value::from("marker"), Value::Int(1), Value::Bool(true)],
+    );
+    let seen = h.events_until_state(&alice, "global", "marker");
+    assert!(
+        !seen.iter().any(|event| matches!(
+            event,
+            ClientEvent::StateBag { bag, .. } if bag == "player:1" || bag == &entity_bag
+        )),
+        "originating client must not receive an echo: {seen:?}"
+    );
+
+    // Deleting a key with Nil is also relayed to other clients and updates the server store.
+    alice
+        .send_state("player:1", "score", &Value::Nil)
+        .expect("delete encodes");
+    assert_eq!(h.expect_state(&bob, "player:1", "score"), Value::Nil);
+    assert_eq!(h.fx.manager().state_get("player:1", "score"), None);
+}
+
+#[test]
+fn client_state_write_rejects_unowned_bags_without_kicking() {
+    let h = Harness::new();
+    let alice = h.connect("Alice");
+    let bob = h.connect("Bob");
+
+    let server_entity =
+        h.fx.manager()
+            .create_entity(EntityInfo {
+                kind: EntityKind::Object,
+                model: 0x1111,
+                position: [0.0; 3],
+                rotation: [0.0; 3],
+                owner: None,
+            })
+            .expect("server entity created");
+    let bob_entity =
+        h.fx.manager()
+            .create_entity(EntityInfo {
+                kind: EntityKind::Vehicle,
+                model: 0x2222,
+                position: [0.0; 3],
+                rotation: [0.0; 3],
+                owner: Some(2),
+            })
+            .expect("bob entity created");
+
+    let server_bag = format!("entity:{server_entity}");
+    let bob_bag = format!("entity:{bob_entity}");
+    for bag in ["global", "player:2", &server_bag, &bob_bag, "entity:99999"] {
+        alice
+            .send_state(bag, "tampered", &Value::Int(1))
+            .expect("client frame encodes");
+    }
+    // A valid write sent right after proves Alice stayed connected and all earlier writes arrived first.
+    alice
+        .send_state("player:1", "ok", &Value::Bool(true))
+        .expect("valid write encodes");
+
+    let seen = h.events_until_state(&bob, "player:1", "ok");
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, ClientEvent::StateBag { key, .. } if key == "tampered")),
+        "unowned writes must not relay: {seen:?}"
+    );
+    for bag in ["global", "player:2", &server_bag, &bob_bag, "entity:99999"] {
+        assert_eq!(h.fx.manager().state_get(bag, "tampered"), None);
+    }
+}
+
+#[test]
+fn client_state_strict_mode_rejects_writes_without_kicking() {
+    let h = Harness::new();
+    h.fx.server.execute("set sv_stateBagStrictMode true");
+    let alice = h.connect("Alice");
+    let bob = h.connect("Bob");
+
+    alice
+        .send_state("player:1", "blocked", &Value::Int(7))
+        .expect("frame encodes");
+    h.call(
+        "global_set",
+        &[Value::from("marker"), Value::Int(1), Value::Bool(true)],
+    );
+    let seen = h.events_until_state(&bob, "global", "marker");
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, ClientEvent::StateBag { key, .. } if key == "blocked")),
+        "strict mode must block client writes: {seen:?}"
+    );
+    assert_eq!(h.fx.manager().state_get("player:1", "blocked"), None);
+
+    // Turning strict mode off restores Alice's ability to write without reconnecting.
+    h.fx.server.execute("set sv_stateBagStrictMode false");
+    alice
+        .send_state("player:1", "allowed", &Value::Int(8))
+        .expect("frame encodes");
+    assert_eq!(h.expect_state(&bob, "player:1", "allowed"), Value::Int(8));
+}
+
+#[test]
+fn client_state_shares_player_event_rate_limit_and_enforces_limits() {
+    let h = Harness::new();
+    h.fx.server.execute("set sv_playerEventRateLimit 2"); // burst = 4
+    let alice = h.connect("Alice");
+    let bob = h.connect("Bob");
+
+    // Burn 2 tokens with ordinary server events, leaving 2 tokens in the shared bucket.
+    for _ in 0..2 {
+        alice.send_event("ping:hit", &[]).expect("event encodes");
+    }
+    h.wait_for("both events to arrive", || {
+        (h.value_of("event_hits", &[]) == Value::Int(2)).then_some(())
+    });
+
+    for index in 0..5 {
+        alice
+            .send_state("player:1", &format!("k{index}"), &Value::Int(index))
+            .expect("frame encodes");
+    }
+    assert_eq!(h.expect_state(&bob, "player:1", "k1"), Value::Int(1));
+    h.wait_for("remaining burst frames to be drained", || {
+        // Pump until the connection is idle for a moment so k2..k4 are processed before refill.
+        thread::sleep(Duration::from_millis(30));
+        h.pump();
+        Some(())
+    });
+    thread::sleep(Duration::from_millis(600));
+    alice
+        .send_state("player:1", "after", &Value::Int(99))
+        .expect("post-refill frame encodes");
+    assert_eq!(h.expect_state(&bob, "player:1", "after"), Value::Int(99));
+
+    let accepted = (0..5)
+        .filter(|index| {
+            h.fx.manager()
+                .state_get("player:1", &format!("k{index}"))
+                .is_some()
+        })
+        .count();
+    assert_eq!(
+        accepted, 2,
+        "2 events + 2 state writes exhaust burst size 2x sv_playerEventRateLimit"
+    );
+
+    // Client-side validation enforces name length, depth, and frame size limits.
+    assert!(alice.send_state("player:1", "", &Value::Int(1)).is_err());
+    let mut deep = Value::Int(1);
+    for _ in 0..=64 {
+        deep = Value::Array(vec![deep]);
+    }
+    assert!(matches!(
+        alice.send_state("player:1", "deep", &deep),
+        Err(NetError::TooDeep)
+    ));
+    let oversized = Value::String(vec![b'a'; 1024 * 1024 + 1].into_boxed_slice());
+    assert!(matches!(
+        alice.send_state("player:1", "big", &oversized),
+        Err(NetError::FrameTooLarge { .. })
+    ));
 }

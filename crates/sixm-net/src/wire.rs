@@ -65,6 +65,7 @@ const CLIENT_VARIANTS: &[&str] = &[
     "EntityTransforms",
     "CreateEntity",
     "RequestEntityControl",
+    "SetStateBag",
 ];
 const SERVER_VARIANTS: &[&str] = &[
     "Welcome",
@@ -154,6 +155,28 @@ impl Serialize for StateFrame<'_> {
     }
 }
 
+/// Borrowed encoding of a client state write, avoiding cloning `value`.
+struct ClientStateFrame<'a> {
+    bag: &'a str,
+    key: &'a str,
+    value: &'a Value,
+}
+
+impl Serialize for ClientStateFrame<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut variant = serializer.serialize_struct_variant(
+            MESSAGE_NAME,
+            ClientMessage::SET_STATE_BAG_TAG,
+            "SetStateBag",
+            3,
+        )?;
+        variant.serialize_field("bag", self.bag)?;
+        variant.serialize_field("key", self.key)?;
+        variant.serialize_field("value", &Encode(self.value))?;
+        variant.end()
+    }
+}
+
 /// Checks that a value list can be encoded: no function references and no
 /// nesting beyond [`MAX_VALUE_DEPTH`].
 pub(crate) fn check_values(values: &[Value]) -> Result<(), NetError> {
@@ -201,6 +224,13 @@ pub(crate) fn validate_length(what: &str, name: &str, max: usize) -> Result<(), 
     Ok(())
 }
 
+/// Validates a state bag name, key, and value before encoding.
+fn validate_state_entry(bag: &str, key: &str, value: &Value) -> Result<(), NetError> {
+    validate_length("state bag name", bag, MAX_STATE_NAME_LEN)?;
+    validate_length("state key", key, MAX_STATE_NAME_LEN)?;
+    check_values(std::slice::from_ref(value))
+}
+
 /// Encodes a state change as a complete frame, validating the names and the value first.
 pub(crate) fn encode_state(
     bag: &str,
@@ -208,10 +238,19 @@ pub(crate) fn encode_state(
     value: &Value,
     max_frame: usize,
 ) -> Result<Arc<[u8]>, NetError> {
-    validate_length("state bag name", bag, MAX_STATE_NAME_LEN)?;
-    validate_length("state key", key, MAX_STATE_NAME_LEN)?;
-    check_values(std::slice::from_ref(value))?;
+    validate_state_entry(bag, key, value)?;
     encode_frame(&StateFrame { bag, key, value }, max_frame)
+}
+
+/// Encodes a client state bag write as a complete frame, validating names, value, and frame size.
+pub(crate) fn encode_client_state(
+    bag: &str,
+    key: &str,
+    value: &Value,
+    max_frame: usize,
+) -> Result<Arc<[u8]>, NetError> {
+    validate_state_entry(bag, key, value)?;
+    encode_frame(&ClientStateFrame { bag, key, value }, max_frame)
 }
 
 /// Encodes the removal of a state bag as a complete frame.
@@ -238,9 +277,7 @@ pub(crate) fn encode_state_snapshot(
     let mut frames = Vec::new();
     let mut chunk = SnapshotChunk::new(ServerMessage::STATE_SNAPSHOT_TAG);
     for &(bag, key, value) in entries {
-        validate_length("state bag name", bag, MAX_STATE_NAME_LEN)?;
-        validate_length("state key", key, MAX_STATE_NAME_LEN)?;
-        check_values(std::slice::from_ref(value))?;
+        validate_state_entry(bag, key, value)?;
         let encoded = postcard::to_extend(&(bag, key, Encode(value)), Vec::<u8>::new())
             .map_err(|err| NetError::Protocol(format!("cannot encode message: {err}")))?;
         let values = count_values(value);
@@ -850,6 +887,13 @@ pub(crate) fn decode_server_message(payload: &[u8]) -> Result<ServerMessage, Net
     decode_budgeted(payload, &budget, ServerMessageSeed { budget: &budget })
 }
 
+/// Decodes the `(bag, key, value)` body of a `SetStateBag` message under the
+/// same limits as a client message.
+pub(crate) fn decode_set_state_bag(payload: &[u8]) -> Result<(String, String, Value), NetError> {
+    let budget = ValueBudget::new();
+    decode_budgeted(payload, &budget, StateSeed { budget: &budget })
+}
+
 /// Runs `seed` over `payload`, which must hold exactly one message.
 fn decode_budgeted<'de, S: DeserializeSeed<'de>>(
     payload: &'de [u8],
@@ -1095,6 +1139,15 @@ impl<'de> Visitor<'de> for ClientMessageVisitor<'_> {
             ClientMessage::REQUEST_ENTITY_CONTROL_TAG => variant
                 .newtype_variant::<u32>()
                 .map(|id| ClientMessage::RequestEntityControl { id }),
+            ClientMessage::SET_STATE_BAG_TAG => variant
+                .newtype_variant_seed(StateSeed {
+                    budget: self.budget,
+                })
+                .map(|(bag, key, value)| ClientMessage::SetStateBag {
+                    bag,
+                    key,
+                    value: StateValue(value),
+                }),
             other => Err(de::Error::unknown_variant(
                 &other.to_string(),
                 CLIENT_VARIANTS,
@@ -1338,9 +1391,11 @@ impl<'de> Visitor<'de> for StateVisitor<'_> {
         let bag: String = seq
             .next_element()?
             .ok_or_else(|| de::Error::invalid_length(0, &"a state bag name"))?;
+        let bag = checked_name::<A::Error>(bag, MAX_STATE_NAME_LEN)?;
         let key: String = seq
             .next_element()?
             .ok_or_else(|| de::Error::invalid_length(1, &"a state key"))?;
+        let key = checked_name::<A::Error>(key, MAX_STATE_NAME_LEN)?;
         let value = seq
             .next_element_seed(ValueSeed {
                 depth: 1,
@@ -2621,6 +2676,108 @@ mod tests {
         assert!(matches!(
             encode_state("global", "f", &value, MAX_FRAME),
             Err(NetError::FunctionNotSendable)
+        ));
+        assert!(matches!(
+            encode_client_state("player:1", "f", &value, MAX_FRAME),
+            Err(NetError::FunctionNotSendable)
+        ));
+    }
+
+    #[test]
+    fn client_state_frames_round_trip_and_validate_limits() {
+        let value = Value::Map(vec![(
+            Value::from("items"),
+            Value::Array(vec![Value::Int(1), Value::Bool(true)]),
+        )]);
+        let frame =
+            encode_client_state("player:1", "inventory", &value, MAX_FRAME).expect("encodes");
+        assert_eq!(frame[FRAME_HEADER_LEN], 7, "SetStateBag wire tag is 7");
+        assert!(matches!(
+            decode_client_message(&frame[FRAME_HEADER_LEN..]),
+            Ok(ClientMessage::SetStateBag { bag, key, value: StateValue(got) })
+                if bag == "player:1" && key == "inventory" && got == value
+        ));
+        assert_eq!(
+            decode_set_state_bag(&frame[FRAME_HEADER_LEN + 1..]).expect("body decodes"),
+            ("player:1".to_owned(), "inventory".to_owned(), value)
+        );
+
+        let deleted =
+            encode_client_state("entity:3", "label", &Value::Nil, MAX_FRAME).expect("encodes");
+        assert!(matches!(
+            decode_client_message(&deleted[FRAME_HEADER_LEN..]),
+            Ok(ClientMessage::SetStateBag { bag, key, value: StateValue(Value::Nil) })
+                if bag == "entity:3" && key == "label"
+        ));
+
+        let long = "x".repeat(MAX_STATE_NAME_LEN + 1);
+        assert!(encode_client_state("", "k", &Value::Int(1), MAX_FRAME).is_err());
+        assert!(encode_client_state(&long, "k", &Value::Int(1), MAX_FRAME).is_err());
+        assert!(encode_client_state("player:1", "", &Value::Int(1), MAX_FRAME).is_err());
+        assert!(encode_client_state("player:1", &long, &Value::Int(1), MAX_FRAME).is_err());
+
+        // Bypass the encoder to verify decoder name length checks on both client and server bags.
+        for (bag, key) in [
+            (String::new(), "k".to_owned()),
+            (long.clone(), "k".to_owned()),
+            ("player:1".to_owned(), String::new()),
+            ("player:1".to_owned(), long),
+        ] {
+            let bad_client = ClientMessage::SetStateBag {
+                bag: bag.clone(),
+                key: key.clone(),
+                value: StateValue(Value::Int(1)),
+            };
+            let payload = payload_of(&bad_client);
+            assert!(matches!(
+                decode_client_message(&payload),
+                Err(NetError::Protocol(_))
+            ));
+            assert!(matches!(
+                decode_set_state_bag(&payload[1..]),
+                Err(NetError::Protocol(_))
+            ));
+
+            let bad_server = ServerMessage::StateBag {
+                bag,
+                key,
+                value: StateValue(Value::Int(1)),
+            };
+            assert!(matches!(
+                decode_server_message(&payload_of(&bad_server)),
+                Err(NetError::Protocol(_))
+            ));
+        }
+
+        // Nesting beyond MAX_VALUE_DEPTH fails on encode and decode.
+        let mut deep = Value::Int(1);
+        for _ in 0..=MAX_VALUE_DEPTH {
+            deep = Value::Array(vec![deep]);
+        }
+        assert!(matches!(
+            encode_client_state("player:1", "deep", &deep, MAX_FRAME),
+            Err(NetError::TooDeep)
+        ));
+        let raw_deep = ClientMessage::SetStateBag {
+            bag: "player:1".to_owned(),
+            key: "deep".to_owned(),
+            value: StateValue(deep),
+        };
+        let raw_payload = payload_of(&raw_deep);
+        assert!(matches!(
+            decode_client_message(&raw_payload),
+            Err(NetError::Protocol(_))
+        ));
+        assert!(matches!(
+            decode_set_state_bag(&raw_payload[1..]),
+            Err(NetError::Protocol(_))
+        ));
+
+        // Frame size limit is enforced.
+        let big = Value::String(vec![b'a'; 64].into_boxed_slice());
+        assert!(matches!(
+            encode_client_state("player:1", "big", &big, 32),
+            Err(NetError::FrameTooLarge { .. })
         ));
     }
 

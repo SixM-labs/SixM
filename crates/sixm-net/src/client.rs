@@ -30,8 +30,8 @@ use crate::protocol::{
 use crate::transfer::{HEADER_LEN, parse_file_header};
 use crate::transport::{ServerVerifier, Trust, client_config, close_connection, closing_reason};
 use crate::wire::{
-    decode_server_message, encode_client_transforms, encode_command, encode_event, encode_frame,
-    read_frame,
+    decode_server_message, encode_client_state, encode_client_transforms, encode_command,
+    encode_event, encode_frame, read_frame,
 };
 
 /// Time allowed for the connection to close after the client disconnects.
@@ -327,6 +327,12 @@ impl NetClient {
     /// Asks the server for control of the entity `id`, which no player owns.
     pub fn send_request_entity_control(&self, id: u32) -> Result<(), NetError> {
         let frame = encode_frame(&ClientMessage::RequestEntityControl { id }, MAX_FRAME)?;
+        self.send_frame(frame)
+    }
+
+    /// Sends a state bag write to the server.
+    pub fn send_state(&self, bag: &str, key: &str, value: &Value) -> Result<(), NetError> {
+        let frame = encode_client_state(bag, key, value, MAX_FRAME)?;
         self.send_frame(frame)
     }
 

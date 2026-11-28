@@ -121,6 +121,14 @@ pub enum NetEvent {
     },
     /// A player asked for control of the entity `id`, which no player owns.
     RequestEntityControl { player: u32, id: u32 },
+    /// A player sent a state bag write. The network does not check ownership,
+    /// strict mode, or the per-player event rate limit; the server does.
+    SetStateBag {
+        player: u32,
+        bag: String,
+        key: String,
+        value: Value,
+    },
     /// An accepted player disconnected, was kicked, or broke the protocol.
     Disconnected { player: u32, reason: String },
     /// A connection left before it was accepted or rejected.
@@ -148,6 +156,10 @@ enum Command {
     },
     Broadcast {
         frame: Arc<[u8]>,
+    },
+    BroadcastExcept {
+        frame: Arc<[u8]>,
+        except: u32,
     },
     Kick {
         player: u32,
@@ -348,6 +360,11 @@ impl NetServer {
     /// Sends a pre-encoded frame to every accepted player.
     pub fn broadcast_encoded(&self, frame: Arc<[u8]>) -> Result<(), NetError> {
         self.post(Command::Broadcast { frame })
+    }
+
+    /// Sends a pre-encoded frame to every accepted player except `except`.
+    pub fn broadcast_encoded_except(&self, frame: Arc<[u8]>, except: u32) -> Result<(), NetError> {
+        self.post(Command::BroadcastExcept { frame, except })
     }
 
     /// Sends one state bag key to one player. A nil `value` tells the player
@@ -780,9 +797,15 @@ impl Supervisor {
                 }
             }
             Command::Broadcast { frame } => {
-                let ids: Vec<ConnectionId> = self.players.values().copied().collect();
-                for id in ids {
+                for &id in self.players.values() {
                     self.enqueue(id, Arc::clone(&frame));
+                }
+            }
+            Command::BroadcastExcept { frame, except } => {
+                for (&player, &id) in &self.players {
+                    if player != except {
+                        self.enqueue(id, Arc::clone(&frame));
+                    }
                 }
             }
             Command::Latent {
@@ -898,7 +921,7 @@ impl Supervisor {
         }
     }
 
-    fn enqueue(&mut self, id: ConnectionId, frame: Arc<[u8]>) {
+    fn enqueue(&self, id: ConnectionId, frame: Arc<[u8]>) {
         let Some(entry) = self.connections.get(&id) else {
             return;
         };

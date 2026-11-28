@@ -48,5 +48,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "set_state_bag"
+path = "fuzz_targets/set_state_bag.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

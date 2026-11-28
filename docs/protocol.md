@@ -31,7 +31,7 @@ given `PROTOCOL_VERSION`.
 
 - The client opens one bidirectional stream. It sends `Hello` first.
 - The client sends its later messages (`Event`, `RequestFile`, `Command`,
-  `EntityTransforms`) on that stream.
+  `EntityTransforms`, `CreateEntity`, `RequestEntityControl`, `SetStateBag`) on that stream.
   The server sends its messages on the send side of the same stream.
 - The server opens a unidirectional stream for each requested file. Either peer
   can open a unidirectional stream for a latent event. The first byte identifies
@@ -111,6 +111,7 @@ Client to server (`ClientMessage`):
 | 4 | `EntityTransforms` | list of transforms (see [Entity transforms](#entity-transforms)), at most 1024 |
 | 5 | `CreateEntity` | `id: u32`, `kind: u8`, `model: u32`, `position: [f32; 3]`, `rotation: [f32; 3]` |
 | 6 | `RequestEntityControl` | `id: u32` |
+| 7 | `SetStateBag` | `bag: string`, `key: string`, `value: value` (nil deletes the key) |
 
 `Command` carries a console line typed on the client that the client does not
 know. The server runs it with the player's permissions, and it shares the
@@ -124,6 +125,17 @@ every part present is finite and `epoch` is the entity's current epoch. Any
 other update is ignored. A message counts as one
 event for the rate limit, whatever its size, and a message with more than 1024
 updates is a protocol error.
+
+`SetStateBag` asks the server to set a replicated key in a state bag the client
+owns (`player:<id>` for the sender, or `entity:<id>` for an entity whose owner
+is the sender). `bag` and `key` must each be 1 to 256 bytes, the value must
+obey the decoding depth/count limits with no function references, and the frame
+must fit within 1 MiB (`MAX_FRAME`); breaking wire limits is a protocol error.
+The server rejects writes silently (without kicking) when
+`sv_stateBagStrictMode` is enabled, the shared `sv_playerEventRateLimit` token
+bucket drops the write, or the client does not own the bag. Accepted writes
+are relayed to other eligible clients (excluding the originating client), stored
+on the server, and delivered to server state bag change handlers.
 
 Server to client (`ServerMessage`):
 
@@ -161,7 +173,7 @@ decoding budget. A join snapshot may span several frames.
 
 ### Handshake
 
-1. The client sends `Hello` with `protocol = 13` and its player name. The
+1. The client sends `Hello` with `protocol = 15` and its player name. The
    server has already verified the client certificate, so only a client with a
    certificate gets this far.
 2. A different protocol number is refused with `Rejected`, for example
@@ -345,8 +357,8 @@ resource files can arrive while a latent transfer is in progress.
 | Outbound latent queue per player | 16 waiting events | The server kicks the player with `latent queue overflow` if its queue fills. The client API reports a full local queue to its caller. |
 | Server latent send requests awaiting dispatch | 16 | Enqueue reports a full queue to the caller. |
 | Concurrent incoming latent bodies per connection | 4 | Further streams wait for a receive slot or are refused. |
-| Event rate | 100 events or commands per second, burst 200 | Events and commands over the rate are dropped. The connection stays open. |
-| Event flood | More than 1000 events or commands in a second, for five seconds | The player is kicked with `event flood`. |
+| Event rate | 100 events, commands, entity messages, or state bag writes per second, burst 200 | Messages over the rate are dropped. The connection stays open. |
+| Event flood | More than 1000 events, commands, entity messages, or state bag writes in a second, for five seconds | The player is kicked with `event flood`. |
 | Server shutdown | none | Every player is kicked with `server shutting down`. |
 
 ## Fuzzing and hardening
@@ -361,15 +373,16 @@ The decoders of untrusted input are fuzzed. Two layers run them:
   `cargo test -p sixm-resources` runs 5,000 generated manifests the same way.
 - The cargo-fuzz targets in `fuzz/` (outside the workspace, nightly only) cover
   `decode_client_message`, `decode_server_message`, `latent_event`,
-  `file_stream_header` and `manifest`, the `fxmanifest.lua` parser. The
-  `fuzz.yml` workflow runs each target for five minutes weekly and on demand.
+  `file_stream_header`, `manifest` (the `fxmanifest.lua` parser), and
+  `set_state_bag`. The `fuzz.yml` workflow runs each target for five minutes
+  weekly and on demand.
 
 The value budget bounds the values of one message. Strings and byte strings
 are read from the frame, so their size cannot exceed it.
 
 ## Versioning
 
-- `PROTOCOL_VERSION` is `14`. It is sent in `Hello`. A server refuses any other
+- `PROTOCOL_VERSION` is `15`. It is sent in `Hello`. A server refuses any other
   value.
 - The ALPN string is `sixm/1`. It does not change with the protocol version.
 - Enum order, field order and limits can change between protocol versions.

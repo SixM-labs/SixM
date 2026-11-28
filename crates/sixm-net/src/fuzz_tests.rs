@@ -6,7 +6,7 @@
 //! prefixes. Each input goes through every decoder, which must return an error
 //! or a message that respects the limits. A panic fails the test.
 
-use sixm_core::Value;
+use sixm_core::{MAX_STATE_NAME_LEN, Value};
 
 use crate::entities::{EntityAttachmentEntry, EntityEntry, EntityStateEntry, EntityStateUpdate};
 use crate::files::{FILE_KIND_FILE, FileEntry, ResourceEntry};
@@ -16,8 +16,8 @@ use crate::protocol::{
 };
 use crate::wire::{
     Args, FRAME_HEADER_LEN, StateValue, decode_client_message, decode_latent_body,
-    decode_server_message, encode_client_transforms, encode_entity_states,
-    encode_entity_transforms, encode_frame, encode_latent_body,
+    decode_server_message, decode_set_state_bag, encode_client_state, encode_client_transforms,
+    encode_entity_states, encode_entity_transforms, encode_frame, encode_latent_body,
 };
 
 /// Inputs per run. Each input goes through every decoder.
@@ -129,7 +129,7 @@ fn client_seeds() -> Vec<Vec<u8>> {
         (3, Some([1.0, 2.0, 3.0]), Some([0.0, 90.0, 0.0]), 2),
         (4, None, Some([0.0; 3]), 0),
     ];
-    let seeds: [Vec<u8>; 7] = [
+    let seeds: [Vec<u8>; 8] = [
         payload_of(&ClientMessage::Hello {
             protocol: PROTOCOL_VERSION,
             name: "player".to_owned(),
@@ -151,6 +151,10 @@ fn client_seeds() -> Vec<Vec<u8>> {
             rotation: [0.0, 0.0, 90.0],
         }),
         payload_of(&ClientMessage::RequestEntityControl { id: 7 }),
+        frame_payload(&[
+            encode_client_state("player:1", "ready", &Value::Bool(true), MAX_FRAME)
+                .expect("seed encodes"),
+        ]),
     ];
     Vec::from(seeds)
 }
@@ -361,6 +365,11 @@ fn check_input(data: &[u8]) -> usize {
             ClientMessage::EntityTransforms { updates } => {
                 assert!(updates.len() <= MAX_TRANSFORMS_PER_MESSAGE);
             }
+            ClientMessage::SetStateBag { bag, key, value } => {
+                assert!(!bag.is_empty() && bag.len() <= MAX_STATE_NAME_LEN);
+                assert!(!key.is_empty() && key.len() <= MAX_STATE_NAME_LEN);
+                assert!(value_count(std::slice::from_ref(&value.0)) <= MAX_DECODED_VALUES);
+            }
             ClientMessage::Hello { .. }
             | ClientMessage::RequestFile { .. }
             | ClientMessage::CreateEntity { .. }
@@ -392,6 +401,12 @@ fn check_input(data: &[u8]) -> usize {
         accepted += 1;
         assert!(value_count(&args) <= MAX_DECODED_VALUES);
     }
+    if let Ok((bag, key, value)) = decode_set_state_bag(data) {
+        accepted += 1;
+        assert!(!bag.is_empty() && bag.len() <= MAX_STATE_NAME_LEN);
+        assert!(!key.is_empty() && key.len() <= MAX_STATE_NAME_LEN);
+        assert!(value_count(std::slice::from_ref(&value)) <= MAX_DECODED_VALUES);
+    }
     accepted
 }
 
@@ -404,6 +419,9 @@ fn seeds_decode_with_their_own_decoder() {
         decode_server_message(&payload).expect("server seed decodes");
     }
     decode_latent_body(&latent_seed()).expect("latent seed decodes");
+    let state_frame =
+        encode_client_state("player:1", "ready", &Value::Bool(true), MAX_FRAME).expect("encodes");
+    decode_set_state_bag(&state_frame[FRAME_HEADER_LEN + 1..]).expect("set_state_bag seed decodes");
 }
 
 #[test]

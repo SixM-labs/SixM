@@ -25,6 +25,11 @@ pub fn decode_latent_body(payload: &[u8]) -> Result<(), NetError> {
     wire::decode_latent_body(payload).map(|_| ())
 }
 
+/// Decodes the body of a `SetStateBag` message.
+pub fn decode_set_state_bag(payload: &[u8]) -> Result<(), NetError> {
+    wire::decode_set_state_bag(payload).map(|_| ())
+}
+
 /// Parses the header of a file stream. `None` when `header` has the wrong length.
 pub fn parse_file_stream_header(header: &[u8]) -> Option<(FileHash, u64)> {
     let header: &[u8; HEADER_LEN] = header.try_into().ok()?;

@@ -42,10 +42,13 @@ const ADMIN_UI_ENABLED: &str = "sv_adminUiEnabled";
 const MASTER_URL: &str = "sv_masterUrl";
 /// Interval in seconds between master-server heartbeats (default `30`, `10..=3600`).
 const HEARTBEAT_INTERVAL: &str = "sv_heartbeatInterval";
+/// Whether client-initiated state bag writes are rejected (`false` by default).
+/// Stored in lower case so hot-path packet checks do not allocate.
+const STATE_BAG_STRICT_MODE: &str = "sv_statebagstrictmode";
 
 /// Security-critical and bootstrap convars writable only from the server
 /// console or `server.cfg`.
-const CONSOLE_ONLY_CONVARS: [&str; 13] = [
+const CONSOLE_ONLY_CONVARS: [&str; 14] = [
     RCON_PASSWORD,
     HTTP_ALLOW_PRIVATE,
     HTTP_ENABLED,
@@ -59,6 +62,7 @@ const CONSOLE_ONLY_CONVARS: [&str; 13] = [
     ADMIN_UI_ENABLED,
     MASTER_URL,
     HEARTBEAT_INTERVAL,
+    STATE_BAG_STRICT_MODE,
 ];
 /// Convar naming how many seconds a resource's HTTP handler may take to
 /// complete its response.
@@ -454,6 +458,15 @@ impl Convars {
         self.is_truthy(ADMIN_UI_ENABLED)
     }
 
+    /// Whether client-initiated state bag writes are rejected (`sv_stateBagStrictMode`).
+    /// Off unless set to `true` or `1`.
+    pub(crate) fn state_bag_strict_mode(&self) -> bool {
+        self.values.get(STATE_BAG_STRICT_MODE).is_some_and(|entry| {
+            let value = entry.value.trim();
+            value.eq_ignore_ascii_case("true") || value == "1"
+        })
+    }
+
     fn is_truthy(&self, name: &str) -> bool {
         self.get(name).is_some_and(|value| {
             let value = value.trim();
@@ -721,6 +734,7 @@ mod tests {
         assert_eq!(convars.player_event_rate_limit(), 60);
         assert!(!convars.metrics_enabled());
         assert!(!convars.admin_ui_enabled());
+        assert!(!convars.state_bag_strict_mode());
         assert_eq!(convars.master_url(), None);
         assert_eq!(convars.heartbeat_interval(), Duration::from_secs(30));
 
@@ -748,6 +762,12 @@ mod tests {
         assert!(convars.metrics_enabled());
         convars.set(ADMIN_UI_ENABLED, "true", ConvarKind::Plain);
         assert!(convars.admin_ui_enabled());
+        convars.set(STATE_BAG_STRICT_MODE, "true", ConvarKind::Plain);
+        assert!(convars.state_bag_strict_mode());
+        convars.set(STATE_BAG_STRICT_MODE, "false", ConvarKind::Plain);
+        assert!(!convars.state_bag_strict_mode());
+        convars.set(STATE_BAG_STRICT_MODE, "1", ConvarKind::Plain);
+        assert!(convars.state_bag_strict_mode());
         convars.set(MASTER_URL, " https://master.example/hb ", ConvarKind::Plain);
         assert_eq!(convars.master_url(), Some("https://master.example/hb"));
 
@@ -757,6 +777,7 @@ mod tests {
             "sv_adminUiEnabled",
             "sv_masterUrl",
             "sv_heartbeatInterval",
+            "sv_stateBagStrictMode",
         ] {
             assert!(Convars::is_console_only(protected), "{protected}");
         }
