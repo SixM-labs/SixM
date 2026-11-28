@@ -176,6 +176,10 @@ enum Command {
         connection: ConnectionId,
         frame: Arc<[u8]>,
     },
+    PresentCard {
+        connection: ConnectionId,
+        frame: Arc<[u8]>,
+    },
 }
 
 /// QUIC handles indexed by connection ID for on-demand RTT queries.
@@ -319,7 +323,7 @@ impl NetServer {
         card_json: &str,
     ) -> Result<(), NetError> {
         let frame = encode_present_card(id, card_json, self.max_frame)?;
-        self.post(Command::Update { connection, frame })
+        self.post(Command::PresentCard { connection, frame })
     }
 
     /// Sends an event to one player. Sending to a player that is not connected
@@ -858,6 +862,15 @@ impl Supervisor {
                     .and_then(|entry| entry.instructions.as_ref())
                 {
                     let _ = instructions.send(Instruction::Update(frame));
+                }
+            }
+            Command::PresentCard { connection, frame } => {
+                if let Some(instructions) = self
+                    .connections
+                    .get(&connection)
+                    .and_then(|entry| entry.instructions.as_ref())
+                {
+                    let _ = instructions.send(Instruction::PresentCard(frame));
                 }
             }
         }

@@ -12,7 +12,7 @@ use std::cell::Cell;
 use std::fmt;
 use std::sync::Arc;
 
-use quinn::{ReadExactError, RecvStream};
+use quinn::RecvStream;
 use serde::Deserialize as _;
 use serde::de::{
     self, DeserializeSeed, Deserializer, EnumAccess, SeqAccess, VariantAccess, Visitor,
@@ -959,6 +959,61 @@ fn decode_budgeted<'de, S: DeserializeSeed<'de>>(
     }
 }
 
+/// Cancel-safe frame reader for `RecvStream` across `tokio::select!` arms.
+#[derive(Default)]
+pub(crate) struct FrameReader {
+    header: [u8; FRAME_HEADER_LEN],
+    header_read: usize,
+    payload: Option<Vec<u8>>,
+    payload_read: usize,
+}
+
+impl FrameReader {
+    /// Reads one frame payload, preserving any partially read header or payload
+    /// in `self` if cancelled by an enclosing `select!`.
+    pub(crate) async fn read(
+        &mut self,
+        recv: &mut RecvStream,
+        max_frame: usize,
+    ) -> Result<Option<Vec<u8>>, NetError> {
+        while self.header_read < FRAME_HEADER_LEN {
+            match recv.read(&mut self.header[self.header_read..]).await {
+                Ok(Some(n)) => self.header_read += n,
+                Ok(None) if self.header_read == 0 => return Ok(None),
+                Ok(None) => {
+                    return Err(NetError::Protocol(
+                        "stream ended inside a frame header".to_owned(),
+                    ));
+                }
+                Err(_) => return Err(NetError::Closed),
+            }
+        }
+        if self.payload.is_none() {
+            let len = usize::try_from(u32::from_le_bytes(self.header)).unwrap_or(usize::MAX);
+            if len > max_frame {
+                return Err(NetError::FrameTooLarge {
+                    len,
+                    max: max_frame,
+                });
+            }
+            self.payload = Some(vec![0_u8; len]);
+        }
+        let buf = self.payload.as_mut().expect("payload buffer initialized");
+        while self.payload_read < buf.len() {
+            match recv.read(&mut buf[self.payload_read..]).await {
+                Ok(Some(n)) => self.payload_read += n,
+                Ok(None) => {
+                    return Err(NetError::Protocol("stream ended inside a frame".to_owned()));
+                }
+                Err(_) => return Err(NetError::Closed),
+            }
+        }
+        self.header_read = 0;
+        self.payload_read = 0;
+        Ok(self.payload.take())
+    }
+}
+
 /// Reads one frame payload. Returns `Ok(None)` when the peer finished the
 /// stream cleanly between frames, and [`NetError::Closed`] when the stream
 /// failed for a transport reason.
@@ -969,32 +1024,7 @@ pub(crate) async fn read_frame(
     recv: &mut RecvStream,
     max_frame: usize,
 ) -> Result<Option<Vec<u8>>, NetError> {
-    let mut header = [0_u8; FRAME_HEADER_LEN];
-    match recv.read_exact(&mut header).await {
-        Ok(()) => {}
-        Err(ReadExactError::FinishedEarly(0)) => return Ok(None),
-        Err(ReadExactError::FinishedEarly(_)) => {
-            return Err(NetError::Protocol(
-                "stream ended inside a frame header".to_owned(),
-            ));
-        }
-        Err(ReadExactError::ReadError(_)) => return Err(NetError::Closed),
-    }
-    let len = usize::try_from(u32::from_le_bytes(header)).unwrap_or(usize::MAX);
-    if len > max_frame {
-        return Err(NetError::FrameTooLarge {
-            len,
-            max: max_frame,
-        });
-    }
-    let mut payload = vec![0_u8; len];
-    match recv.read_exact(&mut payload).await {
-        Ok(()) => Ok(Some(payload)),
-        Err(ReadExactError::FinishedEarly(_)) => {
-            Err(NetError::Protocol("stream ended inside a frame".to_owned()))
-        }
-        Err(ReadExactError::ReadError(_)) => Err(NetError::Closed),
-    }
+    FrameReader::default().read(recv, max_frame).await
 }
 
 /// Borrowed sequence of values.

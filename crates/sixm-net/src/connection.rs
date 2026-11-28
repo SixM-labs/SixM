@@ -27,7 +27,8 @@ use crate::traffic::Counters;
 use crate::transfer::{Advertised, Transfer, serve_file};
 use crate::transport::{close_connection, closing_reason};
 use crate::wire::{
-    FRAME_HEADER_LEN, decode_client_message, encode_frame, read_frame, validate_event_name,
+    FRAME_HEADER_LEN, FrameReader, decode_client_message, encode_frame, read_frame,
+    validate_event_name,
 };
 
 /// Application close code for an ordinary end of the connection.
@@ -60,8 +61,10 @@ pub(crate) enum Decision {
 
 /// What the server tells a connection that is still waiting for its decision.
 pub(crate) enum Instruction {
-    /// An encoded frame to send to the client, which keeps waiting.
+    /// An encoded progress deferral frame to send to the client, which keeps waiting.
     Update(Arc<[u8]>),
+    /// An encoded Adaptive Card frame to send to the client, awaiting a `CardResponse`.
+    PresentCard(Arc<[u8]>),
     /// The final answer. Nothing else is sent before it.
     Decide(Decision),
 }
@@ -168,7 +171,7 @@ pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket)
         fingerprint,
     });
 
-    let Some(decided) = decide(
+    let Some((decided, reader)) = decide(
         &shared,
         id,
         &connection,
@@ -188,6 +191,7 @@ pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket)
                 player,
                 send,
                 recv,
+                reader,
                 outbound,
                 latent,
                 reply,
@@ -199,8 +203,8 @@ pub(crate) async fn run(shared: Arc<Shared>, incoming: Incoming, ticket: Ticket)
 }
 
 /// Waits for the server's decision on a connection that sent its `Hello`, and
-/// writes every progress update to the client meanwhile. Returns `None` when
-/// the connection ends first, after reporting it as abandoned.
+/// writes progress updates and card prompts meanwhile. Returns `None` when the
+/// connection ends first, after reporting it as abandoned.
 async fn decide(
     shared: &Shared,
     id: ConnectionId,
@@ -208,30 +212,33 @@ async fn decide(
     send: &mut SendStream,
     recv: &mut RecvStream,
     instructions: &mut mpsc::UnboundedReceiver<Instruction>,
-) -> Option<Decision> {
+) -> Option<(Decision, FrameReader)> {
+    let mut reader = FrameReader::default();
+    let mut pending_cards = 0_usize;
     loop {
         tokio::select! {
+            biased;
             instruction = instructions.recv() => match instruction {
-                Some(Instruction::Decide(decision)) => return Some(decision),
-                Some(Instruction::Update(frame)) => {
-                    if let Err(err) = send.write_all(&frame).await {
-                        close_connection(
-                            connection,
-                            CLOSE_NORMAL,
-                            &format!("deferral update failed: {err}"),
-                        );
-                        (shared.on_event)(NetEvent::Abandoned { connection: id });
+                Some(Instruction::Decide(decision)) => return Some((decision, reader)),
+                Some(Instruction::PresentCard(frame)) => {
+                    if !send_deferral_frame(id, connection, send, &frame, "deferral card", shared).await {
                         return None;
                     }
-                    shared.traffic.sent(frame.len());
+                    pending_cards = pending_cards.saturating_add(1);
                 }
-                None => return Some(Decision::Reject(SHUTTING_DOWN.to_owned())),
+                Some(Instruction::Update(frame)) => {
+                    if !send_deferral_frame(id, connection, send, &frame, "deferral update", shared).await {
+                        return None;
+                    }
+                }
+                None => return Some((Decision::Reject(SHUTTING_DOWN.to_owned()), reader)),
             },
-            incoming = read_frame(recv, shared.max_frame) => match incoming {
+            incoming = reader.read(recv, shared.max_frame), if pending_cards > 0 => match incoming {
                 Ok(Some(payload)) => {
                     shared.traffic.received(FRAME_HEADER_LEN + payload.len());
                     match decode_client_message(&payload) {
                         Ok(ClientMessage::CardResponse { id: card_id, data_json }) => {
+                            pending_cards = pending_cards.saturating_sub(1);
                             (shared.on_event)(NetEvent::CardResponse {
                                 connection: id,
                                 id: card_id,
@@ -270,6 +277,23 @@ async fn decide(
             }
         }
     }
+}
+
+async fn send_deferral_frame(
+    id: ConnectionId,
+    connection: &Connection,
+    send: &mut SendStream,
+    frame: &[u8],
+    kind: &str,
+    shared: &Shared,
+) -> bool {
+    if let Err(err) = send.write_all(frame).await {
+        close_connection(connection, CLOSE_NORMAL, &format!("{kind} failed: {err}"));
+        (shared.on_event)(NetEvent::Abandoned { connection: id });
+        return false;
+    }
+    shared.traffic.sent(frame.len());
+    true
 }
 
 /// The fingerprint of the client certificate the handshake verified, or `None`
@@ -363,6 +387,7 @@ struct Accepted {
     player: u32,
     send: SendStream,
     recv: RecvStream,
+    reader: FrameReader,
     outbound: mpsc::Receiver<Arc<[u8]>>,
     latent: mpsc::Receiver<LatentJob>,
     reply: mpsc::Sender<Arc<[u8]>>,
@@ -434,6 +459,7 @@ async fn serve(shared: &Shared, accepted: Accepted) {
         player,
         send,
         mut recv,
+        mut reader,
         outbound,
         mut latent,
         reply,
@@ -476,7 +502,14 @@ async fn serve(shared: &Shared, accepted: Accepted) {
         reply,
         Arc::clone(&shared.traffic),
     );
-    let mut reader = pin!(read_loop(shared, player, &mut recv, &mut requests, limiter));
+    let mut reader = pin!(read_loop(
+        shared,
+        player,
+        &mut recv,
+        &mut reader,
+        &mut requests,
+        limiter,
+    ));
     let (code, reason) = tokio::select! {
         stop = &mut reader => match stop {
             Stop::Kick(reason) => {
@@ -568,11 +601,12 @@ async fn read_loop(
     shared: &Shared,
     player: u32,
     recv: &mut RecvStream,
+    reader: &mut FrameReader,
     requests: &mut Requests,
     limiter: Arc<std::sync::Mutex<RateLimiter>>,
 ) -> Stop {
     loop {
-        let payload = match read_frame(recv, shared.max_frame).await {
+        let payload = match reader.read(recv, shared.max_frame).await {
             Ok(Some(payload)) => {
                 shared.traffic.received(FRAME_HEADER_LEN + payload.len());
                 payload
