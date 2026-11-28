@@ -316,7 +316,7 @@ equivalent / no effect / absent".
 | F2 | todo | | |
 | F3 | todo | | |
 | F4 | todo | | |
-| G1 | todo | | |
+| G1 | done | Gemini | `git log --grep "^G1:"` |
 | G2 | todo | | |
 
 Status values: `todo`, `in progress`, `wip (see log)`, `done`, `blocked (see log)`.
@@ -469,3 +469,8 @@ what is next, anything surprising.
   via `sqlite://` in `mysql_connection_string`), wrote `docs/design/database.md`
   (`E1: database ADR`). Next: `E2` (`crates/sixm-sql`) and `G1`/`G2` migration
   docs in parallel.
+- 2026-11-28, Gemini, `feat/fivem-parity-e`: `G1: document deliberate FiveM
+  differences and migration table` follows 6570dc4. Completed all 12 items
+  from `gap-report.md` section 5 in `docs/guides/from-fivem.md` and added the
+  FiveM convar/command migration reference table verified against `convars.rs`
+  and `commands.rs`.
