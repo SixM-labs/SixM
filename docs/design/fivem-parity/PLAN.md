@@ -309,7 +309,7 @@ equivalent / no effect / absent".
 | D6 | done | Gemini | `git log --grep "^D6:"` |
 | D7 | done | Gemini | `git log --grep "^D7:"` |
 | E1 | done | Gemini | `git log --grep "^E1:"` |
-| E2 | todo | | |
+| E2 | done | Gemini | `git log --grep "^E2:"` |
 | E3 | todo | | |
 | E4 | todo | | |
 | F1 | todo | | |
@@ -481,3 +481,12 @@ what is next, anything surprising.
   `clr_disable_task_scheduler`, `node_version`, etc.) and ignored
   `/`-prefixed dependency constraints (`/server:`, `/onesync`, `/gameBuild`,
   `/native:`) in `docs/manifest.md`. Next: `E2` (`crates/sixm-sql`).
+- 2026-11-28, Gemini, `feat/fivem-parity-e`: `E2: add sixm-sql crate` follows
+  a14d57a. Added `crates/sixm-sql` (`mysql_async` `minimal-rust` + `rustls-tls`
+  + `ring`, and `rusqlite` `bundled` + `hooks`) with URI / quoted `key=value;`
+  parsing and credential redaction, dialect-aware `?` and `@name`/`:name`
+  parameter binding (no string interpolation), dedicated SQLite worker pool,
+  internal-tokio MySQL pool, row/byte/timeout/queue caps, CI `mysql:8.4`
+  integration job on Ubuntu, and review fixes (SQLite backslash literals,
+  transaction rollback progress-handler disarm, `dateStrings`, and `ResultTooLarge`
+  disconnect). Next: `E3` (`resources/[system]/oxmysql` and host bridge).

@@ -19,6 +19,9 @@ sixm-net = { path = "crates/sixm-net" }
 sixm-kvp = { path = "crates/sixm-kvp" }
 sixm-client = { path = "crates/sixm-client" }
 
+mysql_async = { version = "0.37.1", default-features = false, features = ["minimal-rust", "rustls-tls", "tls12", "ring"] }
+rusqlite = { version = "0.39.0", features = ["bundled", "hooks"] }
+
 mlua = { version = "0.12.3", features = ["lua54", "vendored"] }
 rquickjs = { version = "0.14", default-features = false, features = ["std", "macro"] }
 globset = "0.4.22"

@@ -33,3 +33,29 @@ jobs:
       - run: cargo build --workspace --release --locked
       - name: Smoke test the release archive
         run: python scripts/release_package.py ${{ matrix.target }} target/release
+
+  mysql-integration:
+    name: ubuntu-latest (mysql 8.4)
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: sixm
+          MYSQL_DATABASE: sixm_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -psixm"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      SIXM_TEST_MYSQL_URL: mysql://root:sixm@127.0.0.1:3306/sixm_test
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p sixm-sql --test mysql -- --nocapture

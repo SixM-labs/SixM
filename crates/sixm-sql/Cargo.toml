@@ -1,0 +1,22 @@
+[package]
+name = "sixm-sql"
+description = "Asynchronous MySQL/MariaDB and SQLite database pool with parameterized queries for SixM."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+mysql_async.workspace = true
+rusqlite.workspace = true
+sixm-core.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
