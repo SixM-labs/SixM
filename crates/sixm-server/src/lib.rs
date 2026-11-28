@@ -12,6 +12,7 @@ mod config;
 mod console;
 mod convars;
 mod entities;
+mod filters;
 mod host_functions;
 mod http;
 mod manager;
@@ -29,5 +30,6 @@ pub use config::{
     ArgError, CliInvocation, CliOptions, Invocation, TokenError, parse_args, parse_cli, tokenize,
 };
 pub use console::spawn_stdin_reader;
+pub use filters::{ChannelAction, ChannelFilters, ChannelTracingFilter};
 pub use manager::{ManagerError, ResourceManager};
 pub use server::{Input, Server};

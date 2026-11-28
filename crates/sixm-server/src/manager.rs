@@ -31,6 +31,7 @@ use crate::buckets::BucketSettings;
 use crate::commands::CommandSource;
 use crate::convars::{Convars, KVP_PATH, RCON_PASSWORD};
 use crate::entities::{EntityStore, EntityUpdate};
+use crate::filters::ChannelFilters;
 use crate::host_functions::{HostFunctions, is_host};
 use crate::http::{Completion, HttpClient};
 use crate::network::{DROP_SCRIPT, DropOrigin, Network};
@@ -159,12 +160,19 @@ pub struct ResourceManager {
     watcher: RefCell<ResourceWatcher>,
     /// When the last master heartbeat was queued.
     last_heartbeat: Cell<Option<Instant>>,
+    /// Console channel filters shared with logging layers and `/rcon`.
+    channel_filters: ChannelFilters,
 }
 
 impl ResourceManager {
     /// Creates a manager with the default convars. Nothing is scanned until the
     /// first start or refresh.
     pub fn new() -> Rc<Self> {
+        Self::with_channel_filters(ChannelFilters::new())
+    }
+
+    /// Creates a manager sharing `channel_filters` with the caller's logging layers.
+    pub fn with_channel_filters(channel_filters: ChannelFilters) -> Rc<Self> {
         Rc::new_cyclic(|me| Self {
             me: me.clone(),
             catalog: RefCell::default(),
@@ -198,7 +206,13 @@ impl ResourceManager {
             watch_enabled: Cell::new(false),
             watcher: RefCell::default(),
             last_heartbeat: Cell::new(None),
+            channel_filters,
         })
+    }
+
+    /// Returns the console channel filter store used by this manager.
+    pub fn channel_filters(&self) -> &ChannelFilters {
+        &self.channel_filters
     }
 
     /// Resolves `name` through the catalog's `provide` aliases to its canonical

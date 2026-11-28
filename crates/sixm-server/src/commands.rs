@@ -21,6 +21,7 @@ use tracing::{debug, error, info, warn};
 use crate::access::Permission;
 use crate::config::tokenize;
 use crate::convars::{Convars, ENDPOINT};
+use crate::filters::ChannelAction;
 use crate::manager::{ManagerError, ResourceManager};
 use crate::network::{DROP_SCRIPT, DROP_SERVER, DropOrigin};
 use crate::perf::{format_millis, per_second};
@@ -31,12 +32,15 @@ const MAX_EXEC_DEPTH: usize = 16;
 const MAX_QUEUED_COMMANDS: usize = 1000;
 
 /// Built-in command names, as listed by `help` and `cmdlist`.
-pub(crate) const BUILT_IN: [&str; 33] = [
+pub(crate) const BUILT_IN: [&str; 36] = [
     "add_ace",
     "add_convar_permission",
     "add_principal",
     "clientkick",
     "cmdlist",
+    "con_addchannelfilter",
+    "con_channelfilters",
+    "con_removechannelfilter",
     "endpoint_add_tcp",
     "endpoint_add_udp",
     "ensure",
@@ -187,6 +191,9 @@ pub(crate) fn run_words(
         "clientkick" => clientkick(manager, args, &context.source),
         "say" => say(manager, args, &context.source),
         "cmdlist" => cmdlist(manager, args),
+        "con_addchannelfilter" => con_add_channel_filter(manager, args),
+        "con_channelfilters" => con_channel_filters(manager, args),
+        "con_removechannelfilter" => con_remove_channel_filter(manager, args),
         "entities" => entities(manager),
         "state" => state(manager, args),
         "quit" => quit(manager, args),
@@ -1073,13 +1080,55 @@ fn test_ace(manager: &ResourceManager, args: &[String]) {
     info!("{principal} is {verdict} {object}");
 }
 
+/// `con_channelFilters`: lists active console channel filters.
+fn con_channel_filters(manager: &ResourceManager, args: &[String]) {
+    if !args.is_empty() {
+        warn!("usage: con_channelFilters");
+        return;
+    }
+    let rules = manager.channel_filters().list();
+    if rules.is_empty() {
+        info!("No console channel filters active");
+        return;
+    }
+    for (pattern, action) in rules {
+        info!("channel filter {pattern} -> {action}");
+    }
+}
+
+/// `con_addChannelFilter <channel> <print|none>`: adds or updates a console channel filter.
+fn con_add_channel_filter(manager: &ResourceManager, args: &[String]) {
+    const USAGE: &str = "con_addChannelFilter <channel> <print|none>";
+    let Some([channel, action_word]) = names::<2>(args, USAGE) else {
+        return;
+    };
+    let Some(action) = ChannelAction::parse(action_word) else {
+        warn!("usage: {USAGE}");
+        return;
+    };
+    manager.channel_filters().set(channel, action);
+    info!("channel filter {channel} -> {action}");
+}
+
+/// `con_removeChannelFilter <channel>`: removes a console channel filter.
+fn con_remove_channel_filter(manager: &ResourceManager, args: &[String]) {
+    let Some([channel]) = names::<1>(args, "con_removeChannelFilter <channel>") else {
+        return;
+    };
+    if manager.channel_filters().remove(channel) {
+        info!("removed channel filter {channel}");
+    } else {
+        warn!("no channel filter for {channel}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::BUILT_IN;
 
     #[test]
     fn built_in_list_is_sorted_and_unique() {
-        assert_eq!(BUILT_IN.len(), 33);
+        assert_eq!(BUILT_IN.len(), 36);
         assert!(BUILT_IN.windows(2).all(|pair| pair[0] < pair[1]));
     }
 }

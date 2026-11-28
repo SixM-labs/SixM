@@ -10,6 +10,7 @@ use sixm_net::{NetError, NetEvent, WebExchange};
 use tracing::{error, info};
 
 use crate::commands::{self, CommandContext, CommandSource};
+use crate::filters::ChannelFilters;
 use crate::manager::ResourceManager;
 
 /// Input for the server loop.
@@ -43,6 +44,18 @@ impl Server {
         Self {
             manager: ResourceManager::new(),
         }
+    }
+
+    /// Creates a server sharing `filters` with external logging layers.
+    pub fn with_channel_filters(filters: ChannelFilters) -> Self {
+        Self {
+            manager: ResourceManager::with_channel_filters(filters),
+        }
+    }
+
+    /// Returns the server's console channel filter store.
+    pub fn channel_filters(&self) -> &ChannelFilters {
+        self.manager.channel_filters()
     }
 
     /// The resource manager, for starting resources and calling exports.

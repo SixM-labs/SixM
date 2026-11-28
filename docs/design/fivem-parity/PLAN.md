@@ -302,7 +302,7 @@ equivalent / no effect / absent".
 | C2 | done | Gemini (Flash impl, Pro review) | `git log --grep "^C2:"` |
 | C3 | done | Gemini | `git log --grep "^C3:"` |
 | D1 | done | Gemini (Flash impl, Pro review) | `git log --grep "^D1:"` |
-| D2 | todo | | |
+| D2 | done | Gemini (Flash impl, Pro review) | `git log --grep "^D2:"` |
 | D3 | todo | | |
 | D4 | todo | | |
 | D5 | todo | | |
@@ -422,3 +422,9 @@ what is next, anything surprising.
   `status`, `clientkick`, built-in `say` (via the `chat` contract when running,
   else log), `cmdlist`, and `exec @resource/file.cfg`, with full checks green.
   Next: D2 (console channel filters).
+- 2026-11-28, Gemini, `feat/fivem-parity-d`: `D2: console channel filters`
+  follows c0224ad. Added `ChannelFilters` (`AtomicBool` fast path + `RwLock`),
+  `ChannelTracingFilter`, `Server::with_channel_filters` / `channel_filters`,
+  and `con_channelFilters`, `con_addChannelFilter`, `con_removeChannelFilter`
+  wired into both process tracing layers and `POST /rcon`, with full checks
+  green. Next: D3 (`resmon`, `sixm_hitchWarningMs`, `/admin` live panel).

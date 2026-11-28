@@ -13,6 +13,10 @@ may change the protocol and the API.
   `say <text>` (integrating with `[system]/chat` when started and logging
   directly otherwise), `cmdlist`, and resource-relative `exec @resource/file.cfg`
   (supporting `provide` aliases and rejecting symlinks and path traversal).
+- Console channel filtering commands `con_channelFilters`,
+  `con_addChannelFilter <channel> <print|none>`, and
+  `con_removeChannelFilter <channel>`, backed by `ChannelFilters` (`Server::with_channel_filters`,
+  `Server::channel_filters`) across process logs and `POST /rcon`.
 - Stock `[system]/chat` resource with the FiveM chat event names, a cancelable
   server message pipeline, command suggestions, and headless client `say`.
 - Clean-room stock `[system]/mapmanager`: scalar `resource_type` metadata,

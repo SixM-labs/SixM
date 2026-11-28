@@ -350,12 +350,15 @@ state bags. C# (`Mono`) is not present. JS runs in a strict sandbox without Node
 APIs (`require`, `fs`, `process`), `eval`, or `Function` constructors; see
 [js-api.md](../js-api.md).
 
-### 7. Remote console and profiling
+### 7. Remote console, logging filters, and profiling
 
 SixM's remote console uses an authenticated HTTP `POST /rcon` request and
-returns command output as JSON. The `profiler` command captures server frames
+returns command output as JSON. `con_addChannelFilter` uses case-insensitive
+`*` / `?` glob patterns matching tracing targets or `script:<resource>` instead
+of regular expressions. The `profiler` command captures server frames
 and resource ticks for Chrome Trace Event viewers. See
-[Remote console](../server.md#remote-console) and
+[Remote console](../server.md#remote-console),
+[Built-in commands](../server.md#built-in-commands), and
 [Frame profiling](../server.md#frame-profiling).
 
 ## What is missing (not yet implemented)

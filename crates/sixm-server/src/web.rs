@@ -25,6 +25,7 @@ use tracing::{Event, Subscriber, warn};
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 
 use crate::commands::{self, CommandContext, CommandSource};
+use crate::filters::ChannelFilters;
 use crate::manager::ResourceManager;
 use crate::perf::format_millis;
 
@@ -482,7 +483,7 @@ impl ResourceManager {
         drop(convars);
         self.web.rcon_guard.borrow_mut().reset(peer_ip);
 
-        let output = capture_logs(|| {
+        let output = capture_logs(self.channel_filters(), || {
             commands::run_line(self, &command, &CommandContext::new(CommandSource::Console));
             commands::drain_queued(self);
         });
@@ -560,9 +561,10 @@ impl Visit for MessageVisitor {
     }
 }
 
-fn capture_logs(run: impl FnOnce()) -> Vec<String> {
+fn capture_logs(filters: &ChannelFilters, run: impl FnOnce()) -> Vec<String> {
     let lines = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::registry().with(LogCollector(Arc::clone(&lines)));
+    let subscriber = tracing_subscriber::registry()
+        .with(LogCollector(Arc::clone(&lines)).with_filter(filters.tracing_filter()));
     tracing::subscriber::with_default(subscriber, run);
     std::mem::take(&mut *lines.lock().unwrap_or_else(PoisonError::into_inner))
 }

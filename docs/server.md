@@ -124,6 +124,9 @@ same name is never reached.
 | `list_convar_permissions` | Lists every private convar reader entry (`console` only). |
 | `exec <file>` | Runs each line of `<file>` (relative to the working directory) or `@<resource>/<path>` inside an installed resource. See above. |
 | `cmdlist` | Lists every built-in command and registered script command in sorted order (marking restricted script commands). |
+| `con_channelFilters` | Lists active console channel filter rules in evaluation order, or reports none active. |
+| `con_addChannelFilter <channel> <print\|none>` | Adds or updates a case-insensitive glob filter (`*`, `?`) matching tracing targets (e.g. `sixm_server::*`) or `script:<resource>` for `sixm::script` logs. Actions are `print` or `none` (last matching rule wins; default `print`). |
+| `con_removeChannelFilter <channel>` | Removes the console channel filter matching `<channel>` (case-insensitive). |
 | `help` | Lists the built-in commands and the script commands. Restricted commands are marked. |
 | `quit [reason]` | Asks the server to stop. The reason is written to the log. |
 | `add_ace <principal> <object> <allow\|deny>` | Sets the entry of a principal for an object. An earlier entry for the same pair is replaced. See [Permissions](#permissions). |

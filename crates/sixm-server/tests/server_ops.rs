@@ -610,3 +610,187 @@ fn exec_at_resource_supports_aliases_nesting_ace_and_rejects_traversal() {
     }
     assert_eq!(fx.manager().convar("pwned"), None);
 }
+
+#[test]
+fn channel_filters_commands_and_ace_gating() {
+    let noisy = Resource {
+        name: "noisy",
+        script: r"
+            RegisterCommand('try_filter', function(_, args)
+                ExecuteCommand(table.concat(args, ' '))
+            end, false)
+        ",
+        exports: &[],
+    };
+    let lb = Loopback::new(&[noisy]);
+    lb.fx.server.execute("set rcon_password super-secret-pw");
+
+    // Empty listing & usage validation.
+    let empty = rcon_output(&lb, "con_channelFilters");
+    assert!(
+        empty
+            .iter()
+            .any(|line| line == "No console channel filters active"),
+        "expected empty message: {empty:?}"
+    );
+    let bad_list = rcon_output(&lb, "con_channelFilters extra");
+    assert!(
+        bad_list
+            .iter()
+            .any(|line| line.contains("usage: con_channelFilters"))
+    );
+    let bad_add = rcon_output(&lb, "con_addChannelFilter script:noisy bogus");
+    assert!(
+        bad_add
+            .iter()
+            .any(|line| line.contains("usage: con_addChannelFilter <channel> <print|none>"))
+    );
+    let short_add = rcon_output(&lb, "con_addChannelFilter script:noisy");
+    assert!(
+        short_add
+            .iter()
+            .any(|line| line.contains("usage: con_addChannelFilter <channel> <print|none>"))
+    );
+    let empty_rm = rcon_output(&lb, "con_removeChannelFilter");
+    assert!(
+        empty_rm
+            .iter()
+            .any(|line| line.contains("usage: con_removeChannelFilter <channel>"))
+    );
+    let missing_rm = rcon_output(&lb, "con_removeChannelFilter script:missing");
+    assert!(
+        missing_rm
+            .iter()
+            .any(|line| line.contains("no channel filter for script:missing"))
+    );
+
+    // ACE gating for resources and connected players (list/add/remove).
+    let alice = lb.connect("Alice").expect("Alice connected");
+    lb.fx.server.execute("con_addChannelFilter script:pre none");
+    lb.fx.server.execute("try_filter con_channelFilters");
+    lb.fx
+        .server
+        .execute("try_filter con_addChannelFilter script:noisy none");
+    lb.pump();
+    assert_eq!(lb.fx.server.channel_filters().list().len(), 1);
+    lb.fx.server.execute("con_removeChannelFilter script:pre");
+
+    alice
+        .send_command("con_addChannelFilter script:noisy none")
+        .expect("player command");
+    alice
+        .send_command("con_channelFilters")
+        .expect("player list command");
+    for _ in 0..10 {
+        lb.pump();
+    }
+    assert_eq!(lb.fx.server.channel_filters().list(), []);
+
+    lb.fx
+        .server
+        .execute("add_ace resource.noisy command.con_channelfilters allow");
+    lb.fx
+        .server
+        .execute("add_ace resource.noisy command.con_addchannelfilter allow");
+    lb.fx.server.execute("try_filter con_channelFilters");
+    lb.fx
+        .server
+        .execute("try_filter con_addChannelFilter script:noisy none");
+    lb.pump();
+    assert_eq!(lb.fx.server.channel_filters().list().len(), 1);
+
+    lb.fx
+        .server
+        .execute("add_ace player.1 command.con_removechannelfilter allow");
+    alice
+        .send_command("con_removeChannelFilter script:noisy")
+        .expect("player remove filter");
+    lb.wait_for("player removed filter", || {
+        lb.fx
+            .server
+            .channel_filters()
+            .list()
+            .is_empty()
+            .then_some(())
+    });
+}
+
+#[test]
+fn channel_filters_filter_rcon_and_tracing_output() {
+    let noisy = Resource {
+        name: "noisy",
+        script: r"
+            RegisterCommand('emit_both', function()
+                print('noisy line')
+                ExecuteCommand('emit_loud')
+            end, false)
+        ",
+        exports: &[],
+    };
+    let loud = Resource {
+        name: "loud",
+        script: r"
+            RegisterCommand('emit_loud', function()
+                print('loud line')
+            end, false)
+        ",
+        exports: &[],
+    };
+    let lb = Loopback::new(&[noisy, loud]);
+    lb.fx.server.execute("set rcon_password super-secret-pw");
+
+    let baseline = rcon_output(&lb, "emit_both");
+    assert!(baseline.iter().any(|l| l == "[noisy] noisy line"));
+    assert!(baseline.iter().any(|l| l == "[loud] loud line"));
+
+    let added = rcon_output(&lb, "con_addChannelFilter script:noisy none");
+    assert!(
+        added
+            .iter()
+            .any(|l| l == "channel filter script:noisy -> none")
+    );
+    let listed = rcon_output(&lb, "con_channelFilters");
+    assert!(
+        listed
+            .iter()
+            .any(|l| l == "channel filter script:noisy -> none")
+    );
+
+    let filtered = rcon_output(&lb, "emit_both");
+    assert!(
+        !filtered.iter().any(|l| l.contains("noisy line")),
+        "noisy script output should be suppressed: {filtered:?}"
+    );
+    assert!(
+        filtered.iter().any(|l| l == "[loud] loud line"),
+        "loud script output should remain visible: {filtered:?}"
+    );
+
+    // Override with `print` restores output, and removal cleans up.
+    rcon_output(&lb, "con_addChannelFilter script:noisy PRINT");
+    let restored = rcon_output(&lb, "emit_both");
+    assert!(restored.iter().any(|l| l == "[noisy] noisy line"));
+
+    let removed = rcon_output(&lb, "con_removeChannelFilter SCRIPT:NOISY");
+    assert!(
+        removed
+            .iter()
+            .any(|l| l == "removed channel filter SCRIPT:NOISY")
+    );
+    let after_remove = rcon_output(&lb, "con_channelFilters");
+    assert!(
+        after_remove
+            .iter()
+            .any(|l| l == "No console channel filters active")
+    );
+    let after_remove_emit = rcon_output(&lb, "emit_both");
+    assert!(after_remove_emit.iter().any(|l| l == "[noisy] noisy line"));
+    assert!(after_remove_emit.iter().any(|l| l == "[loud] loud line"));
+
+    // Broad target suppression (`sixm::*`) can be overridden per resource (`script:loud print`).
+    rcon_output(&lb, "con_addChannelFilter sixm::* none");
+    rcon_output(&lb, "con_addChannelFilter script:loud print");
+    let target_filtered = rcon_output(&lb, "emit_both");
+    assert!(!target_filtered.iter().any(|l| l.contains("noisy line")));
+    assert!(target_filtered.iter().any(|l| l == "[loud] loud line"));
+}
