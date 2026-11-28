@@ -317,7 +317,7 @@ equivalent / no effect / absent".
 | F3 | todo | | |
 | F4 | todo | | |
 | G1 | done | Gemini | `git log --grep "^G1:"` |
-| G2 | todo | | |
+| G2 | done | Gemini | `git log --grep "^G2:"` |
 
 Status values: `todo`, `in progress`, `wip (see log)`, `done`, `blocked (see log)`.
 
@@ -474,3 +474,10 @@ what is next, anything surprising.
   from `gap-report.md` section 5 in `docs/guides/from-fivem.md` and added the
   FiveM convar/command migration reference table verified against `convars.rs`
   and `commands.rs`.
+- 2026-11-28, Gemini, `feat/fivem-parity-e`: `G2: list accepted manifest keys
+  and dependency constraints with no effect` follows G1. Documented the
+  metadata-only manifest directives (`convar_category`, `escrow_ignore`,
+  `resource_manifest_version`, `use_experimental_fxv2_oal`,
+  `clr_disable_task_scheduler`, `node_version`, etc.) and ignored
+  `/`-prefixed dependency constraints (`/server:`, `/onesync`, `/gameBuild`,
+  `/native:`) in `docs/manifest.md`. Next: `E2` (`crates/sixm-sql`).
