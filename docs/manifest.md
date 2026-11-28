@@ -117,7 +117,7 @@ known gametype.
 
 Each `map` path names UTF-8 JSON data relative to the map resource and must
 also appear in `files`. The top-level object contains a dense `directives`
-array. Each item has a nonempty string `name` and may have a JSON `data` value; absent or `null` data is passed to handlers as Lua `nil`. For
+array. Each item has a nonempty string `name` and may have a JSON `data` value; absent or `null` data is passed to handlers as `nil` in Lua or `null` in JavaScript. For
 example:
 
 ```json

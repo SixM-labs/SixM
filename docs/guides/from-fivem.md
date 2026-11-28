@@ -72,6 +72,17 @@ See [manifest.md](../manifest.md) for all manifest rules.
 - Callbacks can be passed across exports, and `GetInvokingResource()` tracks
   the caller across both `TriggerEvent` and `exports` calls.
 
+### Stock resource: `chat`
+
+SixM ships `[system]/chat` with the FiveM event contract (`chatMessage`,
+`chat:addMessage`, `chat:addTemplate`, `chat:addSuggestion`,
+`chat:addSuggestions`, `chat:removeSuggestion`, `chat:clear`, `chat:init`, and
+`_chat:messageEntered`). The server derives the author from the connection and
+enforces `command.say`, and registers automatic command suggestions from
+`GetRegisteredCommands`. On the headless client, `say` sends
+`_chat:messageEntered` and incoming messages are printed as plain text to the
+client log (there is no NUI browser).
+
 ### `spawnmanager`
 
 SixM's stock `[system]/spawnmanager` resource moves the local player ped through

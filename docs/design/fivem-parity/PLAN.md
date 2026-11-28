@@ -297,7 +297,7 @@ equivalent / no effect / absent".
 | B1 | done | ChatGPT (Luna impl, Terra review) | `git log --grep "^B1:"` |
 | B2 | done | ChatGPT (Luna impl, Terra review), Gemini (Flash fixes, Pro review) | `git log --grep "^B2:"` |
 | B3 | done | ChatGPT (Luna impl, Terra review), Gemini (Flash fixes, Pro review) | `git log --grep "^B3:"` |
-| B4 | todo | | |
+| B4 | done | ChatGPT (Luna draft), Gemini (wrap-up) | `git log --grep "^B4:"` |
 | C1 | todo | | |
 | C2 | todo | | |
 | C3 | todo | | |
@@ -389,3 +389,12 @@ what is next, anything surprising.
   cleanup, added `mapmanager` type stubs in `types/sixm.lua` and
   `types/sixm.d.ts`, aligned docs/spec for Lua+JS directive handlers, and
   expanded `mapmanager` tests to 16 passing cases. Next: B4 wrap-up.
+- 2026-11-28, Gemini, `feat/fivem-parity-b`: `B4: wrap up Phase B` follows
+  55e497c. Updated `examples/server-data/server.cfg` (dependency-safe start
+  order `spawnmanager`, `mapmanager`, `chat` plus scoped `resource.mapmanager`
+  ACE grants), audited `docs/server.md`, `docs/guides/from-fivem.md`,
+  `docs/lua-api.md`, `docs/js-api.md`, `docs/manifest.md`, and `CHANGELOG.md`,
+  ran full Linux checks (`check_types.py`, `cargo fmt`, `cargo clippy`,
+  `cargo test --workspace`), pushed `feat/fivem-parity-b`, and opened the Phase
+  B PR to `main`. Windows CI is verified via GitHub Actions on the PR before
+  merging. Next: Phase C (`feat/fivem-parity-c`) after PR merge.

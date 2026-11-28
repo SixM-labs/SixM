@@ -365,7 +365,7 @@ library can tell who called it. It is `nil` when no resource caused it.
 
 ## Stock resource: `mapmanager`
 
-`mapmanager` is a server resource shipped under `[system]`. Its exports are
+`mapmanager` is a server and client resource shipped under `[system]`. Its server exports are
 called as `exports.mapmanager:exportName(...)` in Lua:
 
 | Export | Side | Signature and result |
