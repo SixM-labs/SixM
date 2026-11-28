@@ -308,7 +308,7 @@ equivalent / no effect / absent".
 | D5 | done | Gemini | `git log --grep "^D5:"` |
 | D6 | done | Gemini | `git log --grep "^D6:"` |
 | D7 | done | Gemini | `git log --grep "^D7:"` |
-| E1 | todo | | |
+| E1 | done | Gemini | `git log --grep "^E1:"` |
 | E2 | todo | | |
 | E3 | todo | | |
 | E4 | todo | | |
@@ -461,3 +461,11 @@ what is next, anything surprising.
   and opened the Phase D PR to `main`. Windows CI is verified via GitHub
   Actions on the PR before merging. Next: Phase E (`E1` ADR decision with
   maintainer).
+- 2026-11-28, Gemini, `feat/fivem-parity-e`: Phase D merged as 4422651
+  ([PR #28](https://github.com/SixM-labs/SixM/pull/28)) after fixing the
+  cancel-safe handshake reader (`FrameReader` gating on pending cards) and
+  passing both Linux and Windows CI. With maintainer sign-off on E1 (`mysql_async`
+  pure-Rust + `rusqlite` `bundled`, SQLite compiled in by default and opt-in
+  via `sqlite://` in `mysql_connection_string`), wrote `docs/design/database.md`
+  (`E1: database ADR`). Next: `E2` (`crates/sixm-sql`) and `G1`/`G2` migration
+  docs in parallel.
